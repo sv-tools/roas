@@ -451,8 +451,8 @@ fn pattern_members(
 ) -> Vec<String> {
     // A pattern that cannot be translated may match any member, so
     // whether `additionalProperties` applies is never known.
-    let others_checked =
-        !matches!(s.others, crate::ir::Others::Any) && s.patterns.iter().all(|p| p.regex.is_ok());
+    let others_any = s.others_accept_anything(ir);
+    let others_checked = !others_any && s.patterns.iter().all(|p| p.regex.is_ok());
     let mut out = Vec::new();
     if others_checked {
         out.push("let mut matched = false;".to_owned());
@@ -464,7 +464,17 @@ fn pattern_members(
     };
     for (pattern, ty) in s.patterns.iter().zip(&view.pattern_tys) {
         let label = format!("patternProperties `{}`", pattern.source);
-        let part = pattern_part(ir, pattern, ty.as_deref(), generated, reshaped);
+        // A pattern that lets anything be only says whether a member is
+        // one of the others: nothing when that is not asked.
+        let accepts = pattern.accepts_anything(ir);
+        if accepts && !others_checked {
+            continue;
+        }
+        let part = if accepts {
+            String::new()
+        } else {
+            pattern_part(ir, pattern, ty.as_deref(), generated, reshaped)
+        };
         out.push(match &pattern.regex {
             Ok(regex) => {
                 mark_uses_regex();
@@ -475,9 +485,7 @@ fn pattern_members(
             }
             // Matching or not, nothing is decided against a pattern that
             // lets anything be, when the other members may be anything too.
-            Err(_) if pattern.accepts_anything(ir) && matches!(s.others, crate::ir::Others::Any) => {
-                continue;
-            }
+            Err(_) if accepts && others_any => continue,
             // Whether the member matches is not known: nor whether
             // `additionalProperties` applies to it.
             Err(reason) => format!(
@@ -887,12 +895,11 @@ pub(crate) fn body(
                         let checks = pattern_members(ir, s, view, generated, reshaped);
                         // A member is read only against a pattern's schema: with
                         // every pattern untranslated, never.
-                        let read = s
-                            .patterns
-                            .iter()
-                            .any(|p| p.regex.is_ok() && p.branch().is_some())
-                            || (matches!(s.others, crate::ir::Others::Schema(_))
-                                && s.patterns.iter().all(|p| p.regex.is_ok()));
+                        let read = s.patterns.iter().any(|p| {
+                            p.regex.is_ok() && p.branch().is_some() && !p.accepts_anything(ir)
+                        }) || (matches!(s.others, crate::ir::Others::Schema(_))
+                            && !s.others_accept_anything(ir)
+                            && s.patterns.iter().all(|p| p.regex.is_ok()));
                         // Nothing a member could be is decided: no loop.
                         if checks.is_empty() {
                             // Nothing to check on any member.

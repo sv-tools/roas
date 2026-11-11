@@ -797,6 +797,11 @@ fn validated_description() -> serde_json::Value {
             "PatHoldsPatterned": {"type": "object",
                 "properties": {"xInner": {"$ref": "#/components/schemas/PatBoth"}},
                 "patternProperties": {"^x": {"type": "object", "maxProperties": 0}}},
+            "PatAnyTranslated": {"type": "object", "patternProperties": {"^x": {}}},
+            "PatAnyBeside": {"type": "object", "additionalProperties": {},
+                "patternProperties": {"\\bx": {}}},
+            "PatAnyOthers": {"type": "object", "additionalProperties": {"type": "string"},
+                "patternProperties": {"^x": {}}},
             "PatClosedFalse": {"type": "object", "additionalProperties": false,
                 "patternProperties": {"^x-": false}},
             "PatFalse": {"type": "object",
@@ -1313,6 +1318,12 @@ fn main() {
     // A pattern that lets anything be decides nothing, translated or not.
     assert_eq!(report::<PatAnything>(r#"{"id":"a","z":1}"#), vec![]);
     assert_eq!(report::<PatRefAnything>(r#"{"id":"a","z":1}"#), vec![]);
+    assert_eq!(report::<PatAnyTranslated>(r#"{"x":1e400}"#), vec![]);
+    assert_eq!(report::<PatAnyBeside>(r#"{"x":1,"y":1}"#), vec![]);
+    // Matching a pattern that lets anything be still says the member is
+    // not one of the others.
+    assert_eq!(report::<PatAnyOthers>(r#"{"x":5,"y":"s"}"#), vec![]);
+    assert_eq!(report::<PatAnyOthers>(r#"{"y":5}"#), vec![v("/y")]);
     // A struct holding its pattern members as text keeps them exactly.
     assert_eq!(report::<PatHoldsPatterned>(r#"{"xInner":{"ab":"xy"}}"#), vec![v("/xInner")]);
     assert_eq!(report::<PatHoldsPatterned>(r#"{"xInner":{}}"#), vec![]);
@@ -1750,6 +1761,10 @@ func main() {
 	check(`{"xa":{"aa":"long"}}`, report[api.PatAliasRef](`{"xa":{"aa":"long"}}`), v("/xa/aa"))
 	check(`{"id":"a","z":1}`, report[api.PatAnything](`{"id":"a","z":1}`))
 	check(`{"id":"a","z":1}`, report[api.PatRefAnything](`{"id":"a","z":1}`))
+	check(`{"x":1e400}`, report[api.PatAnyTranslated](`{"x":1e400}`))
+	check(`{"x":1,"y":1}`, report[api.PatAnyBeside](`{"x":1,"y":1}`))
+	check(`{"x":5,"y":"s"}`, report[api.PatAnyOthers](`{"x":5,"y":"s"}`))
+	check(`{"y":5}`, report[api.PatAnyOthers](`{"y":5}`), v("/y"))
 	check(`{"xInner":{"ab":"xy"}}`, report[api.PatHoldsPatterned](`{"xInner":{"ab":"xy"}}`), v("/xInner"))
 	check(`{"xInner":{}}`, report[api.PatHoldsPatterned](`{"xInner":{}}`))
 	check(`{"x-a":1}`, report[api.PatClosedFalse](`{"x-a":1}`), v("/x-a"))

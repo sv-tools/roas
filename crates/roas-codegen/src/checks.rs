@@ -950,8 +950,7 @@ pub(crate) fn diagnostics(
                     push_token(&mut pointer, &pattern.source);
                     // A pattern that lets anything be, beside members that may
                     // be anything too, decides nothing: nothing is reported.
-                    let decides = !(pattern.accepts_anything(ir)
-                        && matches!(s.others, crate::ir::Others::Any));
+                    let decides = !(pattern.accepts_anything(ir) && s.others_accept_anything(ir));
                     if !opted_out(def)
                         && decides
                         && let Err(reason) = &pattern.regex

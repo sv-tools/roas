@@ -477,8 +477,8 @@ fn go_wide_of<'a>(ir: &crate::ir::Ir, tys: impl Iterator<Item = &'a TypeRef>, ra
 fn pattern_members(s: &crate::ir::StructDef, view: &TypeView, cx: &mut Context<'_>) -> Vec<String> {
     // A pattern that cannot be translated may match any member, so
     // whether `additionalProperties` applies is never known.
-    let others_checked =
-        !matches!(s.others, crate::ir::Others::Any) && s.patterns.iter().all(|p| p.regex.is_ok());
+    let others_any = s.others_accept_anything(cx.ir);
+    let others_checked = !others_any && s.patterns.iter().all(|p| p.regex.is_ok());
     let mut out = Vec::new();
     if others_checked {
         out.push("matched := false".to_owned());
@@ -490,7 +490,17 @@ fn pattern_members(s: &crate::ir::StructDef, view: &TypeView, cx: &mut Context<'
     };
     for (pattern, ty) in s.patterns.iter().zip(&view.pattern_tys) {
         let label = format!("patternProperties `{}`", pattern.source);
-        let part = pattern_part(pattern, ty.as_deref(), cx);
+        // A pattern that lets anything be only says whether a member is
+        // one of the others: nothing when that is not asked.
+        let accepts = pattern.accepts_anything(cx.ir);
+        if accepts && !others_checked {
+            continue;
+        }
+        let part = if accepts {
+            String::new()
+        } else {
+            pattern_part(pattern, ty.as_deref(), cx)
+        };
         out.push(match &pattern.regex {
             Ok(regex) => {
                 cx.needs.pattern = true;
@@ -502,9 +512,7 @@ fn pattern_members(s: &crate::ir::StructDef, view: &TypeView, cx: &mut Context<'
             }
             // Matching or not, nothing is decided against a pattern that
             // lets anything be, when the other members may be anything too.
-            Err(_) if pattern.accepts_anything(cx.ir) && matches!(s.others, crate::ir::Others::Any) => {
-                continue;
-            }
+            Err(_) if accepts && others_any => continue,
             // Whether the member matches is not known: nor whether
             // `additionalProperties` applies to it.
             Err(reason) => format!(
@@ -917,11 +925,11 @@ pub(crate) fn body(
                 let checks = pattern_members(s, view, cx);
                 // A member is read only against a pattern's schema: with
                 // every pattern untranslated, never.
-                let read = s
-                    .patterns
-                    .iter()
-                    .any(|p| p.regex.is_ok() && p.branch().is_some())
-                    || (matches!(s.others, crate::ir::Others::Schema(_))
+                let read =
+                    s.patterns.iter().any(|p| {
+                        p.regex.is_ok() && p.branch().is_some() && !p.accepts_anything(cx.ir)
+                    }) || (matches!(s.others, crate::ir::Others::Schema(_))
+                        && !s.others_accept_anything(cx.ir)
                         && s.patterns.iter().all(|p| p.regex.is_ok()));
                 let value = if read {
                     format!("value := v.{name}[name]; ")

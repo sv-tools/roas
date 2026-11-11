@@ -148,20 +148,7 @@ impl PatternDef {
     /// Whether the pattern's schema lets any member be: `{}` or `true`,
     /// written in place or behind references.
     pub(crate) fn accepts_anything(&self, ir: &Ir) -> bool {
-        fn any(ir: &Ir, ty: &TypeRef, depth: usize) -> bool {
-            match ty {
-                TypeRef::Any => true,
-                TypeRef::Nullable(inner) | TypeRef::Boxed(inner) => any(ir, inner, depth),
-                TypeRef::Named(id) if depth < 64 => ir.types.get(id).is_some_and(|def| {
-                    def.constraints == Constraints::default()
-                        && matches!(&def.kind, TypeKind::Newtype(t) | TypeKind::Alias(t) if any(ir, t, depth + 1))
-                }),
-                _ => false,
-            }
-        }
-        self.branch().is_some_and(|b| {
-            any(ir, &b.ty, 0) && b.constraints == Constraints::default() && !b.unchecked
-        })
+        self.branch().is_some_and(|b| accepts_anything(ir, b))
     }
 
     /// Whether the declared property `name` matches the pattern: `None`
@@ -174,6 +161,35 @@ impl PatternDef {
         match regex::Regex::new(regex) {
             Ok(re) => re.is_match(name).then_some(Ok(())),
             Err(_) => Some(Err("the pattern is too large to compile".to_owned())),
+        }
+    }
+}
+
+/// Whether `branch` lets any value be: `{}` or `true`, written in place or
+/// behind references.
+pub(crate) fn accepts_anything(ir: &Ir, branch: &Branch) -> bool {
+    fn any(ir: &Ir, ty: &TypeRef, depth: usize) -> bool {
+        match ty {
+            TypeRef::Any => true,
+            TypeRef::Nullable(inner) | TypeRef::Boxed(inner) => any(ir, inner, depth),
+            TypeRef::Named(id) if depth < 64 => ir.types.get(id).is_some_and(|def| {
+                def.constraints == Constraints::default()
+                    && matches!(&def.kind, TypeKind::Newtype(t) | TypeKind::Alias(t) if any(ir, t, depth + 1))
+            }),
+            _ => false,
+        }
+    }
+    any(ir, &branch.ty, 0) && branch.constraints == Constraints::default() && !branch.unchecked
+}
+
+impl StructDef {
+    /// Beside `patternProperties`, whether a member matching no pattern
+    /// may be anything.
+    pub(crate) fn others_accept_anything(&self, ir: &Ir) -> bool {
+        match &self.others {
+            Others::Any => true,
+            Others::Denied => false,
+            Others::Schema(b) => accepts_anything(ir, b),
         }
     }
 }
