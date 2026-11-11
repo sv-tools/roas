@@ -448,7 +448,7 @@ impl<'d> Run<'d> {
         // A workflow an entry before it ran on its way is not run again.
         if self
             .dependencies_done
-            .contains(&(doc, workflow.workflow_id.clone()))
+            .contains_key(&(doc, workflow.workflow_id.clone()))
         {
             self.roots.as_mut().expect("the roots").entries[at].state = State::Done(Vec::new());
             return Ok(true);

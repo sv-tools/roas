@@ -409,7 +409,10 @@ fn compile<'d>(
         ) {
             Ok(ordered) => queue = ordered,
             Err(error) => compiler.dependency_error(
-                &Site::workflow(index, &description.workflows[index]).field("dependsOn"),
+                &dependency_site(
+                    &Site::workflow(index, &description.workflows[index]),
+                    &description.workflows[index],
+                ),
                 error,
             ),
         }
@@ -463,6 +466,27 @@ enum PathPart {
 }
 
 /// Field names remain lexical; bracketed array indices sort numerically.
+/// Where a `dependsOn` cycle through `workflow` is reported: its own
+/// `dependsOn`, or, when it has none, the first step entry naming another
+/// workflow's step.
+fn dependency_site<'d>(site: &Site<'d>, workflow: &'d Workflow) -> Site<'d> {
+    if workflow.depends_on.is_empty()
+        && let Some((at, step, index)) = workflow.steps.iter().enumerate().find_map(|(at, step)| {
+            step.depends_on
+                .iter()
+                .position(|entry| run::other_step(workflow, entry).is_some())
+                .map(|index| (at, step, index))
+        })
+    {
+        return Site {
+            step: Some(step),
+            ..site.item("steps", at)
+        }
+        .item("dependsOn", index);
+    }
+    site.field("dependsOn")
+}
+
 fn path_order(path: &str) -> Vec<PathPart> {
     let mut parts = Vec::new();
     for (position, part) in path.split('[').enumerate() {
@@ -770,7 +794,11 @@ impl<'d> Compiler<'d> {
                 let Some((reference, step_id)) = run::other_step(workflow, entry) else {
                     continue;
                 };
-                let site = site.item("steps", at).item("dependsOn", index);
+                let site = Site {
+                    step: Some(step),
+                    ..site.item("steps", at)
+                }
+                .item("dependsOn", index);
                 match self.resolve_target(reference) {
                     Ok(Some((doc, found))) => {
                         let target = self.documents.workflow(doc, found);
@@ -794,7 +822,7 @@ impl<'d> Compiler<'d> {
         // Dependency cycles in a called/recovery workflow are invalid too,
         // including cycles that pass through another document.
         if let Err(error) = run::ordered_workflows(&self.documents, self.current, workflow) {
-            self.dependency_error(&site.field("dependsOn"), error);
+            self.dependency_error(&dependency_site(&site, workflow), error);
         }
         self.success_actions(&workflow.success_actions, &site.after(), "successActions");
         self.failure_actions(&workflow.failure_actions, &site.after(), "failureActions");

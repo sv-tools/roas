@@ -213,3 +213,69 @@ fn a_root_dependency_waits_for_the_workflow_its_steps_depend_on() {
     assert!(together(&[]));
     assert!(!together(&["$workflows.one.steps.a"]));
 }
+
+#[test]
+fn the_run_that_served_as_the_dependency_counts_not_a_later_call() {
+    let mut auth = json!({
+        "workflowId": "auth",
+        "inputs": { "type": "object", "properties": { "stop": { "type": "boolean" } } },
+        "steps": [step("a", &[]), step("b", &[])]
+    });
+    auth["steps"][0]["onSuccess"] = json!([{
+        "name": "stop",
+        "type": "end",
+        "criteria": [{ "condition": "$inputs.stop == true" }]
+    }]);
+    let description = description(json!([
+        {
+            "workflowId": "w",
+            "steps": [
+                {
+                    "stepId": "call",
+                    "workflowId": "auth",
+                    "parameters": [{ "name": "stop", "value": true }]
+                },
+                step("c", &["call", "$workflows.auth.steps.b"])
+            ]
+        },
+        auth,
+    ]));
+    for report in both(&description, "w", 4) {
+        assert!(report.is_success(), "{report}");
+        assert_eq!(
+            steps(&report),
+            [
+                ("auth", "a"),
+                ("auth", "b"),
+                ("auth", "a"),
+                ("w", "call"),
+                ("w", "c")
+            ]
+        );
+    }
+}
+
+#[test]
+fn a_circle_through_steps_alone_is_reported_at_the_step() {
+    let description = description(json!([
+        { "workflowId": "w", "steps": [step("a", &["$workflows.x.steps.b"])] },
+        { "workflowId": "x", "steps": [step("b", &["$workflows.w.steps.a"])] },
+    ]));
+    let error = prepare(&description, &options("w")).unwrap_err();
+    assert_eq!(
+        error.diagnostics[0].path, "#.workflows[0].steps[0].dependsOn[0]",
+        "{error}"
+    );
+}
+
+#[test]
+fn a_workflow_id_that_is_an_expression_is_not_one() {
+    let description = description(json!([
+        { "workflowId": "w", "steps": [step("c", &["$workflows.$x.steps.a"])] },
+    ]));
+    let error = execute(&description, &options("w"), &mut Fake::new()).unwrap_err();
+    assert!(
+        matches!(error, ExecutionError::UnknownStep { ref step, .. } if step == "$workflows.$x.steps.a"),
+        "got: {error}"
+    );
+}

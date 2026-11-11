@@ -46,9 +46,6 @@ pub(crate) struct Message {
 pub(crate) struct WorkflowState {
     pub inputs: Value,
     pub outputs: BTreeMap<String, Value>,
-    /// The steps that ran, passed or not, for a step of another workflow
-    /// that depends on one of them.
-    pub steps: BTreeSet<String>,
 }
 
 /// What a step has produced so far.
@@ -848,7 +845,6 @@ pub(crate) mod tests {
             WorkflowState {
                 inputs: json!({ "user": "ada" }),
                 outputs: BTreeMap::from([("token".to_owned(), json!("abc"))]),
-                ..WorkflowState::default()
             },
         )]);
         let fixture = Fixture {
@@ -903,7 +899,6 @@ pub(crate) mod tests {
                 WorkflowState {
                     inputs: json!({ "org.user": "ada" }),
                     outputs: BTreeMap::from([("org.token".to_owned(), json!("abc"))]),
-                    ..WorkflowState::default()
                 },
             )]),
             ..Fixture::default()
