@@ -75,8 +75,7 @@ One limit is worth stating: `enum` uniqueness compares numbers after the parser 
 Each version's `Document` can follow a `$ref` to the object it names, as long as the chain stays inside that document:
 
 ```rust
-use roas_asyncapi::common::Resolution;
-use roas_asyncapi::v3_1::Document;
+use roas_asyncapi::v3_1::{Document, Resolution};
 
 let doc: Document = serde_json::from_str(r##"{
     "asyncapi": "3.1.0",
@@ -114,7 +113,7 @@ let message = doc.resolve_message(&operation.messages[0]).found().unwrap();
 assert_eq!(message.name.as_deref(), Some("LightMeasured"));
 ```
 
-`RefOr::get_item(&doc)` takes the entry the model holds, where an inline item resolves to itself, and returns a `Resolution<T>`: `Found`, `Opaque` (the chain leaves the document, or lands somewhere the model does not hold as that kind), `Missing`, `Cycle`, `Unrecognized`, or `WrongKind`. `found()` gives the object and `problem()` says why a reference is a document bug, if it is one.
+`RefOr::get_item(&doc)` takes the entry the model holds, where an inline item resolves to itself, and returns a `Resolution<T>`: `Found`, `Opaque` (the chain leaves the document, or lands somewhere the model does not hold as that kind), `Missing`, `Cycle`, `Unrecognized`, or `WrongKind`. `found()` gives the object and `problem()` says why a reference is a document bug, if it is one. `Resolution` is `Copy` and comparable, and each version module re-exports it beside `RefOr`.
 
 `get_item` works for the kinds a version's `Document` implements `common::reference::ResolveReference<T>` for. Where the model holds a bare `Reference` instead of a `RefOr`, the `Document` has a method per kind:
 

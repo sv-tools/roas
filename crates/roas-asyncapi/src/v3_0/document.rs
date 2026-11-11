@@ -2544,28 +2544,17 @@ mod tests {
         .unwrap()
     }
 
-    /// A resolution's variant, by name, so outcomes compare in a table.
-    fn outcome<T>(resolution: &Resolution<'_, T>) -> &'static str {
-        match resolution {
-            Resolution::Found(_) => "found",
-            Resolution::Opaque => "opaque",
-            Resolution::Missing => "missing",
-            Resolution::Cycle => "cycle",
-            Resolution::Unrecognized => "unrecognized",
-            Resolution::WrongKind => "wrong kind",
-        }
+    /// The outcomes every kind shares that find nothing, by the key
+    /// that produces each.
+    fn unfound<T>() -> [(&'static str, Resolution<'static, T>); 5] {
+        [
+            ("outside", Resolution::Opaque),
+            ("ghost", Resolution::Missing),
+            ("loop", Resolution::Cycle),
+            ("wrong", Resolution::WrongKind),
+            ("malformed", Resolution::Unrecognized),
+        ]
     }
-
-    /// The outcomes every kind shares, by the key that produces each.
-    const OUTCOMES: [(&str, &str); 7] = [
-        ("real", "found"),
-        ("alias", "found"),
-        ("outside", "opaque"),
-        ("ghost", "missing"),
-        ("loop", "cycle"),
-        ("wrong", "wrong kind"),
-        ("malformed", "unrecognized"),
-    ];
 
     fn reference(target: &str) -> Reference {
         Reference {
@@ -2574,13 +2563,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_server_tells_every_outcome_apart() {
+    fn servers_resolve_to_every_outcome() {
         let doc = resolvable();
-        for (key, expected) in OUTCOMES {
-            let resolution = doc.servers[key].get_item(&doc);
-            assert_eq!(outcome(&resolution), expected, "server `{key}`");
-        }
-
         // An inline entry is itself; an alias is its target, whether
         // it is reached from an entry or from a bare `$ref`.
         let RefOr::Item(real) = &doc.servers["real"] else {
@@ -2593,29 +2577,29 @@ mod tests {
         ] {
             assert!(std::ptr::eq(found.expect("resolves"), real));
         }
+        for (key, expected) in unfound() {
+            let resolution = doc.servers[key].get_item(&doc);
+            assert_eq!(resolution, expected, "server `{key}`");
+        }
 
         for (target, expected) in [
-            ("./other.yaml#/servers/real", "opaque"),
-            ("#/servers/nope", "missing"),
-            ("#/components/servers/a", "cycle"),
-            ("#/channels/real", "wrong kind"),
+            ("./other.yaml#/servers/real", Resolution::Opaque),
+            ("#/servers/nope", Resolution::Missing),
+            ("#/components/servers/a", Resolution::Cycle),
+            ("#/channels/real", Resolution::WrongKind),
             // Neither external nor a pointer.
-            ("", "unrecognized"),
-            ("./other.yaml#bad", "unrecognized"),
+            ("", Resolution::Unrecognized),
+            // Another document, but not a pointer into it.
+            ("./other.yaml#bad", Resolution::Unrecognized),
         ] {
             let resolution = doc.resolve_server(&reference(target));
-            assert_eq!(outcome(&resolution), expected, "`{target}`");
+            assert_eq!(resolution, expected, "`{target}`");
         }
     }
 
     #[test]
-    fn resolve_channel_tells_every_outcome_apart() {
+    fn channels_resolve_to_every_outcome() {
         let doc = resolvable();
-        for (key, expected) in OUTCOMES {
-            let resolution = doc.channels[key].get_item(&doc);
-            assert_eq!(outcome(&resolution), expected, "channel `{key}`");
-        }
-
         let RefOr::Item(real) = &doc.channels["real"] else {
             panic!("inline");
         };
@@ -2627,107 +2611,130 @@ mod tests {
         ] {
             assert!(std::ptr::eq(found.expect("resolves"), real));
         }
+        for (key, expected) in unfound() {
+            let resolution = doc.channels[key].get_item(&doc);
+            assert_eq!(resolution, expected, "channel `{key}`");
+        }
 
         for (target, expected) in [
-            ("./other.yaml#/channels/real", "opaque"),
-            ("#/channels/nope", "missing"),
-            ("#/components/channels/a", "cycle"),
-            ("#/servers/real", "wrong kind"),
-            ("#/channels/bad~2escape", "unrecognized"),
+            ("./other.yaml#/channels/real", Resolution::Opaque),
+            ("#/channels/nope", Resolution::Missing),
+            ("#/components/channels/a", Resolution::Cycle),
+            ("#/servers/real", Resolution::WrongKind),
+            ("#/channels/bad~2escape", Resolution::Unrecognized),
         ] {
             let resolution = doc.resolve_channel(&reference(target));
-            assert_eq!(outcome(&resolution), expected, "`{target}`");
+            assert_eq!(resolution, expected, "`{target}`");
         }
     }
 
     #[test]
-    fn resolve_operation_tells_every_outcome_apart() {
+    fn operations_resolve_to_every_outcome() {
         let doc = resolvable();
-        for (key, expected) in OUTCOMES {
+        let RefOr::Item(real) = &doc.operations["real"] else {
+            panic!("inline");
+        };
+        for key in ["real", "alias"] {
+            let found = doc.operations[key].get_item(&doc).found();
+            assert!(std::ptr::eq(found.expect("resolves"), real), "`{key}`");
+        }
+        for (key, expected) in unfound() {
             let resolution = doc.operations[key].get_item(&doc);
-            assert_eq!(outcome(&resolution), expected, "operation `{key}`");
+            assert_eq!(resolution, expected, "operation `{key}`");
         }
 
         // What an operation names resolves in turn.
-        let operation = doc.operations["alias"]
-            .get_item(&doc)
-            .found()
-            .expect("root -> components -> root");
         let channel = doc
-            .resolve_channel(&operation.channel)
+            .resolve_channel(&real.channel)
             .found()
             .expect("a declared channel");
         assert_eq!(channel.address, Some(Some("root".to_owned())));
         let message = doc
-            .resolve_message(&operation.messages[0])
+            .resolve_message(&real.messages[0])
             .found()
             .expect("one of the channel's messages");
         assert_eq!(message.name.as_deref(), Some("Own"));
-        let reply = operation.reply.as_ref().expect("a reply");
+        let reply = real.reply.as_ref().expect("a reply");
         assert!(reply.get_item(&doc).found().is_some());
     }
 
     #[test]
-    fn resolve_reply_tells_every_outcome_apart() {
+    fn replies_resolve_to_every_outcome() {
         let doc = resolvable();
         let replies = &doc.components.as_ref().expect("components").replies;
-        for (key, expected) in OUTCOMES {
+        let RefOr::Item(real) = &replies["real"] else {
+            panic!("inline");
+        };
+        for key in ["real", "alias"] {
+            let found = replies[key].get_item(&doc).found();
+            assert!(std::ptr::eq(found.expect("resolves"), real), "`{key}`");
+        }
+        for (key, expected) in unfound() {
             let resolution = replies[key].get_item(&doc);
-            assert_eq!(outcome(&resolution), expected, "reply `{key}`");
+            assert_eq!(resolution, expected, "reply `{key}`");
         }
 
         // A reply declared inline on an operation is real, but only
         // `components` holds replies as objects of their own.
         let resolution = replies["elsewhere"].get_item(&doc);
-        assert_eq!(outcome(&resolution), "opaque");
+        assert_eq!(resolution, Resolution::Opaque);
 
         // Without `components` there is nowhere for a pointer to land.
         let alias = replies["alias"].clone();
         let mut bare = resolvable();
         bare.components = None;
-        assert_eq!(outcome(&alias.get_item(&bare)), "missing");
+        assert_eq!(alias.get_item(&bare), Resolution::Missing);
     }
 
     #[test]
-    fn resolve_message_tells_every_outcome_apart() {
+    fn messages_resolve_to_every_outcome() {
         let doc = resolvable();
         let messages = &doc.components.as_ref().expect("components").messages;
-        for (key, expected) in OUTCOMES {
-            let resolution = messages[key].get_item(&doc);
-            assert_eq!(outcome(&resolution), expected, "message `{key}`");
+        // An inline entry is itself, and so is whatever leads to it:
+        // an alias, or a channel's entry that is one.
+        let RefOr::Item(real) = &messages["real"] else {
+            panic!("inline");
+        };
+        for key in ["real", "alias", "ofChannelShared"] {
+            let found = messages[key].get_item(&doc).found();
+            assert!(std::ptr::eq(found.expect("resolves"), real), "`{key}`");
         }
-
         // A channel's own messages are reachable by pointer, in either
-        // channel map, and are followed on to a component.
-        for (key, name) in [
-            ("alias", "Component"),
-            ("ofChannel", "Own"),
-            ("ofChannelShared", "Component"),
-            ("ofReusable", "Reusable"),
-        ] {
-            let message = messages[key]
-                .get_item(&doc)
-                .found()
-                .unwrap_or_else(|| panic!("message `{key}` resolves"));
+        // channel map.
+        for (key, name) in [("ofChannel", "Own"), ("ofReusable", "Reusable")] {
+            let found = messages[key].get_item(&doc).found();
+            let message = found.unwrap_or_else(|| panic!("message `{key}` resolves"));
             assert_eq!(message.name.as_deref(), Some(name), "message `{key}`");
+        }
+        for (key, expected) in unfound() {
+            let resolution = messages[key].get_item(&doc);
+            assert_eq!(resolution, expected, "message `{key}`");
         }
 
         // A pointer does not dereference as it walks: a channel that
         // is only a `$ref` has no `messages` to step into.
         let resolution = messages["throughAlias"].get_item(&doc);
-        assert_eq!(outcome(&resolution), "missing");
+        assert_eq!(resolution, Resolution::Missing);
 
+        let own = doc.resolve_message(&reference("#/channels/real/messages/own"));
+        assert_eq!(own.found().and_then(|m| m.name.as_deref()), Some("Own"));
         for (target, expected) in [
-            ("#/channels/real/messages/own", "found"),
-            ("./other.yaml#/channels/real/messages/own", "opaque"),
-            ("#/channels/real/messages/nope", "missing"),
-            ("#/channels/nope/messages/own", "missing"),
-            ("#/components/channels/nope/messages/own", "missing"),
-            ("#/components/messages/a", "cycle"),
-            ("#/channels/real", "wrong kind"),
+            (
+                "./other.yaml#/channels/real/messages/own",
+                Resolution::Opaque,
+            ),
+            ("#/channels/real/messages/nope", Resolution::Missing),
+            ("#/channels/nope/messages/own", Resolution::Missing),
+            (
+                "#/components/channels/nope/messages/own",
+                Resolution::Missing,
+            ),
+            ("#/components/messages/a", Resolution::Cycle),
+            ("#/channels/real", Resolution::WrongKind),
+            ("./other.yaml#bad", Resolution::Unrecognized),
         ] {
             let resolution = doc.resolve_message(&reference(target));
-            assert_eq!(outcome(&resolution), expected, "`{target}`");
+            assert_eq!(resolution, expected, "`{target}`");
         }
 
         let mut bare = resolvable();
@@ -2737,7 +2744,7 @@ mod tests {
             "#/components/channels/reusable/messages/own",
         ] {
             let resolution = bare.resolve_message(&reference(target));
-            assert_eq!(outcome(&resolution), "missing", "`{target}`");
+            assert_eq!(resolution, Resolution::Missing, "`{target}`");
         }
     }
 }

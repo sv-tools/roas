@@ -119,7 +119,7 @@ impl Document {
                 reference: reference.to_owned(),
             };
             if reference.is_external() {
-                return Resolution::Opaque;
+                return Resolution::external(&reference.reference);
             }
             let Some(pointer) = reference.local_pointer() else {
                 return Resolution::Unrecognized;
@@ -175,7 +175,7 @@ impl Document {
         let mut seen: BTreeSet<String> = BTreeSet::new();
         loop {
             if current.is_external() {
-                return Resolution::Opaque;
+                return Resolution::external(&current.reference);
             }
             let Some(pointer) = current.local_pointer() else {
                 return Resolution::Unrecognized;
@@ -2389,10 +2389,13 @@ mod tests {
                 "real": { "url": "kafka://root", "protocol": "kafka" },
                 "alias": { "$ref": "#/components/servers/hop" },
                 "outside": { "$ref": "./other.yaml#/servers/real" },
+                "viaOutside": { "$ref": "#/servers/outside" },
                 "ghost": { "$ref": "#/components/servers/nope" },
                 "loop": { "$ref": "#/components/servers/a" },
                 "wrong": { "$ref": "#/components/messages/real" },
-                "malformed": { "$ref": "#/servers/bad~2escape" }
+                "malformed": { "$ref": "#/servers/bad~2escape" },
+                "badFragment": { "$ref": "./other.yaml#bad" },
+                "viaBadFragment": { "$ref": "#/servers/badFragment" }
             },
             "channels": {
                 "real": {
@@ -2405,10 +2408,13 @@ mod tests {
                 },
                 "alias": { "$ref": "#/components/channels/hop" },
                 "outside": { "$ref": "./other.yaml#/channels/real" },
+                "viaOutside": { "$ref": "#/channels/outside" },
                 "ghost": { "$ref": "#/channels/nope" },
                 "loop": { "$ref": "#/components/channels/a" },
                 "wrong": { "$ref": "#/servers/real" },
-                "malformed": { "$ref": "#/channels/bad~2escape" }
+                "malformed": { "$ref": "#/channels/bad~2escape" },
+                "badFragment": { "$ref": "./other.yaml#bad" },
+                "viaBadFragment": { "$ref": "#/channels/badFragment" }
             },
             "components": {
                 "servers": {
@@ -2427,154 +2433,182 @@ mod tests {
                     "inChannel": { "$ref": "#/channels/real/publish/message" },
                     "inOneOf": { "$ref": "#/channels/real/subscribe/message/oneOf/1" },
                     "outside": { "$ref": "./other.yaml#/messages/real" },
+                    "viaOutside": { "$ref": "#/components/messages/outside" },
                     "ghost": { "$ref": "#/components/messages/nope" },
+                    "loop": { "$ref": "#/components/messages/a" },
                     "a": { "$ref": "#/components/messages/b" },
                     "b": { "$ref": "#/components/messages/a" },
                     "wrong": { "$ref": "#/servers/real" },
-                    "malformed": { "$ref": "#/components/messages/bad~2escape" }
+                    "malformed": { "$ref": "#/components/messages/bad~2escape" },
+                    "badFragment": { "$ref": "./other.yaml#bad" },
+                    "viaBadFragment": { "$ref": "#/components/messages/badFragment" }
                 },
                 "securitySchemes": {
                     "real": { "type": "userPassword", "description": "declared" },
                     "alias": { "$ref": "#/components/securitySchemes/real" },
                     "outside": { "$ref": "./other.yaml#/schemes/real" },
+                    "viaOutside": { "$ref": "#/components/securitySchemes/outside" },
                     "ghost": { "$ref": "#/components/securitySchemes/nope" },
+                    "loop": { "$ref": "#/components/securitySchemes/a" },
                     "a": { "$ref": "#/components/securitySchemes/b" },
                     "b": { "$ref": "#/components/securitySchemes/a" },
                     "wrong": { "$ref": "#/servers/real" },
-                    "malformed": { "$ref": "#/components/securitySchemes/bad~2escape" }
+                    "malformed": { "$ref": "#/components/securitySchemes/bad~2escape" },
+                    "badFragment": { "$ref": "./other.yaml#bad" },
+                    "viaBadFragment": { "$ref": "#/components/securitySchemes/badFragment" }
                 }
             }
         }))
         .unwrap()
     }
 
-    /// A resolution's variant, by name, so outcomes compare in a table.
-    fn outcome<T>(resolution: &Resolution<'_, T>) -> &'static str {
-        match resolution {
-            Resolution::Found(_) => "found",
-            Resolution::Opaque => "opaque",
-            Resolution::Missing => "missing",
-            Resolution::Cycle => "cycle",
-            Resolution::Unrecognized => "unrecognized",
-            Resolution::WrongKind => "wrong kind",
-        }
+    /// The outcomes every kind shares that find nothing, by the key
+    /// that produces each.
+    fn unfound<T>() -> [(&'static str, Resolution<'static, T>); 8] {
+        [
+            // Another document, reached directly or through an alias.
+            ("outside", Resolution::Opaque),
+            ("viaOutside", Resolution::Opaque),
+            ("ghost", Resolution::Missing),
+            ("loop", Resolution::Cycle),
+            ("wrong", Resolution::WrongKind),
+            ("malformed", Resolution::Unrecognized),
+            // Another document, but not a pointer into it — which shows
+            // without fetching anything, however the chain got there.
+            ("badFragment", Resolution::Unrecognized),
+            ("viaBadFragment", Resolution::Unrecognized),
+        ]
     }
 
     #[test]
     fn resolve_channel_tells_every_outcome_apart() {
         let doc = resolvable();
-        for (key, expected) in [
-            ("real", "found"),
-            ("alias", "found"),
-            ("outside", "opaque"),
-            ("ghost", "missing"),
-            ("loop", "cycle"),
-            ("wrong", "wrong kind"),
-            ("malformed", "unrecognized"),
-        ] {
-            let resolution = doc.resolve_channel(&doc.channels[key]);
-            assert_eq!(outcome(&resolution), expected, "channel `{key}`");
-        }
-
         // An item without a `$ref` is itself; an alias is its target.
         let real = &doc.channels["real"];
-        assert!(std::ptr::eq(
-            doc.resolve_channel(real).found().expect("inline"),
-            real
-        ));
-        assert!(std::ptr::eq(
-            doc.resolve_channel(&doc.channels["alias"])
-                .found()
-                .expect("root -> components -> root"),
-            real
-        ));
+        for key in ["real", "alias"] {
+            let found = doc.resolve_channel(&doc.channels[key]).found();
+            assert!(std::ptr::eq(found.expect("resolves"), real), "`{key}`");
+        }
+        for (key, expected) in unfound() {
+            let resolution = doc.resolve_channel(&doc.channels[key]);
+            assert_eq!(resolution, expected, "channel `{key}`");
+        }
     }
 
     #[test]
-    fn resolve_server_tells_every_outcome_apart() {
+    fn get_item_tells_every_server_outcome_apart() {
         let doc = resolvable();
-        for (key, expected) in [
-            ("real", "found"),
-            ("alias", "found"),
-            ("outside", "opaque"),
-            ("ghost", "missing"),
-            ("loop", "cycle"),
-            ("wrong", "wrong kind"),
-            ("malformed", "unrecognized"),
-        ] {
-            let resolution = doc.servers[key].get_item(&doc);
-            assert_eq!(outcome(&resolution), expected, "server `{key}`");
-        }
-
         // An inline entry is itself; an alias is its target.
         let RefOr::Item(real) = &doc.servers["real"] else {
             panic!("inline");
         };
         for key in ["real", "alias"] {
-            let server = doc.servers[key].get_item(&doc).found().expect("resolves");
-            assert!(std::ptr::eq(server, real), "server `{key}`");
+            let found = doc.servers[key].get_item(&doc).found();
+            assert!(std::ptr::eq(found.expect("resolves"), real), "`{key}`");
+        }
+        for (key, expected) in unfound() {
+            let resolution = doc.servers[key].get_item(&doc);
+            assert_eq!(resolution, expected, "server `{key}`");
         }
     }
 
     #[test]
-    fn resolve_message_tells_every_outcome_apart() {
+    fn get_item_tells_every_message_outcome_apart() {
         let doc = resolvable();
         let messages = &doc.components.as_ref().expect("components").messages;
-        for (key, expected) in [
-            ("real", Ok("Component")),
-            ("alias", Ok("Component")),
-            // A message hanging off a channel's operation is reachable
-            // by pointer, through `oneOf` and on to a component.
-            ("inChannel", Ok("Inline")),
-            ("inOneOf", Ok("Component")),
-            ("outside", Err("opaque")),
-            ("ghost", Err("missing")),
-            ("a", Err("cycle")),
-            ("wrong", Err("wrong kind")),
-            ("malformed", Err("unrecognized")),
-        ] {
+        let RefOr::Item(real) = &messages["real"] else {
+            panic!("inline");
+        };
+        for key in ["real", "alias", "inOneOf"] {
+            let found = messages[key].get_item(&doc).found();
+            assert!(std::ptr::eq(found.expect("resolves"), real), "`{key}`");
+        }
+        // A message hanging off a channel's operation is reachable by
+        // pointer.
+        let inline = messages["inChannel"].get_item(&doc).found();
+        assert_eq!(inline.expect("resolves").name.as_deref(), Some("Inline"));
+
+        for (key, expected) in unfound() {
             let resolution = messages[key].get_item(&doc);
-            let got = match resolution {
-                Resolution::Found(message) => Ok(message.name.as_deref().expect("named")),
-                other => Err(outcome(&other)),
-            };
-            assert_eq!(got, expected, "message `{key}`");
+            assert_eq!(resolution, expected, "message `{key}`");
         }
     }
 
     #[test]
-    fn resolve_security_scheme_tells_every_outcome_apart() {
+    fn get_item_tells_every_security_scheme_outcome_apart() {
         let doc = resolvable();
         let schemes = &doc
             .components
             .as_ref()
             .expect("components")
             .security_schemes;
-        for (key, expected) in [
-            ("real", "found"),
-            ("alias", "found"),
-            ("outside", "opaque"),
-            ("ghost", "missing"),
-            ("a", "cycle"),
-            ("wrong", "wrong kind"),
-            ("malformed", "unrecognized"),
-        ] {
-            let resolution = schemes[key].get_item(&doc);
-            assert_eq!(outcome(&resolution), expected, "scheme `{key}`");
-        }
-
         let RefOr::Item(real) = &schemes["real"] else {
             panic!("inline");
         };
         for key in ["real", "alias"] {
-            let scheme = schemes[key].get_item(&doc).found().expect("resolves");
-            assert!(std::ptr::eq(scheme, real), "scheme `{key}`");
+            let found = schemes[key].get_item(&doc).found();
+            assert!(std::ptr::eq(found.expect("resolves"), real), "`{key}`");
+        }
+        for (key, expected) in unfound() {
+            let resolution = schemes[key].get_item(&doc);
+            assert_eq!(resolution, expected, "scheme `{key}`");
         }
 
         // Without `components` there is nowhere for a pointer to land.
         let mut bare = resolvable();
         let alias = schemes["alias"].clone();
         bare.components = None;
-        assert_eq!(outcome(&alias.get_item(&bare)), "missing");
+        assert_eq!(alias.get_item(&bare), Resolution::Missing);
+    }
+
+    /// One reference of each kind, written directly and behind an
+    /// alias, all naming `target`.
+    fn pointing_outside(target: &str) -> serde_json::Value {
+        json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": {
+                "direct": { "$ref": target },
+                "aliased": { "$ref": "#/components/servers/hop" }
+            },
+            "channels": {
+                "direct": { "$ref": target },
+                "aliased": { "$ref": "#/components/channels/hop" },
+                "user": {
+                    "publish": { "message": { "$ref": target } },
+                    "subscribe": { "message": { "$ref": "#/components/messages/hop" } }
+                }
+            },
+            "components": {
+                "servers": { "hop": { "$ref": target } },
+                "channels": { "hop": { "$ref": target } },
+                "messages": { "hop": { "$ref": target } }
+            }
+        })
+    }
+
+    #[test]
+    fn an_external_reference_is_judged_by_its_fragment_alone() {
+        // A pointer into another document is accepted, directly or at
+        // the end of a chain: what it names is not here to be checked.
+        let errors = errors_for(pointing_outside("./other.yaml#/somewhere"));
+        assert!(errors.is_empty(), "got: {errors:?}");
+
+        // A fragment that is not a pointer is wrong whatever the other
+        // document holds, and a channel or a message says so just as a
+        // server does.
+        let mut errors = errors_for(pointing_outside("./other.yaml#bad"));
+        errors.sort();
+        assert_eq!(
+            errors,
+            [
+                "#.channels.aliased.$ref: channel `#/components/channels/hop` is not a usable JSON Pointer",
+                "#.channels.direct.$ref: channel `./other.yaml#bad` is not a usable JSON Pointer",
+                "#.channels.user.publish.message.$ref: message `./other.yaml#bad` is not a usable JSON Pointer",
+                "#.channels.user.subscribe.message.$ref: message `#/components/messages/hop` is not a usable JSON Pointer",
+                "#.servers.aliased.$ref: server `#/components/servers/hop` is not a usable JSON Pointer",
+                "#.servers.direct.$ref: server `./other.yaml#bad` is not a usable JSON Pointer",
+            ],
+        );
     }
 }

@@ -29,7 +29,10 @@ use std::collections::BTreeSet;
 ///
 /// The enum is `#[non_exhaustive]`: match with a wildcard arm, or use
 /// [`found`](Resolution::found) when only the object matters.
-#[derive(Debug)]
+///
+/// Two resolutions are equal when they are the same variant and, for
+/// [`Found`](Resolution::Found), the objects compare equal.
+#[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Resolution<'a, T> {
     /// Resolved to a concrete object in this document — the inline
@@ -46,7 +49,8 @@ pub enum Resolution<'a, T> {
     /// The chain revisits a pointer it already followed.
     Cycle,
     /// Not a usable pointer: an empty reference, malformed escapes, or
-    /// a fragment that is not a JSON Pointer at all.
+    /// a fragment that is not a JSON Pointer at all — in this document
+    /// or, since it shows without fetching anything, in another one.
     Unrecognized,
     /// A pointer at a location the document itself declares to be some
     /// *other* kind of object — a server where a channel belongs, say —
@@ -58,7 +62,31 @@ pub enum Resolution<'a, T> {
     WrongKind,
 }
 
+// By hand: a `Resolution` holds a `&T`, so it is `Copy` whatever `T`
+// is, and a derive would ask for `T: Copy`.
+impl<T> Clone for Resolution<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for Resolution<'_, T> {}
+
 impl<'a, T> Resolution<'a, T> {
+    /// What a reference into another document resolves to here:
+    /// [`Opaque`](Resolution::Opaque), unless its fragment is not a
+    /// usable JSON Pointer — which shows without fetching anything.
+    ///
+    /// The same judgement [`follow_tracked`] makes, for the v2.6
+    /// resolvers that walk their own chains.
+    #[cfg(feature = "v2_6")]
+    pub(crate) fn external(reference: &str) -> Self {
+        match Terminus::parse(reference) {
+            Some(_) => Resolution::Opaque,
+            None => Resolution::Unrecognized,
+        }
+    }
+
     /// The object, if the reference resolved inside this document.
     ///
     /// Takes `self` so the borrow is the document's, not this
