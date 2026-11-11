@@ -50,8 +50,8 @@
 //! [`execute_with_messages`] — XPath criteria and
 //! selectors without the `xpath` feature (and, with it, XPath versions
 //! Arazzo does not name, XPath payload replacement targets, and the XPath
-//! functions it refuses), and parallel `dependsOn`
-//! execution beyond an AsyncAPI receive listening in the background. Unsupported execution capabilities are reported when
+//! functions it refuses), and running the workflows a workflow depends on
+//! together (steps run together under [`Options::parallel`]). Unsupported execution capabilities are reported when
 //! reached, or statically by preparation. The optional `input-validation` feature supports
 //! offline JSON Schema 2020-12 when [`Options::input_validation`] enables it.
 //! Plans compile schemas; each run validates its actual bound inputs at entry.
@@ -99,7 +99,8 @@ mod xpath;
 pub use criterion::CriterionError;
 pub use expression::ExpressionError;
 pub use http::{
-    AsyncHttpClient, ClientError, HttpClient, HttpRequest, HttpResponse, SendFuture, SleepFuture,
+    AsyncHttpClient, ClientError, HttpClient, HttpRequest, HttpResponse, RequestId, SendFuture,
+    SleepFuture,
 };
 pub use input::{InputError, InputValidation, InputViolation};
 pub use message::{
@@ -124,6 +125,7 @@ pub use select::SelectError;
 pub use client::Client;
 
 use roas_arazzo::v1_1::Description;
+use std::pin::Pin;
 
 /// Run a workflow, performing every request with `client`.
 ///
@@ -275,7 +277,9 @@ impl<M: MessageClient + ?Sized> Carrier for Messages<'_, M> {
                 client.unsubscribe(subscription);
                 Carried::Nothing
             }
-            Progress::Send(_) | Progress::Wait(_) | Progress::Done(_) => Carried::Nothing,
+            Progress::Send(_) | Progress::Await | Progress::Wait(_) | Progress::Done(_) => {
+                Carried::Nothing
+            }
         })
     }
 
@@ -321,12 +325,16 @@ fn drive_loop<C: HttpClient + ?Sized>(
 ) -> Result<ExecutionReport, ExecutionFailure> {
     loop {
         match run.advance().map_err(|error| run.failure(error))? {
+            // One at a time: each request is answered before the next
+            // advance, so the run never has to wait on one in flight.
             Progress::Send(request) => {
                 let response = client
                     .send(&request)
                     .map_err(|error| run.failure(run.client_failure(error)))?;
-                run.supply(response).map_err(|error| run.failure(error))?;
+                run.supply_to(request.id, response)
+                    .map_err(|error| run.failure(error))?;
             }
+            Progress::Await => unreachable!("every request is answered before the next advance"),
             Progress::Wait(duration) => std::thread::sleep(duration),
             Progress::Done(report) => return Ok(*report),
             progress => {
@@ -414,19 +422,54 @@ pub(crate) async fn drive_async_with<
     result
 }
 
+/// Wait for whichever request in flight is answered first, and take it out.
+async fn first_answered<F: Future<Output = Result<HttpResponse, ClientError>>>(
+    flying: &mut Vec<(RequestId, Pin<Box<F>>)>,
+) -> (RequestId, Result<HttpResponse, ClientError>) {
+    std::future::poll_fn(|context| {
+        for at in 0..flying.len() {
+            if let std::task::Poll::Ready(result) = flying[at].1.as_mut().poll(context) {
+                let (id, _) = flying.swap_remove(at);
+                return std::task::Poll::Ready((id, result));
+            }
+        }
+        std::task::Poll::Pending
+    })
+    .await
+}
+
 async fn drive_async_loop<C: AsyncHttpClient + ?Sized, M: AsyncMessageClient + ?Sized>(
     run: &mut Run<'_>,
     client: &mut C,
     mut messages: Option<&mut AsyncMessages<'_, M>>,
 ) -> Result<ExecutionReport, ExecutionFailure> {
+    // Requests in flight, with the id of each.
+    let mut flying = Vec::new();
     loop {
         match run.advance().map_err(|error| run.failure(error))? {
             Progress::Send(request) => {
-                let response = client
-                    .send(&request)
-                    .await
-                    .map_err(|error| run.failure(run.client_failure(error)))?;
-                run.supply(response).map_err(|error| run.failure(error))?;
+                let id = request.id;
+                let client = &*client;
+                flying.push((id, Box::pin(async move { client.send(&request).await })));
+                // Ask for another while the run may have one more in flight.
+                if run.takes_more() {
+                    continue;
+                }
+                let (id, result) = first_answered(&mut flying).await;
+                let response = result.map_err(|error| run.failure(run.client_failure(error)))?;
+                run.supply_to(id, response)
+                    .map_err(|error| run.failure(error))?;
+                let wanted = run.in_flight();
+                flying.retain(|(id, _)| wanted.contains(id));
+            }
+            Progress::Await => {
+                let (id, result) = first_answered(&mut flying).await;
+                let response = result.map_err(|error| run.failure(run.client_failure(error)))?;
+                run.supply_to(id, response)
+                    .map_err(|error| run.failure(error))?;
+                // Whatever the run abandoned is not waited for.
+                let wanted = run.in_flight();
+                flying.retain(|(id, _)| wanted.contains(id));
             }
             Progress::Wait(duration) => client.sleep(duration).await,
             Progress::Done(report) => return Ok(*report),
@@ -454,7 +497,8 @@ async fn drive_async_loop<C: AsyncHttpClient + ?Sized, M: AsyncMessageClient + ?
                         run.deliver(message).map_err(|error| run.failure(error))?;
                     }
                     Progress::Unsubscribe(subscription) => messages.unsubscribe(subscription),
-                    Progress::Send(_) | Progress::Wait(_) | Progress::Done(_) => {}
+                    Progress::Send(_) | Progress::Await | Progress::Wait(_) | Progress::Done(_) => {
+                    }
                 }
             }
         }

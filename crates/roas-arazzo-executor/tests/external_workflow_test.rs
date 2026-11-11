@@ -109,11 +109,11 @@ fn trace(report: &ExecutionReport) -> Vec<(Option<String>, String, String, u32, 
         .collect()
 }
 
-fn urls(client: &Fake) -> Vec<&str> {
+fn urls(client: &Fake) -> Vec<String> {
     client
         .sent()
-        .iter()
-        .map(|request| request.url.as_str())
+        .into_iter()
+        .map(|request| request.url)
         .collect()
 }
 

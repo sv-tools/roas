@@ -640,6 +640,7 @@ pub(crate) mod tests {
     pub(crate) fn exchange() -> Exchange {
         Exchange {
             request: HttpRequest {
+                id: crate::http::RequestId::default(),
                 method: "GET".to_owned(),
                 url: "https://api.example.com/pets/7".to_owned(),
                 headers: vec![("Authorization".to_owned(), "Bearer abc".to_owned())],

@@ -313,8 +313,8 @@ fn a_retry_can_run_another_step_first_and_come_back() {
 
     let report = execute(&description, &options(), &mut client).expect("the workflow runs");
 
-    let asked: Vec<&str> = client
-        .sent()
+    let sent = client.sent();
+    let asked: Vec<&str> = sent
         .iter()
         .map(|request| request.url.rsplit('/').next().expect("a path"))
         .collect();

@@ -364,6 +364,16 @@ pub enum ExecutionError {
         /// Its URL.
         url: String,
     },
+    /// [`Run::supply`](crate::Run::supply) was called while several
+    /// requests were in flight, so it cannot tell which one the response
+    /// answers.
+    #[error(
+        "{count} requests are in flight — hand each response to `Run::supply_to` with its request's id"
+    )]
+    InFlight {
+        /// How many requests are in flight.
+        count: usize,
+    },
     /// A terminal engine error already stopped this run. Its partial report
     /// remains available; start another run to execute again.
     #[error("the run already stopped after an engine error")]
