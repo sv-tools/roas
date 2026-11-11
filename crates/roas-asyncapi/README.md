@@ -145,7 +145,7 @@ The `publish` / `subscribe` inversion is the migration trap worth naming: 2.6's 
 
 ## Scope
 
-The model and its validators are the whole surface. Out of scope for this release:
+The model, its validators and document-local `$ref` resolution are the whole surface. Out of scope for this release:
 
 - **`$ref` resolution across documents.** No other document is ever loaded, by the validator or by `RefOr::get_item` and the `resolve_*` methods. A resolver returns `Resolution::Opaque` for an external `$ref`, or `Resolution::Unrecognized` when its fragment is not a JSON Pointer. `ErrorOnExternalReference` asks the validator for a self-contained document.
 - **Trait merging.** `message.traits` and `operation.traits` are parsed and validated, not applied.

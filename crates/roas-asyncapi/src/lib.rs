@@ -73,14 +73,15 @@
 //!
 //! ## Scope
 //!
-//! The document model and its validators are the whole surface: this
-//! crate does not resolve `$ref`s across files, apply message /
-//! operation traits, or type protocol bindings. Cross-reference checks
-//! therefore run on document-local pointers only — see
+//! The document model, its validators and document-local `$ref`
+//! resolution are the whole surface: this crate does not resolve
+//! `$ref`s across files, apply message / operation traits, or type
+//! protocol bindings. Cross-reference checks therefore run on
+//! document-local pointers only — see
 //! [`ValidationOptions`](validation::ValidationOptions) to require a
 //! self-contained document instead.
 //!
-//! Document-local resolution is available to callers as well.
+//! The same resolution is open to callers.
 //! [`RefOr::get_item`](common::reference::RefOr::get_item) takes a
 //! version's `Document` and returns a
 //! [`Resolution`](common::Resolution): the item itself, the object at
