@@ -197,22 +197,35 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                 match kind {
                     ValueKind::Integer(_) => {
                         // Exactly, as integers; a fraction is no integer's value.
-                        let mut set: Vec<i128> =
-                            values.iter().filter_map(checks::exact_integer).collect();
-                        set.sort_unstable();
-                        set.dedup();
+                        // One written as a float past 2^53, read as one,
+                        // stands for any integer near it: equal to it is
+                        // undecided.
+                        let ints = |held: bool| {
+                            let mut set: Vec<i128> = values
+                                .iter()
+                                .filter(|n| checks::integer_held(n) == held)
+                                .filter_map(checks::exact_integer)
+                                .collect();
+                            set.sort_unstable();
+                            set.dedup();
+                            set.iter().map(i128::to_string).collect::<Vec<_>>().join(", ")
+                        };
+                        let (held, unheld) = (ints(true), ints(false));
                         let violation = format!(
                             "{r}.violation({p}, format!(\"{{}} is not {what}\", {v}.0));"
                         );
-                        out.push(if set.is_empty() {
+                        let missed = if unheld.is_empty() {
                             violation
                         } else {
-                            let list = set
-                                .iter()
-                                .map(i128::to_string)
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            format!("if ![{list}].contains(&{int}) {{ {violation} }}")
+                            format!(
+                                "if [{unheld}].contains(&{int}) {{ {r}.unevaluated({p}, {:?}); }} else {{ {violation} }}",
+                                format!("{keyword} {literal}: a listed value was read as a float, which does not tell the integers near it apart")
+                            )
+                        };
+                        out.push(if held.is_empty() {
+                            missed
+                        } else {
+                            format!("if ![{held}].contains(&{int}) {{ {missed} }}")
                         });
                     }
                     ValueKind::Number(FloatWidth::Float) => {

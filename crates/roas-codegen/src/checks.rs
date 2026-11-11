@@ -1309,11 +1309,16 @@ pub(crate) fn f64_holds(n: &Number) -> bool {
 /// and the other one around it too when `f` is exactly halfway between
 /// them, where reading through an `f64` may round either way.
 pub(crate) fn f32_candidates(f: f64) -> Vec<f32> {
-    // Past the largest float32 but below the halfway point to the next
-    // power of two, a literal decodes to the largest float32; at or past
-    // it, it does not decode at all.
+    // Past the largest float32 up to the halfway point to the next power
+    // of two, a literal decodes to the largest float32; past that, it does
+    // not decode at all, so nothing is equal to it.
     if f.is_finite() && (f as f32).is_infinite() {
-        return vec![f32::MAX.copysign(f as f32)];
+        let halfway = f64::from(f32::MAX) + 2f64.powi(103);
+        return if f.abs() <= halfway {
+            vec![f32::MAX.copysign(f as f32)]
+        } else {
+            Vec::new()
+        };
     }
     let (below, above) = f32_neighbours(f);
     if below != above && f - f64::from(below) == f64::from(above) - f {
@@ -1321,6 +1326,16 @@ pub(crate) fn f32_candidates(f: f64) -> Vec<f32> {
     } else {
         vec![f as f32]
     }
+}
+
+/// Whether `n`, an integer, is known as written: an integer token, or a
+/// float read exactly (`exact-numbers`), or one small enough that every
+/// integer near it is a float too.
+pub(crate) fn integer_held(n: &Number) -> bool {
+    n.is_i64()
+        || n.is_u64()
+        || cfg!(feature = "exact-numbers")
+        || n.as_f64().is_some_and(|f| f.abs() < 2f64.powi(53))
 }
 
 /// The integer `n` is, when it is one.
@@ -1366,6 +1381,22 @@ pub(crate) fn decimal(n: &Number) -> Option<(i128, u32)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_float_listed_past_the_float32_range_decodes_to_the_largest_or_nothing() {
+        assert_eq!(super::f32_candidates(3.4028235677973366e38), [f32::MAX]);
+        assert_eq!(super::f32_candidates(-3.4028235677973366e38), [-f32::MAX]);
+        assert!(super::f32_candidates(1e39).is_empty());
+    }
+
+    #[test]
+    fn an_integer_read_as_a_float_past_2_53_is_not_held() {
+        let big: Number = serde_json::from_str("9007199254740992.0").unwrap();
+        let int: Number = serde_json::from_str("9007199254740993").unwrap();
+        let small: Number = serde_json::from_str("2.0").unwrap();
+        assert!(super::integer_held(&int) && super::integer_held(&small));
+        assert_eq!(super::integer_held(&big), cfg!(feature = "exact-numbers"));
+    }
+
     #[test]
     fn f64_holds_a_number_only_as_written() {
         for (text, holds) in [

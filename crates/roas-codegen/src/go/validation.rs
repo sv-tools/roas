@@ -182,26 +182,49 @@ fn render(
                     ValueKind::Integer(_) => {
                         // Exactly, as integers; a fraction is no integer's
                         // value, nor is one past every int64.
-                        let mut set: Vec<i64> = values
-                            .iter()
-                            .filter_map(checks::exact_integer)
-                            .filter_map(|n| i64::try_from(n).ok())
-                            .collect();
-                        set.sort_unstable();
-                        set.dedup();
+                        // One written as a float past 2^53, read as one,
+                        // stands for any integer near it: equal to it is
+                        // undecided.
+                        let ints = |held: bool| {
+                            let mut set: Vec<i64> = values
+                                .iter()
+                                .filter(|n| checks::integer_held(n) == held)
+                                .filter_map(checks::exact_integer)
+                                .filter_map(|n| i64::try_from(n).ok())
+                                .collect();
+                            set.sort_unstable();
+                            set.dedup();
+                            set
+                        };
+                        let held = ints(true);
+                        let unheld: Vec<i64> =
+                            ints(false).into_iter().filter(|n| !held.contains(n)).collect();
+                        let list = |set: &[i64]| {
+                            set.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")
+                        };
                         let violation = format!(
                             "{r}.violation({p}, fmt.Sprintf({}, int64({e})))",
                             lit(&format!("%d is not {what}"))
                         );
-                        out.push(if set.is_empty() {
-                            violation
-                        } else {
-                            let list = set
-                                .iter()
-                                .map(i64::to_string)
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            format!("switch int64({e}) {{ case {list}: default: {violation} }}")
+                        let unevaluated = format!(
+                            "{r}.unevaluated({p}, {})",
+                            lit(&format!("{keyword} {literal}: a listed value was read as a float, which does not tell the integers near it apart"))
+                        );
+                        out.push(match (held.is_empty(), unheld.is_empty()) {
+                            (true, true) => violation,
+                            (false, true) => format!(
+                                "switch int64({e}) {{ case {}: default: {violation} }}",
+                                list(&held)
+                            ),
+                            (true, false) => format!(
+                                "switch int64({e}) {{ case {}: {unevaluated}; default: {violation} }}",
+                                list(&unheld)
+                            ),
+                            (false, false) => format!(
+                                "switch int64({e}) {{ case {}: case {}: {unevaluated}; default: {violation} }}",
+                                list(&held),
+                                list(&unheld)
+                            ),
                         });
                     }
                     ValueKind::Number(FloatWidth::Float) => {

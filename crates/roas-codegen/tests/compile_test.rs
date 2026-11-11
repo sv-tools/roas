@@ -651,6 +651,7 @@ fn validated_description() -> serde_json::Value {
             "FloatTenth": {"type": "number", "format": "float", "enum": [0.1]},
             "FloatEdge": {"type": "number", "format": "float", "enum": [3.4028235677973366e38]},
             "FloatHalf": {"type": "number", "format": "float", "enum": [1.0000000596046448]},
+            "FloatHuge": {"type": "number", "format": "float", "enum": [1e39]},
             "IntOrNull": {"type": "object", "properties": {"n": {"type": ["integer", "null"], "enum": [1, null]}}},
             "Narrow": {"type": "integer", "format": "int32", "enum": [-5, 3000000000i64, 5]},
             "NumConst": {"type": "object", "properties": {"c": {"type": "number", "const": 1.5}}},
@@ -1172,6 +1173,8 @@ fn main() {
     assert_eq!(report::<FloatHalf>("1"), vec![u("")]);
     assert_eq!(report::<FloatHalf>("1.0000001"), vec![u("")]);
     assert_eq!(report::<FloatHalf>("1.0000002"), vec![v("")]);
+    // Past the halfway point, a listed value decodes to nothing.
+    assert_eq!(report::<FloatHuge>("3.4028235e38"), vec![v("")]);
     assert_eq!(report::<IntOrNull>(r#"{"n":null}"#), vec![]);
     assert_eq!(report::<IntOrNull>(r#"{"n":1}"#), vec![]);
     assert_eq!(report::<IntOrNull>(r#"{"n":2}"#), vec![v("/n")]);
@@ -1727,6 +1730,7 @@ func main() {
 	check(`1`, report[api.FloatHalf](`1`), u(""))
 	check(`1.0000001`, report[api.FloatHalf](`1.0000001`), u(""))
 	check(`1.0000002`, report[api.FloatHalf](`1.0000002`), v(""))
+	check(`3.4028235e38`, report[api.FloatHuge](`3.4028235e38`), v(""))
 	check(`{"n":null}`, report[api.IntOrNull](`{"n":null}`))
 	check(`{"n":1}`, report[api.IntOrNull](`{"n":1}`))
 	check(`{"n":2}`, report[api.IntOrNull](`{"n":2}`), v("/n"))
