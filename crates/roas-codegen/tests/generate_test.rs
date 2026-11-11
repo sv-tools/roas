@@ -1504,3 +1504,52 @@ fn a_go_import_may_use_a_pattern_helper_name_when_no_pattern_is_generated() {
     }));
     generate(&doc, &config).expect("no pattern helper is declared");
 }
+
+#[test]
+fn a_go_import_may_not_shadow_a_pattern_helper_that_is_generated() {
+    let refused = |toml: &str, components: serde_json::Value| {
+        let config = ConfigFile::from_toml(toml, Path::new("/"))
+            .unwrap()
+            .merge(target(Target::Go))
+            .build()
+            .unwrap();
+        match generate(&document(components), &config) {
+            Err(GenerateError::Config(message)) => {
+                assert!(message.contains("already imports"), "{message}")
+            }
+            other => panic!("{:?}", other.map(|g| g.diagnostics)),
+        }
+    };
+    let closed = serde_json::json!({
+        "Ext": {"type": "object", "additionalProperties": false,
+            "properties": {"when": {"type": "string", "format": "date-time"}},
+            "patternProperties": {"^x-": {"type": "string"}}}
+    });
+    for name in ["patterns", "matchPattern", "memberMatches"] {
+        refused(
+            &format!(
+                "[substitutions.date-time.go]\nname = \"{name}.T\"\nimport = \"example.com/x/{name}\"\n"
+            ),
+            closed.clone(),
+        );
+    }
+    // A `pattern` check declares the cache too, but not `memberMatches`.
+    let checked = serde_json::json!({
+        "Code": {"type": "object", "properties": {
+            "c": {"type": "string", "pattern": "^[a-z]+$"},
+            "when": {"type": "string", "format": "date-time"}}}
+    });
+    refused(
+        "validation = true\n[substitutions.date-time.go]\nname = \"matchPattern.T\"\nimport = \"example.com/x/matchPattern\"\n",
+        checked.clone(),
+    );
+    let config = ConfigFile::from_toml(
+        "validation = true\n[substitutions.date-time.go]\nname = \"memberMatches.T\"\nimport = \"example.com/x/memberMatches\"\n",
+        Path::new("/"),
+    )
+    .unwrap()
+    .merge(target(Target::Go))
+    .build()
+    .unwrap();
+    generate(&document(checked), &config).expect("`memberMatches` is not declared");
+}

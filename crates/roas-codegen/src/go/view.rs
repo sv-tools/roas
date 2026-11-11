@@ -49,15 +49,9 @@ const VALIDATION_NAMES: &[&str] = &[
     "zero",
 ];
 
-/// The names the pattern support declares, reserved only when it is
-/// generated.
-const PATTERN_NAMES: &[&str] = &[
-    "matchPattern",
-    "memberMatches",
-    "patterns",
-    "matched",
-    "compiled",
-];
+/// The package-level names the pattern support declares, reserved only
+/// when it is generated.
+const PATTERN_NAMES: &[&str] = &["matchPattern", "patterns"];
 
 const TEMPLATE_NAMES: &[&str] = &[
     "decodeOptions",
@@ -121,7 +115,7 @@ pub(crate) struct SupportView {
     pub isolated: Vec<String>,
     /// Generated validation is on: the report types and `Validator`.
     pub validation: bool,
-    /// A `pattern` is checked: `matchPattern`.
+    /// A pattern is matched, by validation or at decode: `matchPattern`.
     pub patterns: bool,
     /// A struct lets in only members matching a pattern: `memberMatches`.
     pub member_patterns: bool,
@@ -343,6 +337,9 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             for local in PATTERN_NAMES {
                 used.insert(local, "a name the generated code declares");
             }
+        }
+        if builder.support.member_patterns {
+            used.insert("memberMatches", "a name the generated code declares");
         }
         if config.validation {
             for local in VALIDATION_NAMES {

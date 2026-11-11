@@ -7,17 +7,18 @@ use crate::ir::{Additional, Branch, TypeDef, TypeKind, TypeRef};
 use crate::rust::view::TypeView;
 
 thread_local! {
-    /// Whether a `pattern` check was rendered since the last
-    /// [`take_uses_regex`]: the generated code then needs `regex`.
+    /// Whether a regex was rendered since the last [`take_uses_regex`] —
+    /// a `pattern` check, or patterns checked at decode: the generated code
+    /// then needs `regex`.
     static USES_REGEX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Whether a `pattern` check was rendered since the last call; resets it.
 /// The generated code compiles a regex, so it needs `regex`.
 pub(crate) fn mark_uses_regex() {
     USES_REGEX.with(|flag| flag.set(true));
 }
 
+/// Whether a regex was rendered since the last call; resets it.
 pub(crate) fn take_uses_regex() -> bool {
     USES_REGEX.with(|flag| flag.replace(false))
 }
