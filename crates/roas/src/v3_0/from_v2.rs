@@ -1065,8 +1065,8 @@ fn walk_generic_object(
             "components" => walk_components(v, body_param_names, form_param_names),
             "paths" => walk_paths(v, body_param_names, form_param_names),
             // A media-type map, keyed by whatever `consumes` / `produces`
-            // listed.
-            "content" => walk(v, body_param_names, form_param_names, Pos::NamedMap),
+            // listed, and a header map, keyed by header names.
+            "content" | "headers" => walk(v, body_param_names, form_param_names, Pos::NamedMap),
             // ExampleObject's instance value, and the example /
             // examples carriers on MediaType / Parameter / Header.
             // Skip recursion entirely — none of these hold schemas.
@@ -2177,6 +2177,34 @@ mod tests {
                 content["application/json"]["schema"]["discriminator"],
                 serde_json::json!({"propertyName": "kind"}),
                 "{path}: {value}"
+            );
+        }
+    }
+
+    /// A response header's name is not a keyword either: its `default`
+    /// stays instance data whatever the header is called.
+    #[test]
+    fn header_names_are_not_read_as_keywords() {
+        for name in ["control", "content", "paths", "components", "schema"] {
+            let raw = serde_json::json!({
+                "swagger": "2.0",
+                "info": {"title": "t", "version": "1"},
+                "paths": {"/p": {"get": {"responses": {"200": {
+                    "description": "d",
+                    "headers": {name: {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "default": [{"$ref": "#/definitions/X"}]
+                    }}
+                }}}}},
+                "definitions": {"X": {"type": "object"}},
+            });
+            let v3: V3Spec = serde_json::from_value::<V2Spec>(raw).unwrap().into();
+            let value = serde_json::to_value(&v3).unwrap();
+            let header = &value["paths"]["/p"]["get"]["responses"]["200"]["headers"][name];
+            assert_eq!(
+                header["schema"]["default"][0]["$ref"], "#/definitions/X",
+                "{name}: {value}"
             );
         }
     }
