@@ -876,6 +876,36 @@ impl<'d> Run<'d> {
         }
     }
 
+    /// Hand back the failure of a client that could not carry out request
+    /// `id`. It stops the run with what [`Run::client_failure`] makes of
+    /// it — unless the request belongs to one of the workflows the one
+    /// asked for depends on, running alongside one listed before it
+    /// (see [`Options::parallel`]): then the error waits for that one,
+    /// which may yet stop the run first, as it would one after another.
+    /// `Ok` means the run goes on for now; advance again.
+    ///
+    /// # Errors
+    ///
+    /// The error that stops the run.
+    pub fn supply_failure(
+        &mut self,
+        id: RequestId,
+        error: crate::ClientError,
+    ) -> Result<(), ExecutionError> {
+        if self.halted {
+            return Err(ExecutionError::Stopped);
+        }
+        let error = self.client_failure(error);
+        let result = match self.roots.as_ref().and_then(|roots| roots.route(id)) {
+            Some(at) => self.fail_root(at, error),
+            None => Err(error),
+        };
+        if result.is_err() {
+            self.halted = true;
+        }
+        result
+    }
+
     /// Every subscription still open — listening, or done with but not yet
     /// handed out as [`Progress::Unsubscribe`]. A caller driving the run
     /// itself closes these when it stops early, as the `execute` functions

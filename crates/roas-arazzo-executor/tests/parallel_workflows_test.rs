@@ -3,8 +3,9 @@
 
 use roas_arazzo::v1_1::Description;
 use roas_arazzo_executor::{
-    AsyncHttpClient, ExecutionError, ExecutionReport, HttpRequest, HttpResponse, Options, Outcome,
-    Progress, RequestId, Run, SendFuture, SleepFuture, execute, execute_async, testing::Fake,
+    AsyncHttpClient, ClientError, ExecutionError, ExecutionReport, HttpRequest, HttpResponse,
+    Options, Outcome, Progress, RequestId, Run, SendFuture, SleepFuture, execute, execute_async,
+    execute_async_with_report, testing::Fake,
 };
 use serde_json::{Value, json};
 use std::sync::Mutex;
@@ -129,7 +130,8 @@ fn independent_dependencies_are_in_flight_together() {
         run.supply_to(b.id, reply(2)),
         Err(ExecutionError::NotWaiting)
     ));
-    assert_eq!(steps(&run.partial_report()), [("two", "b")]);
+    // Shown once `one`, listed before it, is.
+    assert!(steps(&run.partial_report()).is_empty());
     assert!(matches!(run.advance(), Ok(Progress::Await(None))));
     run.supply_to(a.id, reply(1)).unwrap();
 
@@ -270,6 +272,8 @@ fn a_dependency_that_reads_another_waits_for_it() {
     let mut reader = workflow("two", "b", &[]);
     reader["steps"][0]["parameters"] =
         json!([{ "name": "x", "in": "query", "value": "$workflows.one.outputs.v" }]);
+    // The first one reads it.
+    let mut reads = true;
     for workflows in [
         // Reads it.
         json!([
@@ -300,9 +304,10 @@ fn a_dependency_that_reads_another_waits_for_it() {
         run.supply_to(a.id, reply(1)).unwrap();
         let b = send(&mut run);
         assert_eq!(path(&b), "b");
-        if b.url.contains('?') {
-            assert!(b.url.ends_with("b?x=1"), "{}", b.url);
+        if reads {
+            assert!(b.url.ends_with("/b?x=1"), "{}", b.url);
         }
+        reads = false;
     }
 }
 
@@ -535,20 +540,22 @@ fn every_driver_reports_what_one_after_another_does() {
     };
     let one_by_one = execute(&description, &options(), &mut replies()).unwrap();
     let blocking = execute(&description, &options().parallel(4), &mut replies()).unwrap();
-    let parallel = futures_lite_block_on(execute_async(
+    // `a` is answered after `b`.
+    let mut late = Late::slow("a", Duration::from_millis(50));
+    let parallel = block_on(execute_async(
         &description,
         &options().parallel(4),
-        &mut replies(),
+        &mut late,
     ))
     .unwrap();
+    assert_eq!(late.sent(), ["a", "b", "c"]);
     for report in [&blocking, &parallel] {
         assert_eq!(steps(report), steps(&one_by_one));
-        assert_eq!(report.outputs, one_by_one.outputs);
         assert_eq!(report.outcome, one_by_one.outcome);
     }
 }
 
-fn futures_lite_block_on<F: std::future::Future>(future: F) -> F::Output {
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -556,18 +563,40 @@ fn futures_lite_block_on<F: std::future::Future>(future: F) -> F::Output {
         .block_on(future)
 }
 
-/// Answers `b` late, and `a` with a failure the first time.
+/// Answers `b` late, and `a` with a failure the first time — unless told
+/// otherwise.
 struct Late {
+    slow: &'static str,
     late: Duration,
+    retried: bool,
+    /// A request the client fails to carry out, after `late`.
+    broken: Option<&'static str>,
     sent: Mutex<Vec<(String, Instant)>>,
 }
 
 impl Late {
     fn new(late: Duration) -> Self {
         Self {
+            slow: "b",
             late,
+            retried: true,
+            broken: None,
             sent: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Answers `slow` late, and everything at once and well.
+    fn slow(slow: &'static str, late: Duration) -> Self {
+        Self {
+            slow,
+            retried: false,
+            ..Self::new(late)
+        }
+    }
+
+    fn sent(self) -> Vec<String> {
+        let sent = self.sent.into_inner().unwrap();
+        sent.into_iter().map(|(path, _)| path).collect()
     }
 }
 
@@ -580,10 +609,17 @@ impl AsyncHttpClient for Late {
                 sent.push((path.clone(), Instant::now()));
                 sent.iter().filter(|(sent, _)| *sent == path).count() == 1
             };
-            if path == "b" {
+            if path == self.slow || Some(path.as_str()) == self.broken {
                 tokio::time::sleep(self.late).await;
             }
-            let status = if path == "a" && first { 503 } else { 200 };
+            if Some(path.as_str()) == self.broken {
+                return Err(ClientError::new("boom"));
+            }
+            let status = if self.retried && path == "a" && first {
+                503
+            } else {
+                200
+            };
             Ok(HttpResponse::json(status, &json!({ "v": 1 })))
         })
     }
@@ -633,4 +669,149 @@ async fn the_async_driver_takes_an_answer_that_comes_before_the_retry() {
     assert_eq!(order, ["a", "b", "a", "c"]);
     // The retry still waited as long as it asked.
     assert!(sent[2].1 - sent[0].1 >= Duration::from_millis(200));
+}
+
+#[test]
+fn a_client_failure_waits_for_the_workflows_listed_before_it() {
+    let description = description(json!([
+        { "workflowId": "t", "dependsOn": ["one", "two", "three"], "steps": [{ "stepId": "d", "operationId": "d" }] },
+        workflow("one", "a", &[]),
+        workflow("two", "b", &[]),
+        workflow("three", "c", &[]),
+    ]));
+    let options = options().parallel(4);
+    let mut run = Run::start(&description, &options).unwrap();
+    let a = send(&mut run);
+    let b = send(&mut run);
+    let c = send(&mut run);
+    run.supply_to(c.id, reply(3)).unwrap();
+    run.supply_failure(b.id, ClientError::new("boom")).unwrap();
+    assert_eq!(run.in_flight(), vec![a.id]);
+    // What one after another would have recorded: `three` would not run.
+    assert!(steps(&run.partial_report()).is_empty());
+    run.supply_to(a.id, reply(1)).unwrap();
+    let error = run.advance().unwrap_err();
+    assert!(matches!(error, ExecutionError::Client(_)), "got: {error}");
+    assert_eq!(steps(&run.partial_report()), [("one", "a")]);
+
+    // Outside the workflows run together, it stops the run at once.
+    let mut run = Run::start(&description, &options).unwrap();
+    for _ in 0..3 {
+        let request = send(&mut run);
+        run.supply_to(request.id, reply(1)).unwrap();
+    }
+    let d = send(&mut run);
+    assert!(matches!(
+        run.supply_failure(d.id, ClientError::new("boom")),
+        Err(ExecutionError::Client(_))
+    ));
+    assert!(matches!(
+        run.supply_failure(d.id, ClientError::new("boom")),
+        Err(ExecutionError::Stopped)
+    ));
+}
+
+#[tokio::test]
+async fn the_async_driver_reports_the_error_one_after_another_would() {
+    // `two` stops the run when advanced past `b`, while `three` is in flight.
+    let mut failing = workflow("two", "b", &[]);
+    failing["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "stepId": "b2", "operationId": "b", "parameters": [{ "name": "x", "in": "query", "value": "$inputs.nope" }] }));
+    let stopping = description(json!([
+        { "workflowId": "t", "dependsOn": ["one", "two", "three"], "steps": [{ "stepId": "d", "operationId": "d" }] },
+        workflow("one", "a", &[]),
+        failing,
+        workflow("three", "c", &[]),
+    ]));
+    let mut late = Late::slow("c", Duration::from_millis(100));
+    let failure = execute_async_with_report(&stopping, &options().parallel(4), &mut late)
+        .await
+        .unwrap_err();
+    assert!(
+        failure.error.to_string().contains("nope"),
+        "got: {}",
+        failure.error
+    );
+
+    // A client that fails: what one after another would have recorded.
+    let description = description(json!([
+        { "workflowId": "t", "dependsOn": ["one", "two", "three"], "steps": [{ "stepId": "d", "operationId": "d" }] },
+        workflow("one", "a", &[]),
+        workflow("two", "b", &[]),
+        workflow("three", "c", &[]),
+    ]));
+    let mut late = Late::slow("a", Duration::from_millis(100));
+    late.broken = Some("b");
+    late.late = Duration::from_millis(30);
+    let failure = execute_async_with_report(&description, &options().parallel(4), &mut late)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(failure.error, ExecutionError::Client(_)),
+        "got: {}",
+        failure.error
+    );
+    let report = failure.report.expect("a partial report");
+    assert_eq!(steps(&report), [("one", "a")]);
+}
+
+#[test]
+fn a_retry_too_far_off_to_count_to_does_not_panic() {
+    let description = retrying(1e19);
+    let options = options().parallel(4);
+    let mut run = Run::start(&description, &options).unwrap();
+    let a = send(&mut run);
+    let _b = send(&mut run);
+    run.supply_to(a.id, HttpResponse::json(503, &json!({})))
+        .unwrap();
+    assert!(matches!(run.advance(), Ok(Progress::Await(Some(_)))));
+}
+
+#[test]
+fn steps_given_back_count_for_the_others() {
+    // `one` sends three steps together; the first fails and ends it,
+    // giving back the two still in flight. One after another, the run
+    // takes 1 + 2 + 1 = 4 steps.
+    let description = description(json!([
+        { "workflowId": "t", "dependsOn": ["one", "two"], "steps": [{ "stepId": "t1", "operationId": "d" }] },
+        {
+            "workflowId": "one",
+            "steps": [
+                { "stepId": "s1", "operationId": "a" },
+                { "stepId": "s2", "operationId": "c" },
+                { "stepId": "s3", "operationId": "d" }
+            ]
+        },
+        {
+            "workflowId": "two",
+            "steps": [
+                { "stepId": "b1", "operationId": "b", "outputs": { "v": "$response.body#/v" } },
+                { "stepId": "b2", "operationId": "b", "parameters": [{ "name": "x", "in": "query", "value": "$steps.b1.outputs.v" }] }
+            ]
+        },
+    ]));
+    let options = options().parallel(8).max_steps(4);
+    let mut run = Run::start(&description, &options).unwrap();
+    let s1 = send(&mut run);
+    let _s2 = send(&mut run);
+    let _s3 = send(&mut run);
+    let b1 = send(&mut run);
+    assert_eq!(path(&b1), "b");
+    run.supply_to(b1.id, reply(2)).unwrap();
+    // Out of steps while `one` may yet give some back.
+    assert!(matches!(run.advance(), Ok(Progress::Await(None))));
+    run.supply_to(s1.id, HttpResponse::json(500, &json!({})))
+        .unwrap();
+    let b2 = send(&mut run);
+    assert!(b2.url.ends_with("/b?x=2"), "{}", b2.url);
+    run.supply(reply(2)).unwrap();
+    assert_eq!(path(&send(&mut run)), "d");
+    run.supply(reply(4)).unwrap();
+    let report = done(&mut run);
+    assert_eq!(
+        steps(&report),
+        [("one", "s1"), ("two", "b1"), ("two", "b2"), ("t", "t1")]
+    );
 }

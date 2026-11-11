@@ -329,11 +329,11 @@ fn drive_loop<C: HttpClient + ?Sized>(
             // One at a time: each request is answered before the next
             // advance, so the run never has to wait on one in flight.
             Progress::Send(request) => {
-                let response = client
-                    .send(&request)
-                    .map_err(|error| run.failure(run.client_failure(error)))?;
-                run.supply_to(request.id, response)
-                    .map_err(|error| run.failure(error))?;
+                match client.send(&request) {
+                    Ok(response) => run.supply_to(request.id, response),
+                    Err(error) => run.supply_failure(request.id, error),
+                }
+                .map_err(|error| run.failure(error))?;
             }
             Progress::Await(_) => unreachable!("every request is answered before the next advance"),
             Progress::Wait(duration) => std::thread::sleep(duration),
@@ -468,9 +468,11 @@ fn answer<F>(
     flying: &mut Vec<(RequestId, Pin<Box<F>>)>,
     (id, result): (RequestId, Result<HttpResponse, ClientError>),
 ) -> Result<(), ExecutionFailure> {
-    let response = result.map_err(|error| run.failure(run.client_failure(error)))?;
-    run.supply_to(id, response)
-        .map_err(|error| run.failure(error))?;
+    match result {
+        Ok(response) => run.supply_to(id, response),
+        Err(error) => run.supply_failure(id, error),
+    }
+    .map_err(|error| run.failure(error))?;
     let wanted = run.in_flight();
     flying.retain(|(id, _)| wanted.contains(id));
     Ok(())
@@ -502,7 +504,14 @@ async fn drive_async_loop<C: AsyncHttpClient + ?Sized, M: AsyncMessageClient + ?
     // Requests in flight, with the id of each.
     let mut flying = Vec::new();
     loop {
-        match run.advance().map_err(|error| run.failure(error))? {
+        let progress = run.advance().map_err(|error| run.failure(error))?;
+        // Advancing may abandon requests too: a workflow run alongside
+        // others stopped.
+        if !flying.is_empty() {
+            let wanted = run.in_flight();
+            flying.retain(|(id, _)| wanted.contains(id));
+        }
+        match progress {
             Progress::Send(request) => {
                 let id = request.id;
                 let client = &*client;

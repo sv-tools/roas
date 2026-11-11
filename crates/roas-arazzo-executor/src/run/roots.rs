@@ -23,7 +23,10 @@ use crate::runtime_syntax::Root;
 use roas_arazzo::v1_1::Workflow;
 use serde_json::Value;
 use std::collections::BTreeSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// A hundred years.
+const FOREVER: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
 
 /// The root dependencies of a run, while they run.
 pub(super) struct Roots<'d> {
@@ -187,17 +190,40 @@ impl<'d> Roots<'d> {
             .collect()
     }
 
-    /// What the entries recorded so far, in the order they are listed.
+    /// What one after another would have recorded so far: every entry
+    /// done in the order they are listed, then what the first that is not
+    /// has. What the ones after it did is not shown — had the run stopped
+    /// there, they would not have run.
     pub(super) fn records(&self) -> Vec<StepRecord> {
         let mut records = Vec::new();
         for entry in &self.entries {
             match &entry.state {
-                State::Running { run, .. } => records.extend(run.records.iter().cloned()),
-                State::Done(done) | State::Failed(done) => records.extend(done.iter().cloned()),
-                State::Waiting | State::Abandoned => {}
+                State::Done(done) => records.extend(done.iter().cloned()),
+                State::Running { run, .. } => {
+                    records.extend(run.records.iter().cloned());
+                    break;
+                }
+                State::Failed(done) => {
+                    records.extend(done.iter().cloned());
+                    break;
+                }
+                State::Waiting | State::Abandoned => break,
             }
         }
         records
+    }
+
+    /// The entry a request in flight belongs to.
+    pub(super) fn route(&self, id: RequestId) -> Option<usize> {
+        self.in_flight()
+            .contains(&id)
+            .then(|| {
+                self.routes
+                    .iter()
+                    .find(|(route, _, _)| *route == id)
+                    .map(|(_, at, _)| *at)
+            })
+            .flatten()
     }
 
     /// Whether `at` can start: every entry it waits for is done.
@@ -306,7 +332,8 @@ impl<'d> Run<'d> {
                 if self.start_root(at)? {
                     continue 'pass;
                 }
-                let full = self.flying() >= self.options.limits.parallel;
+                let flying = self.flying();
+                let full = flying >= self.options.limits.parallel;
                 let total = self.taken + self.roots.as_ref().map_or(0, Roots::taken);
                 let left = self.options.limits.steps.saturating_sub(total);
                 let roots = self.roots.as_mut().expect("root dependencies to run");
@@ -320,7 +347,10 @@ impl<'d> Run<'d> {
                     }
                     *asleep = None;
                 }
-                if full {
+                // Out of steps, the branch waits while anything is in
+                // flight: a workflow that ends gives back the steps it
+                // still had in flight.
+                if full || (left == 0 && flying > 0) {
                     continue;
                 }
                 run.cap = run.taken + left;
@@ -334,7 +364,11 @@ impl<'d> Run<'d> {
                     }
                     Ok(Progress::Await(_)) => {}
                     Ok(Progress::Wait(wait)) => {
-                        let until = Instant::now() + wait;
+                        // A wait too long to count to is one that does not end.
+                        let until = Instant::now()
+                            .checked_add(wait)
+                            .or_else(|| Instant::now().checked_add(FOREVER))
+                            .unwrap_or_else(Instant::now);
                         *asleep = Some(until);
                         wake = Some(wake.map_or(until, |wake| wake.min(until)));
                     }
@@ -416,7 +450,11 @@ impl<'d> Run<'d> {
 
     /// Entry `at` stopped with `error`. Those listed after it would not
     /// have run; those before it still might stop the run first.
-    fn fail_root(&mut self, at: usize, error: ExecutionError) -> Result<(), ExecutionError> {
+    pub(super) fn fail_root(
+        &mut self,
+        at: usize,
+        error: ExecutionError,
+    ) -> Result<(), ExecutionError> {
         let roots = self.roots.as_mut().expect("root dependencies to run");
         let records = match std::mem::replace(&mut roots.entries[at].state, State::Abandoned) {
             State::Running { run, .. } => run.records,
