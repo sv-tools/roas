@@ -258,14 +258,70 @@ fn the_run_that_served_as_the_dependency_counts_not_a_later_call() {
 #[test]
 fn a_circle_through_steps_alone_is_reported_at_the_step() {
     let description = description(json!([
-        { "workflowId": "w", "steps": [step("a", &["$workflows.x.steps.b"])] },
+        {
+            "workflowId": "w",
+            "steps": [
+                step("c", &["$workflows.y.steps.c"]),
+                step("a", &["$workflows.x.steps.b"])
+            ]
+        },
         { "workflowId": "x", "steps": [step("b", &["$workflows.w.steps.a"])] },
+        { "workflowId": "y", "steps": [step("c", &[])] },
     ]));
     let error = prepare(&description, &options("w")).unwrap_err();
-    assert_eq!(
-        error.diagnostics[0].path, "#.workflows[0].steps[0].dependsOn[0]",
+    let paths: Vec<_> = error.diagnostics.iter().map(|d| d.path.as_str()).collect();
+    assert!(
+        paths.contains(&"#.workflows[0].steps[1].dependsOn[0]")
+            && !paths
+                .iter()
+                .any(|path| path.starts_with("#.workflows[0].steps[0]")),
         "{error}"
     );
+}
+
+#[test]
+fn an_unknown_workflow_a_step_names_is_reported_at_that_entry_alone() {
+    let description = description(json!([
+        {
+            "workflowId": "w",
+            "dependsOn": ["y"],
+            "steps": [step("a", &["$workflows.y.steps.c"]), step("b", &["$workflows.nope.steps.d"])]
+        },
+        { "workflowId": "y", "steps": [step("c", &[])] },
+    ]));
+    let error = prepare(&description, &options("w")).unwrap_err();
+    let paths: Vec<_> = error.diagnostics.iter().map(|d| d.path.as_str()).collect();
+    assert_eq!(paths, ["#.workflows[0].steps[1].dependsOn[0]"], "{error}");
+}
+
+#[test]
+fn a_step_not_run_waits_for_steps_in_flight_before_stopping() {
+    let mut auth = json!({ "workflowId": "auth", "steps": [step("a", &[]), step("b", &[])] });
+    auth["steps"][0]["onSuccess"] = json!([{ "name": "stop", "type": "end" }]);
+    let description = description(json!([
+        { "workflowId": "w", "steps": [step("c", &[]), step("b", &["$workflows.auth.steps.b"])] },
+        auth,
+    ]));
+    let options = options("w").parallel(4);
+    for error in [
+        prepare(&description, &options)
+            .unwrap()
+            .execute(&mut Fake::new().reply(200, &json!({})).reply(200, &json!({})))
+            .unwrap_err()
+            .to_string(),
+        execute(
+            &description,
+            &options,
+            &mut Fake::new().reply(200, &json!({})).reply(200, &json!({})),
+        )
+        .unwrap_err()
+        .to_string(),
+    ] {
+        assert!(
+            error.contains("step `b` of workflow `auth`"),
+            "got: {error}"
+        );
+    }
 }
 
 #[test]

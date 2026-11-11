@@ -1837,7 +1837,8 @@ impl<'d> Run<'d> {
     }
 
     /// Whether every step of another workflow that step `index` depends
-    /// on ran — passed or not — the last time its workflow ran.
+    /// on ran — passed or not — in the run of its workflow that served as
+    /// the dependency.
     fn other_steps_ran(&self, frame: &Frame<'d>, index: usize) -> Result<(), ExecutionError> {
         for entry in &frame.workflow.steps[index].depends_on {
             let Some((reference, step_id)) = other_step(frame.workflow, entry) else {

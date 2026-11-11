@@ -757,7 +757,10 @@ fn other_steps_of(workflow: &v1_1::Workflow) -> Vec<&str> {
         .filter(|entry| {
             entry.contains(".steps.")
                 && !entry.starts_with(&own)
-                && (entry.starts_with("$workflows.") || entry.starts_with("$sourceDescriptions."))
+                && (entry.starts_with("$sourceDescriptions.")
+                    || entry
+                        .strip_prefix("$workflows.")
+                        .is_some_and(|rest| !rest.starts_with('$')))
         })
         .collect();
     entries.sort_unstable();
@@ -4070,7 +4073,8 @@ workflows:
                             "findPet",
                             "$workflows.buyPet.steps.findPet",
                             "$workflows.authenticate.steps.login",
-                            "$workflows.authenticate.steps.login"
+                            "$workflows.authenticate.steps.login",
+                            "$workflows.$x.steps.login"
                         ]
                     }]
                 }, {
