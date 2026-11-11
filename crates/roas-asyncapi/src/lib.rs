@@ -93,7 +93,9 @@
 //! `resolve_channel` and `resolve_message`; a v2.6 channel item carries
 //! its own `$ref` and is followed with the v2.6
 //! `Document::resolve_channel`. Nothing is loaded, so a `$ref` into
-//! another file is reported as opaque rather than followed.
+//! another file is reported as opaque rather than followed — or as
+//! unrecognized when its fragment is not a JSON Pointer, which shows
+//! without loading anything.
 //!
 //! ## Versions
 //!

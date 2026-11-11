@@ -174,11 +174,13 @@ impl Document {
     /// `servers`, say — through both `#/servers/…` and
     /// `#/components/servers/…`.
     ///
-    /// Resolution is document-local: a `$ref` into another document is
-    /// [`Resolution::Opaque`], and nothing is loaded. So is a local
-    /// pointer at a place the model does not hold as a server, such as
-    /// a server-shaped `x-` extension. For a `RefOr<Server>` use
-    /// [`RefOr::get_item`].
+    /// Resolution is document-local: nothing is loaded, so a `$ref`
+    /// into another document is [`Resolution::Opaque`] — or
+    /// [`Resolution::Unrecognized`] when its fragment is not a JSON
+    /// Pointer, which shows without loading anything. A local pointer
+    /// at a place the model does not hold as a server, such as a
+    /// server-shaped `x-` extension, is `Opaque` too. For a
+    /// `RefOr<Server>` use [`RefOr::get_item`].
     pub fn resolve_server(&self, reference: &Reference) -> Resolution<'_, Server> {
         self.resolve(
             reference,
@@ -193,8 +195,10 @@ impl Document {
     /// `channel` — through both `#/channels/…` and
     /// `#/components/channels/…`.
     ///
-    /// Resolution is document-local: a `$ref` into another document is
-    /// [`Resolution::Opaque`], and nothing is loaded. For a
+    /// Resolution is document-local: nothing is loaded, so a `$ref`
+    /// into another document is [`Resolution::Opaque`] — or
+    /// [`Resolution::Unrecognized`] when its fragment is not a JSON
+    /// Pointer, which shows without loading anything. For a
     /// `RefOr<Channel>` use [`RefOr::get_item`].
     ///
     /// A local pointer at a place the model does not hold as a channel
@@ -257,8 +261,10 @@ impl Document {
     /// `#/channels/<name>/messages/<key>`, or the same under
     /// `#/components/channels`.
     ///
-    /// Resolution is document-local: a `$ref` into another document is
-    /// [`Resolution::Opaque`], and nothing is loaded. For a
+    /// Resolution is document-local: nothing is loaded, so a `$ref`
+    /// into another document is [`Resolution::Opaque`] — or
+    /// [`Resolution::Unrecognized`] when its fragment is not a JSON
+    /// Pointer, which shows without loading anything. For a
     /// `RefOr<Message>` use [`RefOr::get_item`].
     ///
     /// A local pointer at a place the model does not hold as a message
@@ -2609,6 +2615,93 @@ mod tests {
         }
         let resolution = doc.resolve_message(&reference("#/operations/real/messages/0"));
         assert_eq!(resolution, Resolution::Opaque);
+    }
+
+    #[test]
+    fn a_pointer_at_a_reference_does_not_answer_for_it() {
+        // The slot pointed at holds a reference that dangles. That is
+        // a bug where it is written — `operations.dangling.channel` —
+        // and the validator says so there. A pointer *at* the slot is
+        // still only a pointer at a place that holds no channel.
+        let mut doc = resolvable();
+        doc.operations.insert(
+            "dangling".to_owned(),
+            serde_json::from_value(json!({
+                "action": "send",
+                "channel": { "$ref": "#/channels/nope" },
+                "messages": [ { "$ref": "#/channels/nope/messages/nope" } ]
+            }))
+            .unwrap(),
+        );
+        let channel = doc.resolve_channel(&reference("#/operations/dangling/channel"));
+        assert_eq!(channel, Resolution::Opaque);
+        assert_eq!(channel.problem(), None);
+        let message = doc.resolve_message(&reference("#/operations/dangling/messages/0"));
+        assert_eq!(message, Resolution::Opaque);
+        assert_eq!(message.problem(), None);
+    }
+
+    #[test]
+    fn an_external_fragment_is_checked_only_where_a_reference_is_followed() {
+        // Nothing is loaded, so all there is to check of an external
+        // reference is its fragment's syntax — and that is checked
+        // where the validator follows a reference, not on every entry.
+        let value = json!({
+            "asyncapi": "3.1.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": { "unused": { "$ref": "./other.yaml#bad" } },
+            "channels": {
+                "unused": { "$ref": "./other.yaml#bad" },
+                "used": { "$ref": "./other.yaml#bad" }
+            },
+            "operations": {
+                "send": { "action": "send", "channel": { "$ref": "#/channels/used" } }
+            },
+            "components": {
+                "operations": {
+                    "direct": { "action": "send", "channel": { "$ref": "./other.yaml#bad" } }
+                }
+            }
+        });
+        let mut errors = errors_for(value);
+        errors.sort();
+        assert_eq!(
+            errors,
+            [
+                "#.components.operations.direct.channel.$ref: channel `./other.yaml#bad` is not a usable JSON Pointer",
+                "#.operations.send.channel.$ref: channel `#/channels/used` is not a usable JSON Pointer",
+            ],
+        );
+    }
+
+    #[test]
+    fn an_extension_is_judged_by_its_shape() {
+        // `$ref` may name anything. An `x-` extension shaped like the
+        // kind asked for is a legal target this crate holds only as
+        // raw JSON; one that could not be that kind is a mistake.
+        let mut doc = resolvable();
+        doc.extensions = Some(BTreeMap::from([
+            (
+                "x-server".to_owned(),
+                json!({ "host": "h", "protocol": "kafka" }),
+            ),
+            ("x-chan".to_owned(), json!({ "address": "a" })),
+            ("x-message".to_owned(), json!({ "name": "Shared" })),
+            ("x-note".to_owned(), json!("just a string")),
+        ]));
+        let server = doc.resolve_server(&reference("#/x-server"));
+        assert_eq!(server, Resolution::Opaque);
+        let channel = doc.resolve_channel(&reference("#/x-chan"));
+        assert_eq!(channel, Resolution::Opaque);
+        let message = doc.resolve_message(&reference("#/x-message"));
+        assert_eq!(message, Resolution::Opaque);
+
+        let server = doc.resolve_server(&reference("#/x-note"));
+        assert_eq!(server, Resolution::WrongKind);
+        let channel = doc.resolve_channel(&reference("#/x-note"));
+        assert_eq!(channel, Resolution::WrongKind);
+        let message = doc.resolve_message(&reference("#/x-note"));
+        assert_eq!(message, Resolution::WrongKind);
     }
 
     fn reference(target: &str) -> Reference {

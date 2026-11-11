@@ -46,10 +46,16 @@ pub enum Resolution<'a, T> {
     /// "external". A suitably shaped `x-` extension is one such place.
     /// So is a spot that holds only a reference of its own, such as a
     /// v3 operation's `channel` (`#/operations/<name>/channel`) or an
-    /// entry of its `messages` (`#/operations/<name>/messages/0`), even
-    /// though that reference leads somewhere in this document. Either
-    /// way it is not a document bug, and there is no typed object to
-    /// hand back.
+    /// entry of its `messages` (`#/operations/<name>/messages/0`) —
+    /// whatever that reference itself leads to, if anything: one that
+    /// dangles is a bug where it is written, not in a pointer at it.
+    ///
+    /// Either way there is nothing wrong with the reference resolved,
+    /// and no typed object to hand back.
+    ///
+    /// A reference into another document is `Opaque` only when its
+    /// fragment is a JSON Pointer; otherwise it is
+    /// [`Unrecognized`](Resolution::Unrecognized).
     Opaque,
     /// A local pointer that names nothing: a dangling reference.
     Missing,
@@ -969,6 +975,60 @@ mod tests {
 
         // An inline entry resolves to itself.
         assert!(resolve(&doc, &doc.entries["real"]).found().is_some());
+    }
+
+    #[test]
+    fn a_resolution_copies_whatever_it_points_at() {
+        // `Demo` is neither `Clone` nor `Copy`; a `Resolution` of one
+        // is both, since all it holds is a reference.
+        let demo = Demo {
+            name: "real".to_owned(),
+        };
+        for resolution in [
+            Resolution::Found(&demo),
+            Resolution::Opaque,
+            Resolution::Missing,
+            Resolution::Cycle,
+            Resolution::Unrecognized,
+            Resolution::WrongKind,
+        ] {
+            let copied = resolution;
+            #[allow(clippy::clone_on_copy)]
+            let cloned = resolution.clone();
+            assert_eq!(copied, resolution);
+            assert_eq!(cloned, resolution);
+        }
+        // The copy is of the reference, not of the object.
+        let found = Resolution::Found(&demo);
+        let copied = found;
+        assert!(std::ptr::eq(
+            copied.found().expect("found"),
+            found.found().expect("found")
+        ));
+    }
+
+    #[test]
+    fn an_external_reference_is_opaque_only_with_a_usable_fragment() {
+        let doc = document();
+        for (target, usable) in [
+            ("./other.yaml#/entries/real", true),
+            ("./other.yaml", true),
+            ("./other.yaml#bad", false),
+            ("o.yaml#/a~2", false),
+            ("o.yaml#/%zz", false),
+            ("http://e.com/x.json#frag", false),
+        ] {
+            let entry = reference(target);
+            let resolution = resolve(&doc, &entry);
+            let expected = if usable {
+                Resolution::Opaque
+            } else {
+                Resolution::Unrecognized
+            };
+            assert_eq!(resolution, expected, "`{target}`");
+            #[cfg(feature = "v2_6")]
+            assert_eq!(Resolution::<Demo>::external(target), expected, "`{target}`");
+        }
     }
 
     #[test]

@@ -85,10 +85,12 @@ impl Document {
     /// so the item passed in and the one found may both have content:
     /// this returns the one at the end of the chain.
     ///
-    /// Resolution is document-local. A `$ref` into another document is
-    /// [`Resolution::Opaque`]; nothing is loaded. So is a local pointer
+    /// Resolution is document-local: nothing is loaded, so a `$ref`
+    /// into another document is [`Resolution::Opaque`] — or
+    /// [`Resolution::Unrecognized`] when its fragment is not a JSON
+    /// Pointer, which shows without loading anything. A local pointer
     /// at a place the model does not hold as a channel item, such as a
-    /// channel-shaped `#/x-channel` extension.
+    /// channel-shaped `#/x-channel` extension, is `Opaque` too.
     ///
     /// ```
     /// use roas_asyncapi::v2_6::Document;
@@ -608,17 +610,20 @@ impl ResolveReference<Server> for Document {
 }
 
 /// Messages, through `#/components/messages/…` and through pointers at
-/// a channel's operation — `#/channels/<path>/publish/message`, with
-/// any `oneOf/<index>` steps.
+/// a channel's operation: `#/channels/<path>/publish/message` or
+/// `…/subscribe/message`, the same under
+/// `#/components/channels/<name>/…`, and any `oneOf/<index>` steps
+/// after either.
 ///
 /// A pointer is walked over the document as written, so one that steps
 /// through a channel item names what that item itself declares, not
 /// what the item's own `$ref` leads to.
 ///
 /// A local pointer at a place the model does not hold as one message
-/// is [`Resolution::Opaque`], like a `$ref` into another document:
-/// `#/channels/<path>/publish/message` where that is a `oneOf` set, or
-/// a message-shaped `x-` extension.
+/// is [`Resolution::Opaque`]: `#/channels/<path>/publish/message`
+/// where that is a `oneOf` set, or a message-shaped `x-` extension. So
+/// is a `$ref` into another document, unless its fragment is not a
+/// JSON Pointer, which is [`Resolution::Unrecognized`].
 impl ResolveReference<Message> for Document {
     fn resolve_reference<'a>(&'a self, entry: &'a RefOr<Message>) -> Resolution<'a, Message> {
         match entry {
@@ -2431,6 +2436,10 @@ mod tests {
                 },
                 "channels": {
                     "hop": { "$ref": "#/channels/real" },
+                    "reusable": {
+                        "publish": { "message": { "name": "ReusablePublish" } },
+                        "subscribe": { "message": { "name": "ReusableSubscribe" } }
+                    },
                     "a": { "$ref": "#/components/channels/b" },
                     "b": { "$ref": "#/components/channels/a" }
                 },
@@ -2439,6 +2448,13 @@ mod tests {
                     "alias": { "$ref": "#/components/messages/real" },
                     "inChannel": { "$ref": "#/channels/real/publish/message" },
                     "inOneOf": { "$ref": "#/channels/real/subscribe/message/oneOf/1" },
+                    "inSubscribe": { "$ref": "#/channels/real/subscribe/message/oneOf/0" },
+                    "inReusablePublish": {
+                        "$ref": "#/components/channels/reusable/publish/message"
+                    },
+                    "inReusableSubscribe": {
+                        "$ref": "#/components/channels/reusable/subscribe/message"
+                    },
                     "outside": { "$ref": "./other.yaml#/messages/real" },
                     "viaOutside": { "$ref": "#/components/messages/outside" },
                     "ghost": { "$ref": "#/components/messages/nope" },
@@ -2531,9 +2547,17 @@ mod tests {
             assert!(std::ptr::eq(found.expect("resolves"), real), "`{key}`");
         }
         // A message hanging off a channel's operation is reachable by
-        // pointer.
-        let inline = messages["inChannel"].get_item(&doc).found();
-        assert_eq!(inline.expect("resolves").name.as_deref(), Some("Inline"));
+        // pointer: either operation, in either channel map.
+        for (key, name) in [
+            ("inChannel", "Inline"),
+            ("inSubscribe", "First"),
+            ("inReusablePublish", "ReusablePublish"),
+            ("inReusableSubscribe", "ReusableSubscribe"),
+        ] {
+            let found = messages[key].get_item(&doc).found();
+            let message = found.unwrap_or_else(|| panic!("message `{key}` resolves"));
+            assert_eq!(message.name.as_deref(), Some(name), "message `{key}`");
+        }
 
         for (key, expected) in unfound() {
             let resolution = messages[key].get_item(&doc);
