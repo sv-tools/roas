@@ -7,7 +7,7 @@
 //! exactly on the mapped type is never turned into a guessed verdict: it
 //! becomes [`Check::Unevaluated`], reported as such at run time.
 
-use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, push_token, source_of};
+use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, source_of};
 use crate::front::{Constraints, FloatWidth, IntWidth};
 use crate::ir::{Ir, TypeKind, TypeRef};
 use serde_json::Number;
