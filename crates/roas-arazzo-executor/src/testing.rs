@@ -15,17 +15,18 @@ use crate::message::{
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// An HTTP client that replies from a script.
-#[derive(Clone, Debug, Default)]
+///
+/// Replies are given in the order requests are sent, whichever step sent
+/// them.
+#[derive(Debug, Default)]
 pub struct Fake {
     replies: Vec<HttpResponse>,
-    /// Every request it was asked to send, in order.
-    sent: Vec<HttpRequest>,
-    /// Every duration it was asked to wait, in order.
-    waited: Vec<Duration>,
-    at: usize,
+    /// Behind a lock: an async send takes `&self`.
+    http: Mutex<Exchanges>,
     /// Messages still to arrive, by channel address.
     inbox: BTreeMap<String, VecDeque<IncomingMessage>>,
     published: Vec<OutgoingMessage>,
@@ -34,7 +35,38 @@ pub struct Fake {
     unsubscribed: Vec<SubscriptionId>,
 }
 
+/// What the HTTP side of a [`Fake`] has seen.
+#[derive(Clone, Debug, Default)]
+struct Exchanges {
+    /// Every request it was asked to send, in order.
+    sent: Vec<HttpRequest>,
+    /// Every duration it was asked to wait, in order.
+    waited: Vec<Duration>,
+    at: usize,
+}
+
+impl Clone for Fake {
+    fn clone(&self) -> Self {
+        Self {
+            replies: self.replies.clone(),
+            http: Mutex::new(self.exchanges().clone()),
+            inbox: self.inbox.clone(),
+            published: self.published.clone(),
+            subscribed: self.subscribed.clone(),
+            received: self.received.clone(),
+            unsubscribed: self.unsubscribed.clone(),
+        }
+    }
+}
+
 impl Fake {
+    fn exchanges(&self) -> std::sync::MutexGuard<'_, Exchanges> {
+        // A panic while the lock was held cannot leave it half-written.
+        self.http
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// A client with nothing to say yet.
     #[must_use]
     pub fn new() -> Self {
@@ -57,8 +89,8 @@ impl Fake {
 
     /// Every request the run made, in order.
     #[must_use]
-    pub fn sent(&self) -> &[HttpRequest] {
-        &self.sent
+    pub fn sent(&self) -> Vec<HttpRequest> {
+        self.exchanges().sent.clone()
     }
 
     /// Have `message` arrive on the channel at `address`, after any
@@ -114,22 +146,23 @@ impl Fake {
     /// Every wait the run asked for, in order — the delays a `retry`
     /// wanted, which a test can assert on without spending them.
     #[must_use]
-    pub fn waited(&self) -> &[Duration] {
-        &self.waited
+    pub fn waited(&self) -> Vec<Duration> {
+        self.exchanges().waited.clone()
     }
 
-    fn answer(&mut self, request: &HttpRequest) -> Result<HttpResponse, ClientError> {
-        self.sent.push(request.clone());
-        let reply = self.replies.get(self.at).cloned().ok_or_else(|| {
+    fn answer(&self, request: &HttpRequest) -> Result<HttpResponse, ClientError> {
+        let mut exchanges = self.exchanges();
+        exchanges.sent.push(request.clone());
+        let reply = self.replies.get(exchanges.at).cloned().ok_or_else(|| {
             ClientError(format!(
                 "the script has {} replies, and this is request {}: {} {}",
                 self.replies.len(),
-                self.at + 1,
+                exchanges.at + 1,
                 request.method,
                 request.url,
             ))
         })?;
-        self.at += 1;
+        exchanges.at += 1;
         Ok(reply)
     }
 }
@@ -141,7 +174,7 @@ impl HttpClient for Fake {
 }
 
 impl AsyncHttpClient for Fake {
-    fn send<'a>(&'a mut self, request: &'a HttpRequest) -> SendFuture<'a> {
+    fn send<'a>(&'a self, request: &'a HttpRequest) -> SendFuture<'a> {
         let answer = self.answer(request);
         Box::pin(std::future::ready(answer))
     }
@@ -212,7 +245,7 @@ impl AsyncMessageClient for Fake {
 impl Fake {
     /// Note that the run asked to wait, without waiting.
     pub fn note_wait(&mut self, duration: Duration) {
-        self.waited.push(duration);
+        self.exchanges().waited.push(duration);
     }
 }
 
@@ -258,9 +291,9 @@ mod tests {
 
     #[test]
     fn the_async_client_answers_from_the_same_script() {
-        let mut fake = Fake::new().reply(204, &json!(null));
+        let fake = Fake::new().reply(204, &json!(null));
         let response = futures_lite(AsyncHttpClient::send(
-            &mut fake,
+            &fake,
             &request("https://example.com/a"),
         ));
         assert_eq!(response.unwrap().status, 204);

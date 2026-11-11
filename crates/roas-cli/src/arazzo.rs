@@ -464,6 +464,13 @@ pub(crate) struct ArazzoRunArgs {
     #[arg(long, value_name = "MS")]
     timeout: Option<u64>,
 
+    /// Let up to this many requests be in flight at once. A step runs
+    /// beside others only when it is an HTTP step with no actions, in a
+    /// workflow with none, and does not depend on or read a step still in
+    /// flight. One at a time by default.
+    #[arg(long, value_name = "N")]
+    parallel: Option<usize>,
+
     /// Do not print the report to stderr.
     #[arg(long)]
     quiet: bool,
@@ -887,6 +894,10 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     if let Some(timeout) = args.timeout {
         options = options.timeout(std::time::Duration::from_millis(timeout));
     }
+    let parallel = args.parallel.unwrap_or(1);
+    if parallel > 1 {
+        options = options.parallel(parallel);
+    }
     let (options, any, source_diagnostics) = sources(options, &description, value, &source, &args)?;
 
     let explain = |error: anyhow::Error| {
@@ -925,7 +936,17 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
             eprintln!("- {diagnostic}");
         }
     }
-    let report = plan.execute(&mut Client::blocking()).map_err(|failure| {
+    let result = if parallel > 1 {
+        // Requests in flight together need the async client.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("building a tokio runtime for parallel requests")?
+            .block_on(plan.execute_async(&mut Client::asynchronous()))
+    } else {
+        plan.execute(&mut Client::blocking())
+    };
+    let report = result.map_err(|failure| {
         if !args.quiet
             && let Some(report) = &failure.report
         {
@@ -2199,6 +2220,7 @@ workflows:
             load: Vec::new(),
             max_steps: Some(20),
             timeout: Some(60_000),
+            parallel: None,
             quiet: false,
             ignore: Vec::new(),
             format: None,
@@ -2281,6 +2303,71 @@ workflows:
             let error = run_arazzo(ArazzoCommand::Run(args.into())).unwrap_err();
             assert!(error.to_string().contains("nothing was run"), "{error:#}");
         }
+    }
+
+    #[test]
+    fn run_sends_independent_steps_together_with_parallel() {
+        let (_, openapi) = runnable();
+        let description = TempFile::write(
+            "parallel.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "T", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "petStore", "url": "https://example.com/api.json", "type": "openapi" }
+                ],
+                "workflows": [{ "workflowId": "buyPet", "steps": [
+                    { "stepId": "one", "operationId": "getPetById",
+                      "parameters": [{ "name": "petId", "in": "path", "value": 1 }] },
+                    { "stepId": "two", "operationId": "getPetById",
+                      "parameters": [{ "name": "petId", "in": "path", "value": 2 }] }
+                ] }]
+            }),
+        );
+        // Answers nothing until both requests are in: a run that sent them
+        // one at a time would never get its first answer.
+        let (base, join) = {
+            use std::io::{BufRead, BufReader, Write};
+            use std::net::TcpListener;
+            use std::time::{Duration, Instant};
+            let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+            listener
+                .set_nonblocking(true)
+                .expect("a non-blocking listener");
+            let base = format!("http://{}", listener.local_addr().expect("an address"));
+            let join = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let mut streams = Vec::new();
+                while streams.len() < 2 && Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok((stream, _)) => streams.push(stream),
+                        Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                    }
+                }
+                let mut asked = Vec::new();
+                let together = streams.len() == 2;
+                for mut stream in streams {
+                    stream.set_nonblocking(false).expect("a blocking stream");
+                    let mut line = String::new();
+                    let _ =
+                        BufReader::new(stream.try_clone().expect("a clone")).read_line(&mut line);
+                    asked.push(line);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 X\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    );
+                }
+                assert!(together, "the requests were not in flight together");
+                asked
+            });
+            (base, join)
+        };
+        let mut args = run_args(&description, &openapi, &base);
+        args.parallel = Some(2);
+        run_arazzo(ArazzoCommand::Run(args.into())).unwrap();
+        let mut asked = join.join().unwrap();
+        asked.sort();
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert!(asked[0].contains("/pets/1"), "{asked:?}");
+        assert!(asked[1].contains("/pets/2"), "{asked:?}");
     }
 
     #[test]
@@ -3785,6 +3872,7 @@ workflows:
             load: args.load.clone(),
             max_steps: args.max_steps,
             timeout: args.timeout,
+            parallel: args.parallel,
             quiet: args.quiet,
             ignore: args.ignore.clone(),
             format: args.format,
@@ -4099,6 +4187,8 @@ workflows:
             "50",
             "--timeout",
             "1500",
+            "--parallel",
+            "4",
             "--quiet",
             "--skip-input-validation",
             "--schema",
@@ -4120,6 +4210,7 @@ workflows:
                 assert_eq!(a.header, ["Authorization: Bearer abc"]);
                 assert_eq!(a.max_steps, Some(50));
                 assert_eq!(a.timeout, Some(1500));
+                assert_eq!(a.parallel, Some(4));
                 assert!(a.quiet);
                 assert!(a.skip_input_validation);
                 assert_eq!(a.schema, ["https://example.com/schema.json=./schema.json"]);
@@ -4171,6 +4262,7 @@ workflows:
             load: Vec::new(),
             max_steps: None,
             timeout: None,
+            parallel: None,
             quiet: true,
             ignore: Vec::new(),
             format: None,

@@ -67,7 +67,7 @@ The engine decides *what* to send and asks a client to send it. That is what let
 | Entry point | Client trait | Waiting |
 |---|---|---|
 | `execute` | `HttpClient` | `std::thread::sleep` |
-| `execute_async` | `AsyncHttpClient` | the client's own `sleep` |
+| `execute_async` | `AsyncHttpClient` | the client's own `sleep`; requests in flight together under `Options::parallel` |
 | `Run` | none — you drive it | you decide |
 
 `Client` (behind the `reqwest` feature) implements both, over `reqwest::blocking::Client` and `reqwest::Client`. Implement the trait yourself to reuse your own client, authentication or middleware.
@@ -347,6 +347,8 @@ A step that calls a workflow is a step like any other: what it called becomes it
 
 **AsyncAPI steps** send and receive messages through a client the caller supplies — see [AsyncAPI steps](#asyncapi-steps).
 
+**Parallel steps**, when asked for — see [Parallel steps](#parallel-steps).
+
 Both Arazzo versions: v1.1 directly, and v1.0 through `execute_v1_0` (the `v1_0` feature), which upconverts first so there is one interpreter.
 
 ### AsyncAPI steps
@@ -375,6 +377,27 @@ let report = execute_with_messages(description, options, &mut Fake::new(), &mut 
 - **`$message.header.<name>`** and **`$message.payload`** (with `#/pointer`) read the message a receive got or a send sent, in the step's own criteria, outputs and actions and in the workflow's actions; `$steps.<id>.message.…` reads it later. Elsewhere — a step's parameters, payload or `correlationId`, which are evaluated before there is a message, or workflow outputs — `$message` is a preparation error. The payload is read as a response body is: JSON, else UTF-8 text. The ABNF's `#` form is the one parsed; the spec example's `$message.payload.orderId` is not.
 - **Subscriptions** are closed (`Progress::Unsubscribe`) once their receive completes. When a run stops early, the `execute` functions close what is still open; a caller driving `Run` itself does so with `Run::open_subscriptions`.
 - **Report**: an AsyncAPI step is a `Performed::Message` with its action, the channel address and whether a message went out or came in.
+
+### Parallel steps
+
+Steps run one at a time by default: Arazzo runs them in the order they are listed, and a step may rely on what an earlier one did without naming it (create a pet, then list pets). `Options::parallel(n)` lets up to `n` requests be in flight at once:
+
+```rust
+# use roas_arazzo::v1_1::Description;
+# use roas_arazzo_executor::{Options, execute_async, testing::Fake};
+# async fn example(description: &Description, options: Options) {
+let report = execute_async(description, &options.parallel(4), &mut Fake::new())
+    .await;
+# }
+```
+
+- **Which steps run together.** A step starts while others are in flight when it is an HTTP step with no `onSuccess` or `onFailure` actions, in a workflow with no `successActions` or `failureActions`, and none of the steps it names in `dependsOn` or reads (`$steps.<id>…`) is still in flight. Steps start in the run's order, so a step that must wait holds back the ones after it.
+- **Everything else runs alone**: a step with actions (they may jump or retry), one that calls a workflow (its own steps may run together inside it), and an AsyncAPI step start once everything before them is done, and nothing after them starts until they are.
+- **Judged in order.** Responses may come back in any order, but steps are judged — criteria, outputs, the report record — in the order they are listed, as they would be one at a time. A response that arrives before those of the steps listed ahead of it waits for them. So the report lists steps in their usual order, and a run ends or stops where it would have one step at a time.
+- **Failure.** When a step fails and its workflow ends, requests still in flight in that workflow are abandoned: they are not recorded, and their responses are not wanted. A step that could not start — the run's step limit is reached, or its request cannot be built — waits for what is in flight first. A client that fails to carry out a request still stops the run at once, whichever step sent it.
+- **Drivers.** `execute_async` and the other async functions send the requests in flight together. `execute` and the other blocking functions still send one at a time. A caller driving `Run` itself gets several `Progress::Send`s in a row, then `Progress::Await` when nothing more can start; it answers each with `Run::supply_to(request.id, response)`, and `Run::in_flight` says which requests are still wanted.
+
+The workflows a workflow depends on (`dependsOn`) still run one after another.
 
 ### XPath
 
@@ -767,6 +790,14 @@ v1.0 `jsonpath` criterion with no version still runs.
 
 AsyncAPI steps now run ([AsyncAPI steps](#asyncapi-steps)). `Progress` gains `Publish`, `Subscribe`, `Receive` and `Unsubscribe`, so a loop that drives `Run` itself needs arms for them (or a panicking catch-all if it runs no AsyncAPI steps); `Run::deliver` answers a `Receive`. `Performed` gains `Message`. `$message` is now evaluated, and is a preparation error in an HTTP step instead of an unsupported capability; `ExpressionError::Unsupported` is no longer raised. Preparation no longer refuses AsyncAPI steps, so check `PreparedWorkflow::uses_messages` before running a plan without a message client.
 
+### Parallel steps and the clients
+
+`Options::parallel` is new ([Parallel steps](#parallel-steps)); without it runs behave as before. To make it possible:
+
+- `AsyncHttpClient::send` takes `&self` instead of `&mut self`, so several sends can be awaited at once. A client that kept state behind `&mut self` keeps it behind a lock, as `testing::Fake` now does.
+- `HttpRequest` has an `id` (`RequestId`). `Progress` gains `Await`, which only a run with `Options::parallel` above one returns, and `Run` gains `supply_to` and `in_flight`. `Run::supply` still answers the one request in flight, and returns `ExecutionError::InFlight` when there are several.
+- `Fake::sent` and `Fake::waited` return owned `Vec`s rather than slices.
+
 ### XPath and response bodies
 
 A response body that is not JSON used to leave `$response.body` empty, so naming it failed with a missing-body error. It is now the body's text, as a string, when the body is UTF-8. This applies with or without the `xpath` feature: a criterion such as `$response.body == 'pong'` can now pass, and an output of `$response.body` now holds the text instead of failing. An empty body still has no `$response.body`. `SelectError` gains an `Evaluation` variant for an expression that is valid but cannot be evaluated against its data; matches already need a fallback arm. Criteria that read such a body now judge its text rather than failing for want of a body: a JSONPath or JSON Pointer criterion over it matches nothing except `$` or the empty pointer, which match the whole string and pass, and a simple condition such as `$response.body != null` passes. `$response.body#/id` now reports that the value has no `/id`.
@@ -777,7 +808,7 @@ Each of these is reported where it is met, never passed over — a run should no
 
 - **AsyncAPI steps without a message client**: the plain `execute` functions, and `roas arazzo run`, stop at them.
 - **XPath** criteria and selectors without the `xpath` feature; with it, versions Arazzo does not name, XPath payload replacement targets, and the functions listed under [XPath](#xpath).
-- **Parallel execution**: `dependsOn` orders steps and workflows; they still run one at a time. Only an AsyncAPI receive goes on in the background.
+- **Parallel workflows**: the workflows a workflow depends on run one after another. Steps run together only under `Options::parallel` (see [Parallel steps](#parallel-steps)).
 
 ## Safety rails
 
