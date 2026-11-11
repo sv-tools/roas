@@ -279,10 +279,10 @@ pub enum ExecutionError {
     /// The description holds no workflow by that name.
     #[error("the description has no workflow `{0}`")]
     UnknownWorkflow(String),
-    /// A `goto` named a step the workflow does not have.
-    #[error("workflow `{workflow}` has no step `{step}` to go to")]
+    /// A `goto` or `dependsOn` named a step the workflow does not have.
+    #[error("workflow `{workflow}` has no step `{step}`")]
     UnknownStep {
-        /// The workflow the `goto` was in.
+        /// The workflow that was to have it.
         workflow: String,
         /// The step it named.
         step: String,
@@ -524,7 +524,7 @@ mod tests {
                 step: "nope".to_owned(),
             }
             .to_string(),
-            "workflow `buyPet` has no step `nope` to go to"
+            "workflow `buyPet` has no step `nope`"
         );
         assert_eq!(
             ExecutionError::Limit {

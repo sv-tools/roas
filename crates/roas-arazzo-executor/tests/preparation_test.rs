@@ -907,7 +907,7 @@ fn expression_references_use_lookup_errors_not_goto_errors() {
         assert!(
             matches!(prepared, ExpressionError::Missing { expression: actual, .. } if actual == expression)
         );
-        assert!(!error.to_string().contains("to go to"));
+        assert!(!error.to_string().contains("has no step"));
         let lazy = roas_arazzo_executor::execute_with_report(
             &description,
             &options,

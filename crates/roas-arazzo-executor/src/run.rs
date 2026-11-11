@@ -1045,7 +1045,7 @@ impl<'d> Run<'d> {
                 let description = self.documents.get(frame.doc).description;
                 let mut needs = steps_named_by(step, frame.workflow, description)
                     .map_err(|error| locate(&self.documents, frame.doc, error))?;
-                needs.extend(step.depends_on.iter().cloned());
+                needs.extend(own_steps(frame.workflow, step));
                 if self
                     .pending
                     .iter()
@@ -1060,7 +1060,7 @@ impl<'d> Run<'d> {
                 let description = self.documents.get(frame.doc).description;
                 let mut needs = steps_named_by(step, frame.workflow, description)
                     .map_err(|error| locate(&self.documents, frame.doc, error))?;
-                needs.extend(step.depends_on.iter().cloned());
+                needs.extend(own_steps(frame.workflow, step));
                 // The workflow's own actions are judged after this step.
                 needs.extend(
                     workflow_action_reads(frame.workflow, description)
@@ -1077,6 +1077,16 @@ impl<'d> Run<'d> {
                     }
                     return Ok(self.join(listening.subscription));
                 }
+            }
+
+            // A step of another workflow this one depends on ran when
+            // that workflow did, first. A step that cannot start waits
+            // for what is in flight, as below.
+            if let Err(error) = self.other_steps_ran(frame, index) {
+                if !self.pending.is_empty() {
+                    return Ok(Progress::Await(None));
+                }
+                return Err(locate(&self.documents, frame.doc, error));
             }
 
             // A step that cannot start while others are in flight waits
@@ -1824,6 +1834,35 @@ impl<'d> Run<'d> {
         }
     }
 
+    /// Whether every step of another workflow that step `index` depends
+    /// on ran — passed or not — the last time its workflow ran.
+    fn other_steps_ran(&self, frame: &Frame<'d>, index: usize) -> Result<(), ExecutionError> {
+        for entry in &frame.workflow.steps[index].depends_on {
+            let Some((reference, step_id)) = other_step(frame.workflow, entry) else {
+                continue;
+            };
+            let (doc, at) = self.documents.resolve(frame.doc, reference)?;
+            let workflow = self.documents.workflow(doc, at);
+            if !workflow.steps.iter().any(|step| step.step_id == step_id) {
+                return Err(ExecutionError::UnknownStep {
+                    workflow: workflow.workflow_id.clone(),
+                    step: step_id.to_owned(),
+                });
+            }
+            let ran = self.finished[doc.0]
+                .get(&workflow.workflow_id)
+                .is_some_and(|state| state.steps.contains(step_id));
+            if !ran {
+                return Err(ExpressionError::NotRun {
+                    expression: entry.clone(),
+                    what: format!("step `{step_id}` of workflow `{}`", workflow.workflow_id),
+                }
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     /// Finish the top frame: name its outputs and give them to whoever
     /// is waiting.
     fn leave(&mut self) -> Result<(), ExecutionError> {
@@ -1852,6 +1891,7 @@ impl<'d> Run<'d> {
             WorkflowState {
                 inputs: frame.inputs.clone(),
                 outputs: outputs.clone(),
+                steps: frame.steps.keys().cloned().collect(),
             },
         );
         self.fresh
@@ -2845,6 +2885,60 @@ fn encode(text: &str) -> String {
 
 /// The workflows to run, in an order that respects `dependsOn`, ending
 /// with the one that was asked for.
+/// A step's `dependsOn` entry naming a step of another workflow —
+/// `$workflows.<workflowId>.steps.<stepId>`, or
+/// `$sourceDescriptions.<name>.<workflowId>.steps.<stepId>` in another
+/// document: the workflow, as a workflow's `dependsOn` names one, and
+/// the step. `None` for a step of `workflow` itself.
+pub(crate) fn other_step<'s>(workflow: &Workflow, entry: &'s str) -> Option<(&'s str, &'s str)> {
+    let (reference, step) = entry.rsplit_once(".steps.")?;
+    match reference.strip_prefix("$workflows.") {
+        Some(id) if id == workflow.workflow_id => None,
+        Some(id) => Some((id, step)),
+        None => reference
+            .starts_with("$sourceDescriptions.")
+            .then_some((reference, step)),
+    }
+}
+
+/// The step of `workflow` itself a `dependsOn` entry names: a bare id, or
+/// `$workflows.<its id>.steps.<stepId>`.
+fn own_step<'s>(workflow: &Workflow, entry: &'s str) -> Option<&'s str> {
+    if other_step(workflow, entry).is_some() {
+        return None;
+    }
+    Some(
+        entry
+            .strip_prefix("$workflows.")
+            .and_then(|rest| rest.rsplit_once(".steps."))
+            .filter(|(id, _)| *id == workflow.workflow_id)
+            .map_or(entry, |(_, step)| step),
+    )
+}
+
+/// The steps of its own workflow `step` depends on.
+fn own_steps(workflow: &Workflow, step: &Step) -> Vec<String> {
+    step.depends_on
+        .iter()
+        .filter_map(|entry| own_step(workflow, entry))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Every workflow that runs before `workflow`: its `dependsOn`, and the
+/// workflows whose steps one of its steps depends on.
+pub(crate) fn workflow_dependencies(workflow: &Workflow) -> impl Iterator<Item = &str> {
+    workflow
+        .depends_on
+        .iter()
+        .map(String::as_str)
+        .chain(workflow.steps.iter().flat_map(move |step| {
+            step.depends_on.iter().filter_map(move |entry| {
+                other_step(workflow, entry).map(|(reference, _)| reference)
+            })
+        }))
+}
+
 pub(crate) fn ordered_workflows<'d>(
     documents: &Documents<'d>,
     doc: Doc,
@@ -2889,7 +2983,7 @@ fn visit<'d>(
             ExecutionError::Circular(workflow.workflow_id.clone()),
         ));
     }
-    for reference in &workflow.depends_on {
+    for reference in workflow_dependencies(workflow) {
         let (target, at) = documents
             .resolve(doc, reference)
             .map_err(|error| locate(documents, doc, error))?;
@@ -3185,12 +3279,14 @@ fn visit_step(
         return Err(ExecutionError::Circular(step.step_id.clone()));
     }
     for id in &step.depends_on {
-        let at = index
-            .get(id.as_str())
-            .ok_or_else(|| ExecutionError::UnknownStep {
-                workflow: workflow.workflow_id.clone(),
-                step: id.clone(),
-            })?;
+        // A step of another workflow is that workflow's to run, first.
+        let Some(id) = own_step(workflow, id) else {
+            continue;
+        };
+        let at = index.get(id).ok_or_else(|| ExecutionError::UnknownStep {
+            workflow: workflow.workflow_id.clone(),
+            step: id.to_owned(),
+        })?;
         visit_step(
             workflow,
             reads,

@@ -764,6 +764,33 @@ impl<'d> Compiler<'d> {
         for (index, id) in workflow.depends_on.iter().enumerate() {
             self.target(id, &site.item("dependsOn", index));
         }
+        // A step of another workflow: that workflow runs first.
+        for (at, step) in workflow.steps.iter().enumerate() {
+            for (index, entry) in step.depends_on.iter().enumerate() {
+                let Some((reference, step_id)) = run::other_step(workflow, entry) else {
+                    continue;
+                };
+                let site = site.item("steps", at).item("dependsOn", index);
+                match self.resolve_target(reference) {
+                    Ok(Some((doc, found))) => {
+                        let target = self.documents.workflow(doc, found);
+                        if target.steps.iter().any(|step| step.step_id == step_id) {
+                            self.pending.insert((doc, found));
+                        } else {
+                            self.error(
+                                &site,
+                                ExecutionError::UnknownStep {
+                                    workflow: target.workflow_id.clone(),
+                                    step: step_id.to_owned(),
+                                },
+                            );
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => self.error(&site, error),
+                }
+            }
+        }
         // Dependency cycles in a called/recovery workflow are invalid too,
         // including cycles that pass through another document.
         if let Err(error) = run::ordered_workflows(&self.documents, self.current, workflow) {
