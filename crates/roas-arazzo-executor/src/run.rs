@@ -7,7 +7,7 @@
 
 use crate::criterion::{self, CriterionError};
 use crate::documents::{Doc, Document, Documents};
-use crate::expression::{self, Exchange, ExpressionError, Scope, StepState, WorkflowState};
+use crate::expression::{self, Exchange, ExpressionError, Linked, Scope, StepState, WorkflowState};
 use crate::http::{HttpRequest, HttpResponse, RequestId};
 use crate::message::{IncomingMessage, OutgoingMessage, Subscription, SubscriptionId};
 use crate::operation::{self, Source};
@@ -303,7 +303,8 @@ impl Options {
     ///
     /// The workflows the one asked for depends on run together as well,
     /// unless they could tell which ran first — they can run a common
-    /// workflow, or one reads another's with `$workflows.<id>` — or any
+    /// workflow, or one reads another's, with `$workflows.<id>` or
+    /// `$sourceDescriptions.<name>.<workflowId>` — or any
     /// can reach an AsyncAPI step. Their steps are reported, and an error
     /// among them raised, as one after another; the step limit counts all
     /// of their steps.
@@ -374,7 +375,8 @@ fn scope<'s>(
     frame: &'s Frame<'_>,
     steps: &'s BTreeMap<String, StepState>,
     here: Option<&'s Exchange>,
-    finished: &'s BTreeMap<String, WorkflowState>,
+    finished: &'s [BTreeMap<String, WorkflowState>],
+    documents: &'s Documents<'_>,
     ambient: &'s Ambient<'_>,
 ) -> Scope<'s> {
     Scope {
@@ -382,7 +384,12 @@ fn scope<'s>(
         inputs: &frame.inputs,
         outputs: &frame.outputs,
         steps,
-        workflows: finished,
+        workflows: &finished[frame.doc.0],
+        linked: Some(Linked {
+            doc: frame.doc,
+            documents,
+            finished,
+        }),
         here,
         sources: &ambient.sources,
         components: &ambient.components,
@@ -1383,7 +1390,8 @@ impl<'d> Run<'d> {
             frame,
             &frame.steps,
             None,
-            &self.finished[frame.doc.0],
+            &self.finished,
+            &self.documents,
             ambient(&self.ambients, frame.doc),
         );
         let description = self.documents.get(frame.doc).description;
@@ -1588,7 +1596,8 @@ impl<'d> Run<'d> {
                 frame,
                 &ahead,
                 done.exchange.as_ref(),
-                &self.finished[frame.doc.0],
+                &self.finished,
+                &self.documents,
                 ambient(&self.ambients, frame.doc),
             );
 
@@ -1824,7 +1833,8 @@ impl<'d> Run<'d> {
                 &frame,
                 &frame.steps,
                 None,
-                &self.finished[frame.doc.0],
+                &self.finished,
+                &self.documents,
                 ambient(&self.ambients, frame.doc),
             );
             if frame.outcome == Outcome::Succeeded {
@@ -1987,7 +1997,8 @@ impl<'d> Run<'d> {
             frame,
             &frame.steps,
             None,
-            &self.finished[frame.doc.0],
+            &self.finished,
+            &self.documents,
             ambient(&self.ambients, frame.doc),
         );
         let mut inputs = Map::new();
@@ -2006,7 +2017,8 @@ impl<'d> Run<'d> {
             frame,
             &frame.steps,
             None,
-            &self.finished[frame.doc.0],
+            &self.finished,
+            &self.documents,
             ambient(&self.ambients, frame.doc),
         );
         // A called workflow starts with what it was passed and nothing
@@ -2056,7 +2068,8 @@ impl<'d> Run<'d> {
             frame,
             &frame.steps,
             None,
-            &self.finished[frame.doc.0],
+            &self.finished,
+            &self.documents,
             ambient(&self.ambients, frame.doc),
         );
 
@@ -2166,7 +2179,8 @@ impl<'d> Run<'d> {
             frame,
             &frame.steps,
             exchange,
-            &self.finished[frame.doc.0],
+            &self.finished,
+            &self.documents,
             ambient(&self.ambients, frame.doc),
         );
         let outcomes = &mut self.records[record].action_criteria;

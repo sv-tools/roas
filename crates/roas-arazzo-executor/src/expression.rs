@@ -10,6 +10,7 @@
 //! and saying so where it happens beats a null surfacing three steps
 //! later.
 
+use crate::documents::{Doc, Documents};
 use crate::http::{HttpRequest, HttpResponse};
 use crate::runtime_syntax::{self, Expression, Root};
 use serde_json::Value;
@@ -84,6 +85,17 @@ pub(crate) struct Scope<'a> {
     pub sources: &'a Value,
     /// The description's `components`.
     pub components: &'a Value,
+    /// What `$sourceDescriptions.<name>.<workflowId>.…` reads.
+    pub linked: Option<Linked<'a>>,
+}
+
+/// The workflows of the Arazzo documents an expression's document links.
+#[derive(Clone, Copy)]
+pub(crate) struct Linked<'a> {
+    pub doc: Doc,
+    pub documents: &'a Documents<'a>,
+    /// The workflows that have finished, per document.
+    pub finished: &'a [BTreeMap<String, WorkflowState>],
 }
 
 /// Why an expression could not be turned into a value.
@@ -248,7 +260,40 @@ pub(crate) fn evaluate_parsed(
         ),
         Root::Outputs => from_map(scope.outputs, rest, expression, "an output")?,
         Root::Components => walk(scope.components, rest, expression, "a component")?,
-        Root::Sources => walk(scope.sources, rest, expression, "a source description")?,
+        Root::Sources => {
+            let target = parsed.source_workflow().and_then(|(alias, id)| {
+                let linked = scope.linked?;
+                let doc = linked.documents.source_workflow(linked.doc, alias, id)?;
+                Some((linked.finished[doc.0].get(id), alias, id))
+            });
+            match target {
+                Some((Some(workflow), _, _)) => workflow_field(workflow, &rest[2..], expression)?,
+                Some((None, alias, id)) => {
+                    return Err(not_run(
+                        expression,
+                        format!("workflow `{id}` of source `{alias}`"),
+                    ));
+                }
+                // "Source description field - If no operationId/workflowId
+                // match is found".
+                None if rest.len() >= 3 => walk(
+                    scope.sources,
+                    &[rest[0], &rest[1..].join(".")],
+                    expression,
+                    "",
+                )
+                .map_err(|_| {
+                    missing(
+                        expression,
+                        format!(
+                            "workflow `{}` of source `{}`, which no supplied document of that source declares",
+                            rest[1], rest[0]
+                        ),
+                    )
+                })?,
+                None => walk(scope.sources, rest, expression, "a source description")?,
+            }
+        }
         Root::Self_ => Value::String(
             scope
                 .self_
@@ -267,24 +312,7 @@ pub(crate) fn evaluate_parsed(
                     )
                 });
             };
-            // `inputs` and `outputs` are both fields of a workflow; the
-            // bare shorthand names an output.
-            match rest.split_first() {
-                Some((field, rest)) if *field == "inputs" => {
-                    walk(&workflow.inputs, rest, expression, "an input")?
-                }
-                Some((field, rest)) if *field == "outputs" && rest.is_empty() => Value::Object(
-                    workflow
-                        .outputs
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect(),
-                ),
-                Some((field, rest)) if *field == "outputs" => {
-                    from_map(&workflow.outputs, rest, expression, "an output")?
-                }
-                _ => from_map(&workflow.outputs, rest, expression, "an output")?,
-            }
+            workflow_field(workflow, rest, expression)?
         }
         Root::Steps => {
             let (id, rest) = split_first(rest, expression, "a step id")?;
@@ -357,6 +385,31 @@ pub(crate) fn evaluate_parsed(
             .pointer(pointer)
             .cloned()
             .ok_or_else(|| missing(expression, format!("`{pointer}`, which the value has not"))),
+    }
+}
+
+/// Read a finished workflow. `inputs` and `outputs` are both fields of a
+/// workflow; the bare shorthand names an output.
+fn workflow_field(
+    workflow: &WorkflowState,
+    parts: &[&str],
+    expression: &str,
+) -> Result<Value, ExpressionError> {
+    match parts.split_first() {
+        Some((field, rest)) if *field == "inputs" => {
+            walk(&workflow.inputs, rest, expression, "an input")
+        }
+        Some((field, rest)) if *field == "outputs" && rest.is_empty() => Ok(Value::Object(
+            workflow
+                .outputs
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )),
+        Some((field, rest)) if *field == "outputs" => {
+            from_map(&workflow.outputs, rest, expression, "an output")
+        }
+        _ => from_map(&workflow.outputs, parts, expression, "an output"),
     }
 }
 
@@ -633,6 +686,7 @@ pub(crate) mod tests {
                 components: &self.components,
                 declared_steps: &self.declared_steps,
                 declared_workflows: &self.declared_workflows,
+                linked: None,
             }
         }
     }

@@ -36,6 +36,13 @@ impl<'a> Expression<'a> {
     pub(crate) fn step_id(&self) -> Option<&'a str> {
         (self.root == Root::Steps).then(|| self.parts[0])
     }
+
+    /// The source and workflow id of
+    /// `$sourceDescriptions.<name>.<workflowId>.inputs|outputs…`.
+    pub(crate) fn source_workflow(&self) -> Option<(&'a str, &'a str)> {
+        (self.root == Root::Sources && self.parts.len() >= 3)
+            .then(|| (self.parts[0], self.parts[1]))
+    }
 }
 
 pub(crate) fn parse(text: &str) -> Result<Expression<'_>, ExpressionError> {
@@ -100,10 +107,7 @@ pub(crate) fn prefix(text: &str) -> Result<(Expression<'_>, usize), ExpressionEr
         Root::Sources => {
             parser.required_dot()?;
             parser.identifier(false)?;
-            if parser.dot() {
-                parser.unrestricted()?;
-            }
-            false
+            parser.dot() && parser.source_reference()?
         }
         Root::Workflows => {
             parser.required_dot()?;
@@ -215,6 +219,36 @@ impl<'a> Parser<'a> {
             self.identifier(true)?;
         }
         Ok(())
+    }
+
+    /// What follows `$sourceDescriptions.<name>.`: a workflow's field, as
+    /// `$workflows.<id>` reads one (the answer is whether a pointer may follow), or any
+    /// other reference — an operationId has no character restrictions.
+    fn source_reference(&mut self) -> Result<bool, ExpressionError> {
+        let (at, parts) = (self.at, self.parts.len());
+        // `[`: a condition operand's navigation, which its caller owns.
+        if self.workflow_field().is_ok()
+            && (self.rest().is_empty()
+                || self.rest() == "#"
+                || self.rest().starts_with("#/")
+                || self.rest().starts_with('['))
+        {
+            return Ok(true);
+        }
+        self.at = at;
+        self.parts.truncate(parts);
+        self.unrestricted()?;
+        Ok(false)
+    }
+
+    fn workflow_field(&mut self) -> Result<(), ExpressionError> {
+        self.identifier(false)?;
+        self.required_dot()?;
+        let at = self.at;
+        if !matches!(self.identifier(false)?, "inputs" | "outputs") {
+            return Err(syntax(self.text, at, "expected `inputs` or `outputs`"));
+        }
+        self.optional_name()
     }
 
     fn unrestricted(&mut self) -> Result<(), ExpressionError> {
@@ -350,6 +384,27 @@ mod tests {
                 vec!["api", "op.name=a & b<c>d"],
             ),
             ("$sourceDescriptions.api", vec!["api"]),
+            (
+                "$sourceDescriptions.api.w.outputs.org.token",
+                vec!["api", "w", "outputs", "org.token"],
+            ),
+            (
+                "$sourceDescriptions.api.w.inputs",
+                vec!["api", "w", "inputs"],
+            ),
+            // Not a workflow's field: any other reference, whole.
+            (
+                "$sourceDescriptions.api.w.outputs.a b",
+                vec!["api", "w.outputs.a b"],
+            ),
+            (
+                "$sourceDescriptions.api.w.outputs#x",
+                vec!["api", "w.outputs#x"],
+            ),
+            (
+                "$sourceDescriptions.api.w.steps.s",
+                vec!["api", "w.steps.s"],
+            ),
             ("$request.path.a.b=c & d<e>f", vec!["path", "a.b=c & d<e>f"]),
             ("$response.header.X.a!b#c&d", vec!["header", "X.a!b#c&d"]),
             ("$components.inputs", vec!["inputs"]),
@@ -367,6 +422,9 @@ mod tests {
         let (base, at) = prefix("$response.body.pets[0].name").unwrap();
         assert_eq!(base.text, "$response.body");
         assert_eq!(at, "$response.body".len());
+        let (base, at) = prefix("$sourceDescriptions.a.w.outputs.list[0]").unwrap();
+        assert_eq!(base.source_workflow(), Some(("a", "w")));
+        assert_eq!(at, "$sourceDescriptions.a.w.outputs.list".len());
         let (base, at) = prefix("$response.body#/pets[0].name").unwrap();
         assert_eq!(base.pointer, Some("/pets[0].name"));
         assert_eq!(at, "$response.body#/pets[0].name".len());

@@ -189,6 +189,14 @@ impl<'d> Documents<'d> {
         Ok((target, index))
     }
 
+    /// The document a linked Arazzo source `alias` of `doc` is, when it
+    /// declares workflow `id`.
+    pub(crate) fn source_workflow(&self, doc: Doc, alias: &str, id: &str) -> Option<Doc> {
+        self.resolve(doc, &format!("{EXTERNAL}{alias}.{id}"))
+            .ok()
+            .map(|(target, _)| target)
+    }
+
     pub(crate) fn workflow(&self, doc: Doc, index: usize) -> &'d Workflow {
         &self.get(doc).description.workflows[index]
     }

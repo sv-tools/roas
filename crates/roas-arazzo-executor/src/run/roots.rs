@@ -6,7 +6,8 @@
 //! every workflow listed before it that it could tell apart from running
 //! first is done: one it shares a workflow with, through `dependsOn`, a
 //! call, a `goto` or a `retry`, or whose workflows it reads with
-//! `$workflows.<id>`, or which reads its. What is left can neither see nor
+//! `$workflows.<id>` or `$sourceDescriptions.<name>.<workflowId>`, or which
+//! reads its. What is left can neither see nor
 //! change what the others do, so the run ends as it would have one after
 //! another: the steps are reported in the same order, and the first error
 //! in that order is the one raised.
@@ -140,6 +141,11 @@ fn reach(
         let mut read = |parsed: crate::runtime_syntax::Expression<'_>| {
             if parsed.root == Root::Workflows {
                 reach.reads.insert((doc, parsed.parts[0].to_owned()));
+            }
+            if let Some((alias, id)) = parsed.source_workflow()
+                && let Some(target) = documents.source_workflow(doc, alias, id)
+            {
+                reach.reads.insert((target, id.to_owned()));
             }
         };
         for output in workflow.outputs.values() {
