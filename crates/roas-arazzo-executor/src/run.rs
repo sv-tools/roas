@@ -19,8 +19,8 @@ use crate::runtime_syntax::{self, Expression};
 use crate::select;
 use crate::select::SelectError;
 use roas_arazzo::v1_1::{
-    Criterion, Description, FailureActionType, Parameter, ParameterLocation, ReusableOr,
-    SourceType, Step, StepAction, SuccessActionType, ValueOrSelector, Workflow,
+    Criterion, Description, FailureActionType, Parameter, ParameterLocation, ResolveError,
+    ReusableOr, SourceType, Step, StepAction, SuccessActionType, ValueOrSelector, Workflow,
 };
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2279,37 +2279,21 @@ pub(crate) fn parameter_templates<'a>(
 ) -> Result<Vec<ParameterTemplate<'a>>, ExecutionError> {
     let mut templates = Vec::with_capacity(list.len());
     for entry in list {
-        let (parameter, overridden) = match entry {
-            ReusableOr::Item(parameter) => (parameter, None),
-            ReusableOr::Reusable(reusable) => {
-                let name = reusable
-                    .reference
-                    .strip_prefix("$components.parameters.")
-                    .ok_or_else(|| {
-                        ExecutionError::Unsupported(format!(
-                            "`{}` is not a component this executor can follow",
-                            reusable.reference
-                        ))
-                    })?;
-                let parameter = description
-                    .components
-                    .as_ref()
-                    .and_then(|components| components.parameters.get(name))
-                    .ok_or_else(|| {
-                        ExecutionError::Unsupported(format!(
-                            "`{}` names a component the description has not got",
-                            reusable.reference
-                        ))
-                    })?;
-                (parameter, reusable.value.as_ref())
-            }
-        };
         templates.push(ParameterTemplate {
-            parameter,
-            overridden,
+            parameter: entry.get_item(description).map_err(component_error)?,
+            overridden: entry.value_override(),
         });
     }
     Ok(templates)
+}
+
+/// Why a `Reusable` could not be followed into the components.
+fn component_error(error: ResolveError) -> ExecutionError {
+    let problem = match error {
+        ResolveError::NotFound(_) => "names a component the description has not got",
+        _ => "is not a component this executor can follow",
+    };
+    ExecutionError::Unsupported(format!("`{}` {problem}", error.reference()))
 }
 
 /// Apply overrides before inspecting or evaluating their values. Dependency
@@ -2332,24 +2316,7 @@ pub(crate) fn success_action<'a>(
     entry: &'a ReusableOr<roas_arazzo::v1_1::SuccessAction>,
     description: &'a Description,
 ) -> Result<&'a roas_arazzo::v1_1::SuccessAction, ExecutionError> {
-    match entry {
-        ReusableOr::Item(action) => Ok(action),
-        ReusableOr::Reusable(reusable) => reusable
-            .reference
-            .strip_prefix("$components.successActions.")
-            .and_then(|name| {
-                description
-                    .components
-                    .as_ref()
-                    .and_then(|components| components.success_actions.get(name))
-            })
-            .ok_or_else(|| {
-                ExecutionError::Unsupported(format!(
-                    "`{}` names a component the description has not got",
-                    reusable.reference
-                ))
-            }),
-    }
+    entry.get_item(description).map_err(component_error)
 }
 
 /// A failure action, following a `Reusable` into the components.
@@ -2357,24 +2324,7 @@ pub(crate) fn failure_action<'a>(
     entry: &'a ReusableOr<roas_arazzo::v1_1::FailureAction>,
     description: &'a Description,
 ) -> Result<&'a roas_arazzo::v1_1::FailureAction, ExecutionError> {
-    match entry {
-        ReusableOr::Item(action) => Ok(action),
-        ReusableOr::Reusable(reusable) => reusable
-            .reference
-            .strip_prefix("$components.failureActions.")
-            .and_then(|name| {
-                description
-                    .components
-                    .as_ref()
-                    .and_then(|components| components.failure_actions.get(name))
-            })
-            .ok_or_else(|| {
-                ExecutionError::Unsupported(format!(
-                    "`{}` names a component the description has not got",
-                    reusable.reference
-                ))
-            }),
-    }
+    entry.get_item(description).map_err(component_error)
 }
 
 /// Whether every criterion of an action holds. No criteria means the
@@ -2985,5 +2935,36 @@ mod tests {
         assert!(matches!(run.advance().unwrap(), Progress::Done(_)));
         let resolver = run.resolvers[0].as_ref().expect("the entry's resolver");
         assert_eq!(resolver.builds, 1);
+    }
+
+    #[test]
+    fn a_reusable_that_cannot_be_followed_says_which_way_it_failed() {
+        let description: Description = serde_json::from_value(json!({
+            "arazzo": "1.1.0", "info": { "title": "T", "version": "1" },
+            "sourceDescriptions": [{ "name": "api", "url": "https://x.test/api.json" }],
+            "workflows": [{ "workflowId": "w", "steps": [{ "stepId": "a", "operationId": "list" }] }],
+            "components": { "successActions": { "done": { "name": "done", "type": "end" } } }
+        }))
+        .unwrap();
+        let message = |entry: Value| {
+            let entry: ReusableOr<Parameter> = serde_json::from_value(entry).unwrap();
+            match parameter_templates(std::slice::from_ref(&entry), &description) {
+                Err(ExecutionError::Unsupported(message)) => message,
+                _ => panic!("the reference must not resolve"),
+            }
+        };
+        assert_eq!(
+            message(json!({ "reference": "$components.parameters.page" })),
+            "`$components.parameters.page` names a component the description has not got"
+        );
+        assert_eq!(
+            message(json!({ "reference": "$components.successActions.done" })),
+            "`$components.successActions.done` is not a component this executor can follow"
+        );
+
+        let action: ReusableOr<roas_arazzo::v1_1::SuccessAction> =
+            serde_json::from_value(json!({ "reference": "$components.successActions.done" }))
+                .unwrap();
+        assert_eq!(success_action(&action, &description).unwrap().name, "done");
     }
 }

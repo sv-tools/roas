@@ -46,6 +46,13 @@ pub struct Components {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
+crate::common::reusable::impl_resolve_reusable! {
+    Components, crate::v1_0::description::Description;
+    Parameter => "parameters", parameters;
+    SuccessAction => "successActions", success_actions;
+    FailureAction => "failureActions", failure_actions;
+}
+
 impl ValidateWithContext for Components {
     fn validate_with_context(&self, ctx: &mut Context) {
         ctx.validate_map_keys("inputs", &self.inputs);
@@ -76,6 +83,65 @@ mod tests {
     use super::*;
     use enumset::EnumSet;
     use serde_json::json;
+
+    #[test]
+    fn reusables_resolve_against_components_and_description() {
+        use crate::v1_0::{Description, ResolveError, ReusableOr};
+
+        let description: Description = serde_json::from_value(json!({
+            "arazzo": "1.0.1",
+            "info": { "title": "T", "version": "1" },
+            "sourceDescriptions": [{ "name": "api", "url": "https://x.test/api.json" }],
+            "workflows": [{ "workflowId": "w", "steps": [{ "stepId": "s", "operationId": "op" }] }],
+            "components": {
+                "parameters": { "page": { "name": "page", "in": "query", "value": 1 } },
+                "successActions": { "done": { "name": "done", "type": "end" } },
+                "failureActions": { "stop": { "name": "stop", "type": "end" } }
+            }
+        }))
+        .unwrap();
+        let components = description.components.as_ref().unwrap();
+        let entry = |reference: &str| json!({ "reference": reference });
+
+        let parameter: ReusableOr<Parameter> = serde_json::from_value(
+            json!({ "reference": "$components.parameters.page", "value": 2 }),
+        )
+        .unwrap();
+        assert_eq!(parameter.get_item(components).unwrap().name, "page");
+        assert_eq!(parameter.get_item(&description).unwrap().name, "page");
+        assert_eq!(parameter.value_override(), Some(&json!(2)));
+
+        let success: ReusableOr<SuccessAction> =
+            serde_json::from_value(entry("$components.successActions.done")).unwrap();
+        assert_eq!(success.get_item(components).unwrap().name, "done");
+        assert_eq!(success.get_item(&description).unwrap().name, "done");
+
+        let failure: ReusableOr<FailureAction> =
+            serde_json::from_value(entry("$components.failureActions.stop")).unwrap();
+        assert_eq!(failure.get_item(components).unwrap().name, "stop");
+        assert_eq!(failure.get_item(&description).unwrap().name, "stop");
+
+        // A success action is not a failure action, whatever its name.
+        let crossed: ReusableOr<FailureAction> =
+            serde_json::from_value(entry("$components.successActions.done")).unwrap();
+        assert!(matches!(
+            crossed.get_item(components),
+            Err(ResolveError::WrongKind {
+                expected: "failureActions",
+                ..
+            })
+        ));
+
+        // Without components there is nothing to find.
+        let bare = Description {
+            components: None,
+            ..description.clone()
+        };
+        assert_eq!(
+            parameter.get_item(&bare).unwrap_err(),
+            ResolveError::NotFound("$components.parameters.page".to_owned())
+        );
+    }
 
     #[test]
     fn deserialize_round_trips() {

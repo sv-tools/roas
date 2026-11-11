@@ -31,7 +31,7 @@ pub mod workflow;
 #[cfg(feature = "v1_0")]
 mod from_v1_0;
 
-pub use crate::common::reusable::{Reusable, ReusableOr};
+pub use crate::common::reusable::{ResolveError, ResolveReusable, Reusable, ReusableOr};
 pub use components::Components;
 pub use criterion::{Criterion, CriterionKind, CriterionType};
 pub use description::Description;
