@@ -83,7 +83,7 @@ fn v2_base_discriminator_is_kept_through_every_upgrade() {
 
 /// A string left behind anywhere a schema can sit would no longer be
 /// dropped: it would fail the typed parse the conversion expects to
-/// succeed. Every position in a 2.0 document is converted.
+/// succeed.
 #[test]
 fn v2_discriminator_is_rewritten_in_every_schema_position() {
     let inner = pet(json!({}));

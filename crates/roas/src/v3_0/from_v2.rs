@@ -926,6 +926,12 @@ enum Pos {
     /// `components.links`, `Response.links`). Each entry's value is
     /// a Link.
     LinkMap,
+    /// The current object is keyed by names the document chose (a
+    /// `components` section, a `content` map), whose values are
+    /// otherwise ordinary objects. The keys are never read as OAS
+    /// keywords or `x-*` extensions, so `value` or `x-world/x-3dmf`
+    /// is walked like any other entry.
+    NamedMap,
 }
 
 fn walk(
@@ -946,6 +952,11 @@ fn walk(
             Pos::LinkMap => {
                 for (_, v) in obj.iter_mut() {
                     walk(v, body_param_names, form_param_names, Pos::Link);
+                }
+            }
+            Pos::NamedMap => {
+                for (_, v) in obj.iter_mut() {
+                    walk(v, body_param_names, form_param_names, Pos::Generic);
                 }
             }
             Pos::Generic => walk_generic_object(obj, body_param_names, form_param_names),
@@ -1051,12 +1062,39 @@ fn walk_generic_object(
             "schemas" => walk(v, body_param_names, form_param_names, Pos::SchemaMap),
             // `links` is a map of named Link Objects.
             "links" => walk(v, body_param_names, form_param_names, Pos::LinkMap),
+            "components" => walk_components(v, body_param_names, form_param_names),
+            // A media-type map, keyed by whatever `consumes` / `produces`
+            // listed.
+            "content" => walk(v, body_param_names, form_param_names, Pos::NamedMap),
             // ExampleObject's instance value, and the example /
             // examples carriers on MediaType / Parameter / Header.
             // Skip recursion entirely — none of these hold schemas.
             "example" | "examples" | "value" => continue,
             _ => walk(v, body_param_names, form_param_names, Pos::Generic),
         }
+    }
+}
+
+/// Walker for the Components Object: each section is a map keyed by
+/// component names, which the document is free to choose.
+fn walk_components(
+    value: &mut Value,
+    body_param_names: &HashSet<String>,
+    form_param_names: &HashSet<String>,
+) {
+    let Value::Object(sections) = value else {
+        return;
+    };
+    for (section, v) in sections.iter_mut() {
+        if is_extension_key(section) {
+            continue;
+        }
+        let pos = match section.as_str() {
+            "schemas" => Pos::SchemaMap,
+            "links" => Pos::LinkMap,
+            _ => Pos::NamedMap,
+        };
+        walk(v, body_param_names, form_param_names, pos);
     }
 }
 
@@ -2027,6 +2065,93 @@ mod tests {
         let value = serde_json::to_value(&v3).unwrap();
         let cat = &value["components"]["schemas"]["Cat"];
         assert_eq!(cat["discriminator"]["propertyName"], "kind");
+    }
+
+    /// Global responses and parameters are keyed by names the author
+    /// chose, and media types by whatever `produces` / `consumes` say.
+    /// None of them may be mistaken for a keyword or an extension: the
+    /// schema below them still has to be rewritten, or the typed parse
+    /// at the end of the conversion fails.
+    #[test]
+    fn schemas_under_keyword_like_names_are_still_rewritten() {
+        let names = [
+            "Err", "value", "example", "examples", "x-err", "links", "schema", "schemas",
+        ];
+        let schema = serde_json::json!({
+            "type": "object",
+            "discriminator": "kind",
+            "properties": {
+                "kind": {"type": "string"},
+                "pet": {"$ref": "#/definitions/Pet"}
+            },
+            "required": ["kind"]
+        });
+        for name in names {
+            let raw = serde_json::json!({
+                "swagger": "2.0",
+                "info": {"title": "t", "version": "1"},
+                "paths": {},
+                "definitions": {"Pet": {"type": "object"}},
+                "responses": {name: {"description": "d", "schema": schema}},
+                "parameters": {name: {"name": "b", "in": "body", "schema": schema}},
+            });
+            let v3: V3Spec = serde_json::from_value::<V2Spec>(raw).unwrap().into();
+            let value = serde_json::to_value(&v3).unwrap();
+            let components = &value["components"];
+            for at in [
+                &components["responses"][name],
+                &components["requestBodies"][name],
+            ] {
+                let schema = &at["content"]["application/json"]["schema"];
+                assert_eq!(
+                    schema["discriminator"],
+                    serde_json::json!({"propertyName": "kind"}),
+                    "{name}: {value}"
+                );
+                assert_eq!(
+                    schema["properties"]["pet"]["$ref"], "#/components/schemas/Pet",
+                    "{name}: {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn schemas_under_keyword_like_media_types_are_still_rewritten() {
+        for mime in ["x-world/x-3dmf", "value", "example"] {
+            let raw = serde_json::json!({
+                "swagger": "2.0",
+                "info": {"title": "t", "version": "1"},
+                "produces": [mime],
+                "paths": {"/p": {"get": {"responses": {"200": {
+                    "description": "d",
+                    "schema": {"type": "object", "discriminator": "kind"}
+                }}}}},
+            });
+            let v3: V3Spec = serde_json::from_value::<V2Spec>(raw).unwrap().into();
+            let value = serde_json::to_value(&v3).unwrap();
+            let content = &value["paths"]["/p"]["get"]["responses"]["200"]["content"];
+            assert_eq!(
+                content[mime]["schema"]["discriminator"],
+                serde_json::json!({"propertyName": "kind"}),
+                "{mime}: {value}"
+            );
+        }
+    }
+
+    /// `x-*` directly under `components` is an extension of the
+    /// Components Object, not a section, and stays verbatim.
+    #[test]
+    fn components_extensions_stay_opaque() {
+        let mut value = serde_json::json!({"components": {
+            "x-trap": {"schema": {"discriminator": "kind"}}
+        }});
+        let (body, form) = (HashSet::new(), HashSet::new());
+        super::walk(&mut value, &body, &form, super::Pos::Generic);
+        assert_eq!(
+            value["components"]["x-trap"]["schema"]["discriminator"],
+            "kind"
+        );
     }
 
     /// x-servers (Redoc extension) wins over host/basePath/schemes when
