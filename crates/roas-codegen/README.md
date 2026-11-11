@@ -33,7 +33,7 @@ for diagnostic in &generation.diagnostics {
 # Ok(()) }
 ```
 
-`generate` returns files in memory, writing no output files, together with every diagnostic and the dependency list the generated code needs — for Rust, `serde` and `serde_json` with `raw_value`, plus whatever a type substitution imports; for Go, only the modules a substitution imports, since the output uses the standard library. Nothing generated depends on `roas`.
+`generate` returns files in memory, writing no output files, together with every diagnostic and the dependency list the generated code needs — for Rust, `serde` and `serde_json` with `raw_value`, `regex` when a pattern is checked (at decode beside `additionalProperties: false`, or by validation), plus whatever a type substitution imports; for Go, only the modules a substitution imports, since the output uses the standard library. Nothing generated depends on `roas`.
 
 ## What the Rust output looks like
 

@@ -1480,10 +1480,27 @@ fn closed_pattern_properties_are_checked_at_decode() {
             assert!(code.contains("\"^x-\""), "{code}");
         } else {
             assert!(
-                code.contains("\"regexp\"") && code.contains("memberMatches(name, `^x-`)")
-                    || code.contains("memberMatches(name, \"^x-\")"),
+                code.contains("\"regexp\"")
+                    && (code.contains("memberMatches(name, `^x-`)")
+                        || code.contains("memberMatches(name, \"^x-\")")),
                 "{code}"
             );
         }
     }
+}
+
+#[test]
+fn a_go_import_may_use_a_pattern_helper_name_when_no_pattern_is_generated() {
+    let config = ConfigFile::from_toml(
+        "[substitutions.date-time.go]\nname = \"patterns.Time\"\nimport = \"example.com/x/patterns\"\n",
+        Path::new("/"),
+    )
+    .unwrap()
+    .merge(target(Target::Go))
+    .build()
+    .unwrap();
+    let doc = document(serde_json::json!({
+        "A": {"type": "object", "properties": {"when": {"type": "string", "format": "date-time"}}}
+    }));
+    generate(&doc, &config).expect("no pattern helper is declared");
 }

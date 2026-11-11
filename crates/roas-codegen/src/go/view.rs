@@ -49,13 +49,18 @@ const VALIDATION_NAMES: &[&str] = &[
     "zero",
 ];
 
-const TEMPLATE_NAMES: &[&str] = &[
-    "decodeOptions",
+/// The names the pattern support declares, reserved only when it is
+/// generated.
+const PATTERN_NAMES: &[&str] = &[
     "matchPattern",
     "memberMatches",
     "patterns",
     "matched",
     "compiled",
+];
+
+const TEMPLATE_NAMES: &[&str] = &[
+    "decodeOptions",
     "noUnmarshalers",
     "isolatedNone",
     "refuseNull",
@@ -333,6 +338,11 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         // shadowed by it, or clash with it.
         for local in TEMPLATE_NAMES {
             used.insert(local, "a name the generated code declares");
+        }
+        if builder.needs.pattern {
+            for local in PATTERN_NAMES {
+                used.insert(local, "a name the generated code declares");
+            }
         }
         if config.validation {
             for local in VALIDATION_NAMES {
