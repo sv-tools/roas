@@ -2259,6 +2259,13 @@ impl MergeWithContext for ObjectSchema {
             ".deprecated",
             ConflictKind::ScalarOverridden,
         );
+        merge_opt_struct(
+            &mut self.discriminator,
+            other.discriminator,
+            ctx,
+            path,
+            ".discriminator",
+        );
         merge_opt_struct(&mut self.xml, other.xml, ctx, path, ".xml");
         merge_opt_struct(
             &mut self.external_docs,
@@ -2816,5 +2823,40 @@ mod tests {
         assert!(matches!(base, Parameter::Query(_)));
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].kind, ConflictKind::ParameterVariantMismatch);
+    }
+
+    #[test]
+    fn object_schema_deep_merge_keeps_the_discriminator() {
+        // Taken from the incoming side when the base has none.
+        let incoming = ObjectSchema {
+            discriminator: Some(Discriminator {
+                property_name: "kind".into(),
+                mapping: Some(BTreeMap::from([("a".to_owned(), "A".to_owned())])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut base = ObjectSchema::default();
+        let conflicts = report(&mut base, incoming, MergeOptions::new());
+        assert!(conflicts.is_empty(), "{conflicts:?}");
+        let discriminator = base.discriminator.as_ref().unwrap();
+        assert_eq!(discriminator.property_name, "kind");
+
+        // Merged key by key when both sides have one.
+        let incoming = ObjectSchema {
+            discriminator: Some(Discriminator {
+                property_name: "kind".into(),
+                mapping: Some(BTreeMap::from([("b".to_owned(), "B".to_owned())])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let conflicts = report(&mut base, incoming, MergeOptions::new());
+        assert!(conflicts.is_empty(), "{conflicts:?}");
+        assert_eq!(
+            base.discriminator.unwrap().mapping.unwrap().len(),
+            2,
+            "both mapping entries survive"
+        );
     }
 }

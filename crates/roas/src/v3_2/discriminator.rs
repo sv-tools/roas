@@ -32,6 +32,14 @@ pub struct Discriminator {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "defaultMapping")]
     pub default_mapping: Option<String>,
+
+    /// This object MAY be extended with Specification Extensions.
+    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
+    /// The value can be null, a primitive, an array or an object.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 impl ValidateWithContext<Spec> for Discriminator {
@@ -112,6 +120,7 @@ mod tests {
                 ("missing".to_owned(), "Missing".to_owned()),
             ])),
             default_mapping: None,
+            ..Default::default()
         };
         let mut ctx = Context::new(&spec, Options::new());
         d.validate_with_context(&mut ctx, "d".to_owned());
@@ -139,6 +148,7 @@ mod tests {
                 ("cat".to_owned(), "#/components/schemas/Cat".to_owned()),
             ])),
             default_mapping: None,
+            ..Default::default()
         };
         let mut ctx = Context::new(&spec, Options::new());
         d.validate_with_context(&mut ctx, "d".to_owned());
@@ -172,5 +182,16 @@ mod tests {
             "expected dangling defaultMapping target: {:?}",
             ctx.errors
         );
+    }
+
+    #[test]
+    fn round_trip_with_extensions() {
+        let json = serde_json::json!({"propertyName": "type", "x-internal": "v"});
+        let d: Discriminator = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(
+            d.extensions.as_ref().and_then(|m| m.get("x-internal")),
+            Some(&serde_json::json!("v")),
+        );
+        assert_eq!(serde_json::to_value(&d).unwrap(), json);
     }
 }

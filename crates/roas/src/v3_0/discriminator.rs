@@ -39,7 +39,17 @@ impl ValidateWithContext<Spec> for Discriminator {
 
         if let Some(mapping) = &self.mapping {
             for (k, v) in mapping {
-                let schema_ref = RefOr::<Schema>::new_ref(format!("#/components/schemas/{v}"));
+                // Mapping values are EITHER component schema *names*
+                // OR URI references. Component names match
+                // `^[a-zA-Z0-9._-]+$`, so any value containing `/`, `#`
+                // or `:` is a reference and is used as-is.
+                let is_uri_ref = v.contains('/') || v.starts_with('#') || v.contains(':');
+                let reference = if is_uri_ref {
+                    v.clone()
+                } else {
+                    format!("#/components/schemas/{v}")
+                };
+                let schema_ref = RefOr::<Schema>::new_ref(reference);
                 schema_ref.validate_with_context(ctx, format!("{path}.mapping[{k}]"));
             }
         }
@@ -131,6 +141,34 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("schemas/Cat") && e.contains("not found")),
             "Cat must resolve: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn validate_mapping_accepts_uri_references() {
+        use crate::validation::ValidationErrorsExt;
+        let mut spec = Spec::default();
+        spec.define_schema("Cat", SingleSchema::from(ObjectSchema::default()))
+            .unwrap();
+        let d = Discriminator {
+            property_name: "type".into(),
+            mapping: Some(BTreeMap::from([
+                ("cat".to_owned(), "#/components/schemas/Cat".to_owned()),
+                ("gone".to_owned(), "#/components/schemas/Gone".to_owned()),
+                (
+                    "dog".to_owned(),
+                    "https://example.com/schemas/Dog".to_owned(),
+                ),
+            ])),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::IgnoreExternalReferences.only());
+        d.validate_with_context(&mut ctx, "d".to_owned());
+        assert_eq!(ctx.errors.len(), 1, "errors: {:?}", ctx.errors);
+        assert!(
+            ctx.errors.mentions("`#/components/schemas/Gone` not found"),
+            "the reference is used as written: {:?}",
             ctx.errors
         );
     }

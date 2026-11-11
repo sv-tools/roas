@@ -44,8 +44,6 @@
 //! * `collectionFormat: tsv` is dropped (no v3.0 equivalent).
 //! * `allowEmptyValue` is preserved on `Query` parameters, dropped elsewhere.
 //! * v2 `Items` array-of-arrays nesting becomes a recursively-built `Schema`.
-//! * `discriminator` on a plain `ObjectSchema` is dropped — v3.0 carries
-//!   it only on composition (`allOf` / `oneOf` / `anyOf`) shapes.
 //!
 //! The conversion serializes the v2 input with serde, runs the transforms,
 //! and deserializes as a v3.0 spec. If the input is a valid v2 document the
@@ -1985,11 +1983,8 @@ mod tests {
 
     #[test]
     fn schema_x_nullable_becomes_nullable() {
-        // v2 keeps `discriminator: <name>` on plain ObjectSchema; v3.0
-        // only carries it on composition types, so a discriminator on an
-        // Object is intentionally lossy on conversion. The rename of
-        // `x-nullable` to `nullable` is the structural rewrite that this
-        // test pins down.
+        // The rename of `x-nullable` to `nullable` is the structural
+        // rewrite that this test pins down.
         let raw = r##"{
             "swagger": "2.0",
             "info": { "title": "t", "version": "1" },

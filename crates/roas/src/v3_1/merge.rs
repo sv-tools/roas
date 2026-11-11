@@ -1776,6 +1776,13 @@ impl MergeWithContext for Discriminator {
                 }
             }
         }
+        merge_extensions(
+            &mut self.extensions,
+            other.extensions,
+            ctx,
+            path,
+            ".extensions",
+        );
     }
 }
 
@@ -2372,6 +2379,13 @@ impl MergeWithContext for ObjectSchema {
             path,
             ".deprecated",
             ConflictKind::ScalarOverridden,
+        );
+        merge_opt_struct(
+            &mut self.discriminator,
+            other.discriminator,
+            ctx,
+            path,
+            ".discriminator",
         );
         merge_opt_struct(&mut self.xml, other.xml, ctx, path, ".xml");
         merge_opt_struct(
@@ -3011,5 +3025,59 @@ mod tests {
         assert_eq!(r.reference, "#/components/schemas/B");
         assert!(!r.has_siblings());
         assert_eq!(ctx.conflicts[0].kind, ConflictKind::RefReplaced);
+    }
+
+    #[test]
+    fn object_schema_deep_merge_keeps_the_discriminator() {
+        // Taken from the incoming side when the base has none.
+        let incoming = ObjectSchema {
+            discriminator: Some(Discriminator {
+                property_name: "kind".into(),
+                mapping: Some(BTreeMap::from([("a".to_owned(), "A".to_owned())])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut base = ObjectSchema::default();
+        let conflicts = report(&mut base, incoming, MergeOptions::new());
+        assert!(conflicts.is_empty(), "{conflicts:?}");
+        let discriminator = base.discriminator.as_ref().unwrap();
+        assert_eq!(discriminator.property_name, "kind");
+
+        // Merged key by key when both sides have one.
+        let incoming = ObjectSchema {
+            discriminator: Some(Discriminator {
+                property_name: "kind".into(),
+                mapping: Some(BTreeMap::from([("b".to_owned(), "B".to_owned())])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let conflicts = report(&mut base, incoming, MergeOptions::new());
+        assert!(conflicts.is_empty(), "{conflicts:?}");
+        assert_eq!(
+            base.discriminator.unwrap().mapping.unwrap().len(),
+            2,
+            "both mapping entries survive"
+        );
+    }
+
+    #[test]
+    fn discriminator_extensions_merge() {
+        let extensions = |key: &str| Some(BTreeMap::from([(key.to_owned(), serde_json::json!(1))]));
+        let mut base = Discriminator {
+            property_name: "kind".into(),
+            extensions: extensions("x-a"),
+            ..Default::default()
+        };
+        let incoming = Discriminator {
+            property_name: "kind".into(),
+            extensions: extensions("x-b"),
+            ..Default::default()
+        };
+        let conflicts = report(&mut base, incoming, MergeOptions::new());
+        assert!(conflicts.is_empty(), "{conflicts:?}");
+        let merged = base.extensions.unwrap();
+        assert!(merged.contains_key("x-a") && merged.contains_key("x-b"));
     }
 }
