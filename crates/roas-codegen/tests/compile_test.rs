@@ -572,6 +572,8 @@ fn validated_description() -> serde_json::Value {
                 {"type": "array", "prefixItems": [{"type": "string"}], "items": {"type": "string", "maxLength": 1}},
                 {"type": "array", "items": {"type": "integer"}}
             ]},
+            "Pr": {"type": "array", "prefixItems": [{"type": "integer"}], "items": {"$ref": "#/components/schemas/Short"}},
+            "Pn": {"type": "array", "prefixItems": [{"type": "integer"}], "items": false},
             "GatedRest": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "string", "maxLength": 1}},
             "Names": {"type": "object", "propertyNames": {"type": "string", "pattern": "^[a-z]+$", "maxLength": 2},
                 "properties": {"ok": {"type": "string"}, "Bad": {"type": "string"}},
@@ -920,6 +922,9 @@ fn main() {
     // Beside `prefixItems`, `items` is not applied to the prefix.
     assert_eq!(report::<Pf>(r#"{"p":["abc"]}"#), vec![u("/p")]);
     assert_eq!(report::<Pu>(r#"["abc"]"#), vec![u("")]);
+    // A prefix item is neither decoded nor checked as one of `items`.
+    assert_eq!(report::<Pr>(r#"[5,"abc"]"#), vec![u("")]);
+    assert_eq!(report::<Pn>("[1]"), vec![u("")]);
     assert_eq!(report::<Rest>(r#"{"a":"x","b":3,"c":9}"#), vec![v("/c")]);
     assert_eq!(report::<Code>(r#""ABC""#), vec![v("")]);
     assert_eq!(report::<Coded>(r#""ab""#), vec![]);
@@ -1365,6 +1370,8 @@ func main() {
 	check(`["a","bc"]`, report[api.EachList](`["a","bc"]`), v("/1"))
 	check(`{"p":["abc"]}`, report[api.Pf](`{"p":["abc"]}`), u("/p"))
 	check(`["abc"]`, report[api.Pu](`["abc"]`), u(""))
+	check(`[5,"abc"]`, report[api.Pr](`[5,"abc"]`), u(""))
+	check(`[1]`, report[api.Pn](`[1]`), u(""))
 	check(`{"a":"x","b":3,"c":9}`, report[api.Rest](`{"a":"x","b":3,"c":9}`), v("/c"))
 	check(`"ABC"`, report[api.Code](`"ABC"`), v(""))
 	check(`"ab"`, report[api.Coded](`"ab"`))

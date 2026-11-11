@@ -971,8 +971,17 @@ impl Translator<'_> {
     }
 
     fn array(&self, s: &ArraySchema, pointer: String) -> FrontSchema {
+        // Beside `prefixItems`, `items` speaks only of the items after the
+        // prefix, and the prefix items have schemas of their own: no one
+        // item type holds both, so the items are kept as raw JSON and
+        // `items` is reported unchecked rather than applied to every item.
+        let prefixed = s
+            .extensions
+            .as_ref()
+            .is_some_and(|e| e.contains_key("prefixItems"));
         let items = match &s.items {
             None | Some(BoolOr::Bool(true)) => None,
+            Some(_) if prefixed => None,
             Some(BoolOr::Bool(false)) => {
                 let mut child = pointer.clone();
                 push_token(&mut child, "items");
@@ -995,6 +1004,9 @@ impl Translator<'_> {
         front.constraints.max_items = s.max_items;
         front.constraints.unique_items = s.unique_items.unwrap_or(false);
         front.unsupported = catch_all_keywords(&s.extensions, &mut front.extensions);
+        if prefixed && !matches!(s.items, None | Some(BoolOr::Bool(true))) {
+            front.unsupported.push("items".to_owned());
+        }
         front.dialect = dialect_of(&s.extensions);
         front.const_value = const_of(&s.extensions);
         front
@@ -1063,15 +1075,14 @@ impl Translator<'_> {
 /// Split the model's catch-all into `x-` extensions, kept, and every
 /// other keyword, returned for reporting.
 /// The inline item or member-value schema's constraints. Not beside
-/// `prefixItems` or `patternProperties`: `items` and `additionalProperties`
-/// then speak only of the items after the prefix, or the members no
-/// pattern matches, which the generated array or map does not separate.
+/// `patternProperties`: `additionalProperties` then speaks only of the
+/// members no pattern matches, which the generated map does not separate.
+/// (Beside `prefixItems`, an array has no item schema to read.)
 fn items(schema: &FrontSchema) -> Option<Items> {
     let (keyword, inner) = match &schema.kind {
-        // Beside `prefixItems`, `items` speaks only of the items after it.
         Kind::Array {
             items: Some(Slot::Inline(inner)),
-        } if !schema.unsupported.iter().any(|k| k == "prefixItems") => ("items", inner),
+        } => ("items", inner),
         Kind::Object {
             additional: Additional::Schema(Slot::Inline(inner)),
             ..
