@@ -8,8 +8,10 @@
 //! ## Modules
 //!
 //! - [`common`] — version-agnostic helpers: the `x-` extensions serde
-//!   helper, the `$ref` wrapper, untyped protocol bindings, and the
-//!   runtime-expression grammar.
+//!   helper, the `$ref` wrapper with its
+//!   [`get_item`](common::reference::RefOr::get_item) and the
+//!   [`Resolution`](common::Resolution) of following one, untyped
+//!   protocol bindings, and the runtime-expression grammar.
 //! - [`validation`] — [`Validate`](validation::Validate) trait,
 //!   [`ValidationOptions`](validation::ValidationOptions) flag set,
 //!   `Context` / `ValidationError` types.
@@ -77,6 +79,21 @@
 //! therefore run on document-local pointers only — see
 //! [`ValidationOptions`](validation::ValidationOptions) to require a
 //! self-contained document instead.
+//!
+//! Document-local resolution is available to callers as well.
+//! [`RefOr::get_item`](common::reference::RefOr::get_item) takes a
+//! version's `Document` and returns a
+//! [`Resolution`](common::Resolution): the item itself, the object at
+//! the end of the `$ref` chain, or whether the chain left the document,
+//! dangles, loops, or names something of another kind. It works for the
+//! kinds that `Document` implements
+//! [`ResolveReference`](common::reference::ResolveReference) for, which
+//! `get_item` lists per version. Where the model holds a bare
+//! `Reference` instead, the v3 `Document` has `resolve_server`,
+//! `resolve_channel` and `resolve_message`; a v2.6 channel item carries
+//! its own `$ref` and is followed with the v2.6
+//! `Document::resolve_channel`. Nothing is loaded, so a `$ref` into
+//! another file is reported as opaque rather than followed.
 //!
 //! ## Versions
 //!

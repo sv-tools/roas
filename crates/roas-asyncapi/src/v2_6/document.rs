@@ -9,7 +9,7 @@
 //! scopes only where the scheme's type allows them.
 
 use crate::common::pointer;
-use crate::common::reference::{RefOr, Reference};
+use crate::common::reference::{RefOr, Reference, ResolveReference};
 use crate::common::resolve::{Resolution, classify_unresolved, follow};
 use crate::v2_6::channel_item::ChannelItem;
 use crate::v2_6::components::Components;
@@ -80,11 +80,35 @@ impl Document {
     /// Resolve a channel item, following its `$ref` field through both
     /// `#/channels/…` and `#/components/channels/…` pointers.
     ///
-    /// An item without a `$ref` resolves to itself.
-    pub(crate) fn resolve_channel<'a>(
-        &'a self,
-        channel: &'a ChannelItem,
-    ) -> Resolution<'a, ChannelItem> {
+    /// An item without a `$ref` resolves to itself. A v2.6 channel item
+    /// carries its `$ref` as a field, beside whatever else it declares,
+    /// so the item passed in and the one found may both have content:
+    /// this returns the one at the end of the chain.
+    ///
+    /// Resolution is document-local. A `$ref` into another document is
+    /// [`Resolution::Opaque`]; nothing is loaded.
+    ///
+    /// ```
+    /// use roas_asyncapi::v2_6::Document;
+    ///
+    /// let doc: Document = serde_json::from_str(r##"{
+    ///     "asyncapi": "2.6.0",
+    ///     "info": { "title": "Signups", "version": "1.0.0" },
+    ///     "channels": {
+    ///         "user/signedup": { "$ref": "#/components/channels/signedUp" }
+    ///     },
+    ///     "components": {
+    ///         "channels": { "signedUp": { "description": "A user signed up" } }
+    ///     }
+    /// }"##).unwrap();
+    ///
+    /// let channel = doc
+    ///     .resolve_channel(&doc.channels["user/signedup"])
+    ///     .found()
+    ///     .expect("declared in this document");
+    /// assert_eq!(channel.description.as_deref(), Some("A user signed up"));
+    /// ```
+    pub fn resolve_channel<'a>(&'a self, channel: &'a ChannelItem) -> Resolution<'a, ChannelItem> {
         let mut current = channel;
         let mut seen: BTreeSet<&str> = BTreeSet::new();
         loop {
@@ -141,23 +165,7 @@ impl Document {
         let Some(entry) = components.security_schemes.get(name) else {
             return Resolution::Missing;
         };
-        follow(self, entry, "securitySchemes", |path| match path {
-            [c, kind, key] if c == "components" && kind == "securitySchemes" => {
-                components.security_schemes.get(key)
-            }
-            _ => None,
-        })
-    }
-
-    /// Resolve a `RefOr<Server>` through either server map.
-    fn resolve_server<'a>(&'a self, entry: &'a RefOr<Server>) -> Resolution<'a, Server> {
-        follow(self, entry, "servers", |path| match path {
-            [c, servers, key] if c == "components" && servers == "servers" => {
-                self.components.as_ref()?.servers.get(key)
-            }
-            [servers, key] if servers == "servers" => self.servers.get(key),
-            _ => None,
-        })
+        entry.get_item(self)
     }
 
     /// Resolve a message `$ref`, following component aliases and
@@ -425,7 +433,7 @@ impl Document {
                 server.validate_with_context(ctx);
                 // Follow a `$ref` so a referenced server's security is
                 // checked as well as an inline one's.
-                let resolution = self.resolve_server(server);
+                let resolution = server.get_item(self);
                 if let Some(problem) = resolution.problem()
                     && let RefOr::Reference(reference) = server
                 {
@@ -566,6 +574,50 @@ impl Document {
 impl Validate for Document {
     fn validate(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error> {
         self.validate_inner(options)
+    }
+}
+
+/// Security schemes, through `#/components/securitySchemes/…`.
+impl ResolveReference<SecurityScheme> for Document {
+    fn resolve_reference<'a>(
+        &'a self,
+        entry: &'a RefOr<SecurityScheme>,
+    ) -> Resolution<'a, SecurityScheme> {
+        follow(self, entry, "securitySchemes", |path| match path {
+            [c, kind, key] if c == "components" && kind == "securitySchemes" => {
+                self.components.as_ref()?.security_schemes.get(key)
+            }
+            _ => None,
+        })
+    }
+}
+
+/// Servers, through both `#/servers/…` and `#/components/servers/…`.
+impl ResolveReference<Server> for Document {
+    fn resolve_reference<'a>(&'a self, entry: &'a RefOr<Server>) -> Resolution<'a, Server> {
+        follow(self, entry, "servers", |path| match path {
+            [c, servers, key] if c == "components" && servers == "servers" => {
+                self.components.as_ref()?.servers.get(key)
+            }
+            [servers, key] if servers == "servers" => self.servers.get(key),
+            _ => None,
+        })
+    }
+}
+
+/// Messages, through `#/components/messages/…` and through pointers at
+/// a channel's operation — `#/channels/<path>/publish/message`, with
+/// any `oneOf/<index>` steps.
+///
+/// A pointer is walked over the document as written, so one that steps
+/// through a channel item names what that item itself declares, not
+/// what the item's own `$ref` leads to.
+impl ResolveReference<Message> for Document {
+    fn resolve_reference<'a>(&'a self, entry: &'a RefOr<Message>) -> Resolution<'a, Message> {
+        match entry {
+            RefOr::Item(message) => Resolution::Found(message),
+            RefOr::Reference(reference) => self.resolve_message(reference),
+        }
     }
 }
 
@@ -2325,5 +2377,204 @@ mod tests {
         let json = serde_json::to_string(&doc).unwrap();
         let reparsed: Document = serde_json::from_str(&json).unwrap();
         assert_eq!(reparsed, doc);
+    }
+
+    /// A document holding one reference of every outcome, per kind.
+    /// It is resolved, never validated.
+    fn resolvable() -> Document {
+        serde_json::from_value(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": {
+                "real": { "url": "kafka://root", "protocol": "kafka" },
+                "alias": { "$ref": "#/components/servers/hop" },
+                "outside": { "$ref": "./other.yaml#/servers/real" },
+                "ghost": { "$ref": "#/components/servers/nope" },
+                "loop": { "$ref": "#/components/servers/a" },
+                "wrong": { "$ref": "#/components/messages/real" },
+                "malformed": { "$ref": "#/servers/bad~2escape" }
+            },
+            "channels": {
+                "real": {
+                    "description": "root",
+                    "publish": { "message": { "name": "Inline" } },
+                    "subscribe": { "message": { "oneOf": [
+                        { "name": "First" },
+                        { "$ref": "#/components/messages/real" }
+                    ] } }
+                },
+                "alias": { "$ref": "#/components/channels/hop" },
+                "outside": { "$ref": "./other.yaml#/channels/real" },
+                "ghost": { "$ref": "#/channels/nope" },
+                "loop": { "$ref": "#/components/channels/a" },
+                "wrong": { "$ref": "#/servers/real" },
+                "malformed": { "$ref": "#/channels/bad~2escape" }
+            },
+            "components": {
+                "servers": {
+                    "hop": { "$ref": "#/servers/real" },
+                    "a": { "$ref": "#/components/servers/b" },
+                    "b": { "$ref": "#/components/servers/a" }
+                },
+                "channels": {
+                    "hop": { "$ref": "#/channels/real" },
+                    "a": { "$ref": "#/components/channels/b" },
+                    "b": { "$ref": "#/components/channels/a" }
+                },
+                "messages": {
+                    "real": { "name": "Component" },
+                    "alias": { "$ref": "#/components/messages/real" },
+                    "inChannel": { "$ref": "#/channels/real/publish/message" },
+                    "inOneOf": { "$ref": "#/channels/real/subscribe/message/oneOf/1" },
+                    "outside": { "$ref": "./other.yaml#/messages/real" },
+                    "ghost": { "$ref": "#/components/messages/nope" },
+                    "a": { "$ref": "#/components/messages/b" },
+                    "b": { "$ref": "#/components/messages/a" },
+                    "wrong": { "$ref": "#/servers/real" },
+                    "malformed": { "$ref": "#/components/messages/bad~2escape" }
+                },
+                "securitySchemes": {
+                    "real": { "type": "userPassword", "description": "declared" },
+                    "alias": { "$ref": "#/components/securitySchemes/real" },
+                    "outside": { "$ref": "./other.yaml#/schemes/real" },
+                    "ghost": { "$ref": "#/components/securitySchemes/nope" },
+                    "a": { "$ref": "#/components/securitySchemes/b" },
+                    "b": { "$ref": "#/components/securitySchemes/a" },
+                    "wrong": { "$ref": "#/servers/real" },
+                    "malformed": { "$ref": "#/components/securitySchemes/bad~2escape" }
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    /// A resolution's variant, by name, so outcomes compare in a table.
+    fn outcome<T>(resolution: &Resolution<'_, T>) -> &'static str {
+        match resolution {
+            Resolution::Found(_) => "found",
+            Resolution::Opaque => "opaque",
+            Resolution::Missing => "missing",
+            Resolution::Cycle => "cycle",
+            Resolution::Unrecognized => "unrecognized",
+            Resolution::WrongKind => "wrong kind",
+        }
+    }
+
+    #[test]
+    fn resolve_channel_tells_every_outcome_apart() {
+        let doc = resolvable();
+        for (key, expected) in [
+            ("real", "found"),
+            ("alias", "found"),
+            ("outside", "opaque"),
+            ("ghost", "missing"),
+            ("loop", "cycle"),
+            ("wrong", "wrong kind"),
+            ("malformed", "unrecognized"),
+        ] {
+            let resolution = doc.resolve_channel(&doc.channels[key]);
+            assert_eq!(outcome(&resolution), expected, "channel `{key}`");
+        }
+
+        // An item without a `$ref` is itself; an alias is its target.
+        let real = &doc.channels["real"];
+        assert!(std::ptr::eq(
+            doc.resolve_channel(real).found().expect("inline"),
+            real
+        ));
+        assert!(std::ptr::eq(
+            doc.resolve_channel(&doc.channels["alias"])
+                .found()
+                .expect("root -> components -> root"),
+            real
+        ));
+    }
+
+    #[test]
+    fn resolve_server_tells_every_outcome_apart() {
+        let doc = resolvable();
+        for (key, expected) in [
+            ("real", "found"),
+            ("alias", "found"),
+            ("outside", "opaque"),
+            ("ghost", "missing"),
+            ("loop", "cycle"),
+            ("wrong", "wrong kind"),
+            ("malformed", "unrecognized"),
+        ] {
+            let resolution = doc.servers[key].get_item(&doc);
+            assert_eq!(outcome(&resolution), expected, "server `{key}`");
+        }
+
+        // An inline entry is itself; an alias is its target.
+        let RefOr::Item(real) = &doc.servers["real"] else {
+            panic!("inline");
+        };
+        for key in ["real", "alias"] {
+            let server = doc.servers[key].get_item(&doc).found().expect("resolves");
+            assert!(std::ptr::eq(server, real), "server `{key}`");
+        }
+    }
+
+    #[test]
+    fn resolve_message_tells_every_outcome_apart() {
+        let doc = resolvable();
+        let messages = &doc.components.as_ref().expect("components").messages;
+        for (key, expected) in [
+            ("real", Ok("Component")),
+            ("alias", Ok("Component")),
+            // A message hanging off a channel's operation is reachable
+            // by pointer, through `oneOf` and on to a component.
+            ("inChannel", Ok("Inline")),
+            ("inOneOf", Ok("Component")),
+            ("outside", Err("opaque")),
+            ("ghost", Err("missing")),
+            ("a", Err("cycle")),
+            ("wrong", Err("wrong kind")),
+            ("malformed", Err("unrecognized")),
+        ] {
+            let resolution = messages[key].get_item(&doc);
+            let got = match resolution {
+                Resolution::Found(message) => Ok(message.name.as_deref().expect("named")),
+                other => Err(outcome(&other)),
+            };
+            assert_eq!(got, expected, "message `{key}`");
+        }
+    }
+
+    #[test]
+    fn resolve_security_scheme_tells_every_outcome_apart() {
+        let doc = resolvable();
+        let schemes = &doc
+            .components
+            .as_ref()
+            .expect("components")
+            .security_schemes;
+        for (key, expected) in [
+            ("real", "found"),
+            ("alias", "found"),
+            ("outside", "opaque"),
+            ("ghost", "missing"),
+            ("a", "cycle"),
+            ("wrong", "wrong kind"),
+            ("malformed", "unrecognized"),
+        ] {
+            let resolution = schemes[key].get_item(&doc);
+            assert_eq!(outcome(&resolution), expected, "scheme `{key}`");
+        }
+
+        let RefOr::Item(real) = &schemes["real"] else {
+            panic!("inline");
+        };
+        for key in ["real", "alias"] {
+            let scheme = schemes[key].get_item(&doc).found().expect("resolves");
+            assert!(std::ptr::eq(scheme, real), "scheme `{key}`");
+        }
+
+        // Without `components` there is nowhere for a pointer to land.
+        let mut bare = resolvable();
+        let alias = schemes["alias"].clone();
+        bare.components = None;
+        assert_eq!(outcome(&alias.get_item(&bare)), "missing");
     }
 }

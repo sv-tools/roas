@@ -49,7 +49,7 @@ pub mod tag;
 pub mod version;
 
 pub use crate::common::bindings::Bindings;
-pub use crate::common::reference::{RefOr, Reference};
+pub use crate::common::reference::{RefOr, Reference, ResolveReference};
 pub use channel_item::ChannelItem;
 pub use components::Components;
 pub use correlation_id::CorrelationId;

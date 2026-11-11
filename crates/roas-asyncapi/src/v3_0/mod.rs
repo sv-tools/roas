@@ -32,7 +32,7 @@ pub mod version;
 pub mod from_v2_6;
 
 pub use crate::common::bindings::Bindings;
-pub use crate::common::reference::{RefOr, Reference};
+pub use crate::common::reference::{RefOr, Reference, ResolveReference};
 pub use channel::Channel;
 pub use components::Components;
 pub use correlation_id::CorrelationId;
