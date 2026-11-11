@@ -1505,6 +1505,25 @@ impl<'d> Compiler<'d> {
                     Some(expression::undeclared_workflow(parsed.text, parsed.parts[0]).into())
                 }
                 Root::Sources
+                    if parsed.source_workflow().is_some_and(|(alias, _)| {
+                        self.description().source_descriptions.iter().any(|source| {
+                            source.name == alias
+                                && source.type_.is_none_or(|kind| kind == SourceType::Arazzo)
+                        })
+                    }) =>
+                {
+                    // Reading a workflow's outputs needs its document as
+                    // running one does; a run reports it if it did not run.
+                    self.target(
+                        &format!(
+                            "$sourceDescriptions.{}.{}",
+                            parsed.parts[0], parsed.parts[1]
+                        ),
+                        site,
+                    );
+                    None
+                }
+                Root::Sources
                     if !self
                         .description()
                         .source_descriptions
