@@ -761,6 +761,8 @@ fn validated_description() -> serde_json::Value {
             "GatedInt": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "integer"}},
             "GatedIntU": {"oneOf": [{"$ref": "#/components/schemas/GatedInt"}, {"type": "string"}]},
             "GatedIntAll": {"allOf": [{"$ref": "#/components/schemas/GatedInt"}, {"type": "object", "properties": {"q": {"type": "integer"}}}]},
+            "GatedClosed": {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string"}, "b": {"type": "string"}}},
+            "GatedClosedU": {"oneOf": [{"$ref": "#/components/schemas/GatedClosed"}, {"type": "integer"}]},
             "Ip": {"oneOf": [{"type": "string", "format": "ipv4"}, {"type": "string", "maxLength": 3}]},
             "StringOnly": {"type": "string", "enum": ["a", "b"]},
             "ObjectOnly": {"type": "object", "additionalProperties": false, "properties": {"s": {"$ref": "#/components/schemas/StringOnly"}}},
@@ -818,7 +820,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
-        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedInt": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "IntCatch": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
+        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedInt": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedClosed": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "IntCatch": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
@@ -1193,6 +1195,11 @@ fn main() {
     assert_eq!(report::<AliasU>(r#"{"aa":5}"#), vec![u("")]);
     assert_eq!(report::<GatedIntU>(r#"{"a":"xyz"}"#), vec![u("")]);
     assert_eq!(report::<GatedIntAll>(r#"{"a":"xyz"}"#), vec![u("")]);
+    assert_eq!(report::<GatedClosedU>(r#"{"a":"x"}"#), vec![u("")]);
+    // A value of another JSON kind cannot match, whatever the names.
+    assert_eq!(report::<GatedIntU>("5"), vec![v("")]);
+    assert_eq!(report::<GatedClosedU>(r#""s""#), vec![v("")]);
+    assert!(report::<GatedIntAll>("5").contains(&v("")));
     let caught: IntCatch = serde_json::from_str(r#"{"aa":"x","b":7,"c":1.0}"#).unwrap();
     assert_eq!(caught.a.as_deref(), Some("x"));
     assert_eq!(serde_json::to_string(&caught).unwrap(), r#"{"a":"x","b":7,"c":1}"#);
@@ -1543,6 +1550,9 @@ func main() {
 	check(`{"aa":5}`, report[api.AliasU](`{"aa":5}`))
 	check(`{"a":"xyz"}`, report[api.GatedIntU](`{"a":"xyz"}`))
 	check(`{"a":"xyz"}`, report[api.GatedIntAll](`{"a":"xyz"}`))
+	check(`{"a":"x"}`, report[api.GatedClosedU](`{"a":"x"}`))
+	check(`5`, report[api.GatedIntU](`5`), v(""))
+	check(`"s"`, report[api.GatedClosedU](`"s"`), v(""))
 	check(`{"a":{"kind":"ZooCat"}}`, report[api.ZooOrStr](`{"a":{"kind":"ZooCat"}}`))
 	check(`"x"`, report[api.Ip](`"x"`), u(""))
 	check(`[]`, report[api.InlineItems](`[]`))

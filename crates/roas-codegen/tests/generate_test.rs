@@ -1070,3 +1070,40 @@ fn items_beside_prefix_items_is_reported_not_applied() {
         "{text}"
     );
 }
+
+#[test]
+fn only_applied_aliases_make_a_branch_undecided() {
+    let g = generate(
+        &document(serde_json::json!({
+            "ExtBad": {"type": "object", "properties": {"a": {"type": "string",
+                "x-rust-attrs": ["#[serde(alias = \"aa\", default)]", "not an attribute"]}},
+                "additionalProperties": {"type": "integer"}},
+            "ExtOk": {"type": "object", "properties": {"a": {"type": "string",
+                "x-rust-attrs": "#[serde(alias = \"aa\")]"}},
+                "additionalProperties": {"type": "integer"}},
+            "ExtBadU": {"oneOf": [{"$ref": "#/components/schemas/ExtBad"}, {"type": "string"}]},
+            "ExtOkU": {"oneOf": [{"$ref": "#/components/schemas/ExtOk"}, {"type": "string"}]}
+        })),
+        &rust_config("validation = true\nallow_codegen_extensions = true"),
+    )
+    .unwrap();
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    let impl_of = |name: &str| {
+        let start = text
+            .find(&format!("impl Validate for {name} "))
+            .expect(name);
+        let end = text[start..].find("\n}\n").unwrap() + start;
+        text[start..end].to_owned()
+    };
+    let guard = "starts_with('{')";
+    assert!(
+        !impl_of("ExtBadU").contains(guard),
+        "{}",
+        impl_of("ExtBadU")
+    );
+    assert!(impl_of("ExtOkU").contains(guard), "{}", impl_of("ExtOkU"));
+}

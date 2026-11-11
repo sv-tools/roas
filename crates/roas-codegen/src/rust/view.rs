@@ -392,8 +392,8 @@ impl Builder<'_> {
     /// Whether the struct `id` reads its members by other names than the
     /// schema does: a field compiled out by a `cfg` gate (its member then
     /// lands among the others) or read under a `serde(alias)`. A value
-    /// valid for the schema may then fail to decode. Attributes that do
-    /// not parse count, since generation reports them anyway.
+    /// valid for the schema may then fail to decode. A configured
+    /// attribute that does not parse counts: generation fails on it anyway.
     fn reshaped(&self, id: &SchemaId) -> bool {
         let def = &self.ir.types[id];
         let TypeKind::Struct(s) = &def.kind else {
@@ -405,13 +405,21 @@ impl Builder<'_> {
                 .map(|f| f.attrs.clone())
                 .unwrap_or_default();
             if self.config.allow_codegen_extensions {
-                match field.extensions.get("x-rust-attrs") {
-                    Some(serde_json::Value::String(a)) => attrs.push(a.clone()),
-                    Some(serde_json::Value::Array(items)) => {
-                        attrs.extend(items.iter().filter_map(|v| v.as_str().map(str::to_owned)))
-                    }
-                    _ => {}
-                }
+                let described: Vec<String> = match field.extensions.get("x-rust-attrs") {
+                    Some(serde_json::Value::String(a)) => vec![a.clone()],
+                    Some(serde_json::Value::Array(items)) => items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                // Only the entries generation applies: a failing one is
+                // dropped there with a warning.
+                attrs.extend(
+                    described
+                        .into_iter()
+                        .filter(|a| check_field_attrs(std::slice::from_ref(a), "").is_ok()),
+                );
             }
             attrs.iter().any(|attr| {
                 let one = std::slice::from_ref(attr);
