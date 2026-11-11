@@ -86,7 +86,9 @@ impl Document {
     /// this returns the one at the end of the chain.
     ///
     /// Resolution is document-local. A `$ref` into another document is
-    /// [`Resolution::Opaque`]; nothing is loaded.
+    /// [`Resolution::Opaque`]; nothing is loaded. So is a local pointer
+    /// at a place the model does not hold as a channel item, such as a
+    /// channel-shaped `#/x-channel` extension.
     ///
     /// ```
     /// use roas_asyncapi::v2_6::Document;
@@ -612,6 +614,11 @@ impl ResolveReference<Server> for Document {
 /// A pointer is walked over the document as written, so one that steps
 /// through a channel item names what that item itself declares, not
 /// what the item's own `$ref` leads to.
+///
+/// A local pointer at a place the model does not hold as one message
+/// is [`Resolution::Opaque`], like a `$ref` into another document:
+/// `#/channels/<path>/publish/message` where that is a `oneOf` set, or
+/// a message-shaped `x-` extension.
 impl ResolveReference<Message> for Document {
     fn resolve_reference<'a>(&'a self, entry: &'a RefOr<Message>) -> Resolution<'a, Message> {
         match entry {
@@ -2559,6 +2566,98 @@ mod tests {
         let alias = schemes["alias"].clone();
         bare.components = None;
         assert_eq!(alias.get_item(&bare), Resolution::Missing);
+    }
+
+    #[test]
+    fn a_local_reference_the_model_cannot_hand_back_is_opaque() {
+        // `#/channels/one/publish/message` is real, but what sits there
+        // is a `oneOf` set rather than a message; an `x-` extension
+        // shaped like a message is not held as one either. Neither is
+        // a document bug, and neither is in another document.
+        let doc: Document = serde_json::from_value(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "one": {
+                    "publish": { "message": { "oneOf": [ { "name": "A" }, { "name": "B" } ] } }
+                },
+                "extended": { "$ref": "#/x-channel" }
+            },
+            "components": {
+                "messages": {
+                    "set": { "$ref": "#/channels/one/publish/message" },
+                    "extended": { "$ref": "#/x-message" }
+                }
+            },
+            "x-message": { "name": "Shared" },
+            "x-channel": { "description": "shared" }
+        }))
+        .unwrap();
+        let messages = &doc.components.as_ref().expect("components").messages;
+        assert_eq!(messages["set"].get_item(&doc), Resolution::Opaque);
+        assert_eq!(messages["extended"].get_item(&doc), Resolution::Opaque);
+        assert_eq!(
+            doc.resolve_channel(&doc.channels["extended"]),
+            Resolution::Opaque
+        );
+    }
+
+    #[test]
+    fn an_unusable_external_fragment_is_reported_inside_one_of() {
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "user": {
+                    "publish": { "message": { "oneOf": [
+                        { "$ref": "./other.yaml#bad" },
+                        { "$ref": "./other.yaml#/messages/fine" }
+                    ] } }
+                }
+            }
+        });
+        assert_eq!(
+            errors_for(value),
+            [
+                "#.channels.user.publish.message.oneOf[0].$ref: message `./other.yaml#bad` is not a usable JSON Pointer"
+            ],
+        );
+    }
+
+    #[test]
+    fn an_unusable_external_fragment_is_reported_beside_the_external_reference() {
+        // Asking for a self-contained document reports the reference
+        // for leaving it; that it is also not a pointer is a second
+        // finding, for a channel and a message as for a server.
+        let doc: Document = serde_json::from_value(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": { "prod": { "$ref": "./other.yaml#bad" } },
+            "channels": {
+                "direct": { "$ref": "./other.yaml#bad" },
+                "user": { "publish": { "message": { "$ref": "./other.yaml#bad" } } }
+            }
+        }))
+        .unwrap();
+        let mut errors: Vec<String> = doc
+            .validate(EnumSet::only(ValidationOptions::ErrorOnExternalReference))
+            .expect_err("external references are errors here")
+            .errors
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        errors.sort();
+        assert_eq!(
+            errors,
+            [
+                "#.channels.direct.$ref: channel `./other.yaml#bad` is not a usable JSON Pointer",
+                "#.channels.direct.$ref: external reference `./other.yaml#bad` cannot be resolved by this crate",
+                "#.channels.user.publish.message.$ref: external reference `./other.yaml#bad` cannot be resolved by this crate",
+                "#.channels.user.publish.message.$ref: message `./other.yaml#bad` is not a usable JSON Pointer",
+                "#.servers.prod.$ref: external reference `./other.yaml#bad` cannot be resolved by this crate",
+                "#.servers.prod.$ref: server `./other.yaml#bad` is not a usable JSON Pointer",
+            ],
+        );
     }
 
     /// One reference of each kind, written directly and behind an

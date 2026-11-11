@@ -38,11 +38,18 @@ pub enum Resolution<'a, T> {
     /// Resolved to a concrete object in this document — the inline
     /// item itself, or the object at the end of a chain of `$ref`s.
     Found(&'a T),
-    /// The chain ends at a reference into another document
-    /// (`./other.yaml#/…`), or at a location in this one that the
-    /// typed model does not hold as an object of this kind — a
-    /// suitably shaped `x-` extension, say. Either way it is not a
-    /// document bug, and there is no typed object to hand back.
+    /// The chain ends in another document (`./other.yaml#/…`), or at a
+    /// place in this one that the typed model does not hold as an
+    /// object of this kind.
+    ///
+    /// The second is as common as the first, so `Opaque` does not mean
+    /// "external". A suitably shaped `x-` extension is one such place.
+    /// So is a spot that holds only a reference of its own, such as a
+    /// v3 operation's `channel` (`#/operations/<name>/channel`) or an
+    /// entry of its `messages` (`#/operations/<name>/messages/0`), even
+    /// though that reference leads somewhere in this document. Either
+    /// way it is not a document bug, and there is no typed object to
+    /// hand back.
     Opaque,
     /// A local pointer that names nothing: a dangling reference.
     Missing,

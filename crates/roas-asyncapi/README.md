@@ -105,7 +105,9 @@ let operation = doc.operations["receiveLightMeasurement"]
 // method for that kind follows it.
 match doc.resolve_channel(&operation.channel) {
     Resolution::Found(channel) => assert_eq!(channel.messages.len(), 1),
-    Resolution::Opaque => { /* another document: not loaded here */ }
+    // Another document (nothing is loaded), or a place in this one
+    // the typed model does not hold as a channel.
+    Resolution::Opaque => {}
     other => panic!("channel {}", other.problem().unwrap_or("did not resolve")),
 }
 

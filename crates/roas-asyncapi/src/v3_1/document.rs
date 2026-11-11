@@ -175,8 +175,10 @@ impl Document {
     /// `#/components/servers/…`.
     ///
     /// Resolution is document-local: a `$ref` into another document is
-    /// [`Resolution::Opaque`], and nothing is loaded. For a
-    /// `RefOr<Server>` use [`RefOr::get_item`].
+    /// [`Resolution::Opaque`], and nothing is loaded. So is a local
+    /// pointer at a place the model does not hold as a server, such as
+    /// a server-shaped `x-` extension. For a `RefOr<Server>` use
+    /// [`RefOr::get_item`].
     pub fn resolve_server(&self, reference: &Reference) -> Resolution<'_, Server> {
         self.resolve(
             reference,
@@ -194,6 +196,13 @@ impl Document {
     /// Resolution is document-local: a `$ref` into another document is
     /// [`Resolution::Opaque`], and nothing is loaded. For a
     /// `RefOr<Channel>` use [`RefOr::get_item`].
+    ///
+    /// A local pointer at a place the model does not hold as a channel
+    /// is `Opaque` too, though it is in this document. That covers a
+    /// pointer at another reference to a channel —
+    /// `#/operations/<name>/channel` or
+    /// `#/operations/<name>/reply/channel` — and a channel-shaped `x-`
+    /// extension. Only the two channel maps hold channels.
     ///
     /// ```
     /// use roas_asyncapi::v3_1::Document;
@@ -251,6 +260,12 @@ impl Document {
     /// Resolution is document-local: a `$ref` into another document is
     /// [`Resolution::Opaque`], and nothing is loaded. For a
     /// `RefOr<Message>` use [`RefOr::get_item`].
+    ///
+    /// A local pointer at a place the model does not hold as a message
+    /// is `Opaque` too, though it is in this document. That covers a
+    /// pointer at another reference to a message —
+    /// `#/operations/<name>/messages/0` — and a message-shaped `x-`
+    /// extension.
     ///
     /// A pointer is walked over the document as written, so one that
     /// steps through a channel which is itself only a `$ref` names
@@ -2464,7 +2479,10 @@ mod tests {
                 "ghost": { "$ref": "#/components/servers/nope" },
                 "loop": { "$ref": "#/components/servers/a" },
                 "wrong": { "$ref": "#/channels/real" },
-                "malformed": { "$ref": "#/servers/bad~2escape" }
+                "malformed": { "$ref": "#/servers/bad~2escape" },
+                "viaOutside": { "$ref": "#/servers/outside" },
+                "badFragment": { "$ref": "./other.yaml#bad" },
+                "viaBadFragment": { "$ref": "#/servers/badFragment" }
             },
             "channels": {
                 "real": {
@@ -2479,7 +2497,10 @@ mod tests {
                 "ghost": { "$ref": "#/channels/nope" },
                 "loop": { "$ref": "#/components/channels/a" },
                 "wrong": { "$ref": "#/servers/real" },
-                "malformed": { "$ref": "#/channels/bad~2escape" }
+                "malformed": { "$ref": "#/channels/bad~2escape" },
+                "viaOutside": { "$ref": "#/channels/outside" },
+                "badFragment": { "$ref": "./other.yaml#bad" },
+                "viaBadFragment": { "$ref": "#/channels/badFragment" }
             },
             "operations": {
                 "real": {
@@ -2493,7 +2514,10 @@ mod tests {
                 "ghost": { "$ref": "#/operations/nope" },
                 "loop": { "$ref": "#/components/operations/a" },
                 "wrong": { "$ref": "#/servers/real" },
-                "malformed": { "$ref": "#/operations/bad~2escape" }
+                "malformed": { "$ref": "#/operations/bad~2escape" },
+                "viaOutside": { "$ref": "#/operations/outside" },
+                "badFragment": { "$ref": "./other.yaml#bad" },
+                "viaBadFragment": { "$ref": "#/operations/badFragment" }
             },
             "components": {
                 "servers": {
@@ -2522,6 +2546,9 @@ mod tests {
                     "b": { "$ref": "#/components/replies/a" },
                     "wrong": { "$ref": "#/servers/real" },
                     "malformed": { "$ref": "#/components/replies/bad~2escape" },
+                    "viaOutside": { "$ref": "#/components/replies/outside" },
+                    "badFragment": { "$ref": "./other.yaml#bad" },
+                    "viaBadFragment": { "$ref": "#/components/replies/badFragment" },
                     "elsewhere": { "$ref": "#/operations/real/reply" }
                 },
                 "messages": {
@@ -2537,7 +2564,10 @@ mod tests {
                     "a": { "$ref": "#/components/messages/b" },
                     "b": { "$ref": "#/components/messages/a" },
                     "wrong": { "$ref": "#/servers/real" },
-                    "malformed": { "$ref": "#/components/messages/bad~2escape" }
+                    "malformed": { "$ref": "#/components/messages/bad~2escape" },
+                    "viaOutside": { "$ref": "#/components/messages/outside" },
+                    "badFragment": { "$ref": "./other.yaml#bad" },
+                    "viaBadFragment": { "$ref": "#/components/messages/badFragment" }
                 }
             }
         }))
@@ -2546,14 +2576,39 @@ mod tests {
 
     /// The outcomes every kind shares that find nothing, by the key
     /// that produces each.
-    fn unfound<T>() -> [(&'static str, Resolution<'static, T>); 5] {
+    fn unfound<T>() -> [(&'static str, Resolution<'static, T>); 8] {
         [
+            // Another document, reached directly or through an alias.
             ("outside", Resolution::Opaque),
+            ("viaOutside", Resolution::Opaque),
             ("ghost", Resolution::Missing),
             ("loop", Resolution::Cycle),
             ("wrong", Resolution::WrongKind),
             ("malformed", Resolution::Unrecognized),
+            // Another document, but not a pointer into it — which shows
+            // without fetching anything, however the chain got there.
+            ("badFragment", Resolution::Unrecognized),
+            ("viaBadFragment", Resolution::Unrecognized),
         ]
+    }
+
+    #[test]
+    fn a_local_reference_the_model_cannot_hand_back_is_opaque() {
+        // Each of these pointers is real and leads, through the
+        // reference sitting there, to something in this document. But
+        // the place itself holds a reference, not a channel or a
+        // message, so there is no typed object to hand back — and
+        // nothing wrong with the document either.
+        let doc = resolvable();
+        for target in [
+            "#/operations/real/channel",
+            "#/operations/real/reply/channel",
+        ] {
+            let resolution = doc.resolve_channel(&reference(target));
+            assert_eq!(resolution, Resolution::Opaque, "`{target}`");
+        }
+        let resolution = doc.resolve_message(&reference("#/operations/real/messages/0"));
+        assert_eq!(resolution, Resolution::Opaque);
     }
 
     fn reference(target: &str) -> Reference {

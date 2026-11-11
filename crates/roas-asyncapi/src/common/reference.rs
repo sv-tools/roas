@@ -136,7 +136,9 @@ impl<T> RefOr<T> {
     /// dangling, looping, or naming something of another kind.
     ///
     /// Resolution is document-local. Nothing is loaded, so a `$ref`
-    /// into another document is [`Resolution::Opaque`].
+    /// into another document is [`Resolution::Opaque`] — as is one at
+    /// a place in this document that the typed model does not hold as
+    /// a `T`.
     ///
     /// `doc` is a version's `Document`, which implements
     /// [`ResolveReference<T>`] for the kinds it can follow:
