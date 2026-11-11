@@ -730,7 +730,7 @@ where
 /// [`ResolveReference::resolved_reference`]. Where the walk stops — a
 /// missing key, a cycle, a reference into another document — the last
 /// reference reached is the answer.
-pub(crate) fn resolved_in_map<'a, T, D, R>(
+pub fn resolved_in_map<'a, T, D, R>(
     spec: &'a T,
     reference: &'a str,
     prefix: &str,
