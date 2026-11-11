@@ -502,7 +502,7 @@ fn pattern_members(s: &crate::ir::StructDef, view: &TypeView, cx: &mut Context<'
             }
             // Matching or not, nothing is decided against a pattern that
             // lets anything be, when the other members may be anything too.
-            Err(_) if pattern.accepts_anything() && matches!(s.others, crate::ir::Others::Any) => {
+            Err(_) if pattern.accepts_anything(cx.ir) && matches!(s.others, crate::ir::Others::Any) => {
                 continue;
             }
             // Whether the member matches is not known: nor whether
@@ -559,14 +559,18 @@ fn declared_patterns(
         let mut reads = false;
         // Decoded into a substitution or a 32-bit float, the value written
         // out is not the one that was sent.
-        let lossy =
-            checks::reaches_extern(cx.ir, &field.ty) || checks::number_range(cx.ir, &[&field.ty]).1;
+        // So is one read as a float. (`jsontext.Value` keeps its text.)
+        let ir = cx.ir;
+        let lossy = checks::reaches_leaf(ir, &field.ty, &|ty| {
+            matches!(ty, TypeRef::Extern(_) | TypeRef::Number(_))
+                || matches!(ty, TypeRef::Named(id) if matches!(ir.types.get(id).map(|d| &d.kind), Some(TypeKind::Extern)))
+        });
         for (pattern, ty) in s.patterns.iter().zip(&view.pattern_tys) {
             match pattern.matches_name(&field.raw_name) {
                 None => {}
                 // Matching or not, a pattern that lets anything be decides
                 // nothing.
-                Some(_) if pattern.accepts_anything() => {}
+                Some(_) if pattern.accepts_anything(cx.ir) => {}
                 Some(Ok(())) if lossy && pattern.branch().is_some() => parts.push(format!(
                     "r.unevaluated(pointer, {})",
                     lit(&format!(

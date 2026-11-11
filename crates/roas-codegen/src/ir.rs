@@ -145,12 +145,23 @@ impl PatternDef {
         }
     }
 
-    /// Whether the pattern's schema lets any member be: `{}` or `true`.
-    pub(crate) fn accepts_anything(&self) -> bool {
+    /// Whether the pattern's schema lets any member be: `{}` or `true`,
+    /// written in place or behind references.
+    pub(crate) fn accepts_anything(&self, ir: &Ir) -> bool {
+        fn any(ir: &Ir, ty: &TypeRef, depth: usize) -> bool {
+            match ty {
+                TypeRef::Any => true,
+                TypeRef::Nullable(inner) | TypeRef::Boxed(inner) => any(ir, inner, depth),
+                TypeRef::Named(id) if depth < 64 => ir.types.get(id).is_some_and(|def| {
+                    def.constraints == Constraints::default()
+                        && matches!(&def.kind, TypeKind::Newtype(t) | TypeKind::Alias(t) if any(ir, t, depth + 1))
+                }),
+                _ => false,
+            }
+        }
         self.branch().is_some_and(|b| {
-            matches!(&b.ty, TypeRef::Any)
-                || matches!(&b.ty, TypeRef::Nullable(inner) if matches!(inner.as_ref(), TypeRef::Any))
-        } && b.constraints == Constraints::default() && !b.unchecked)
+            any(ir, &b.ty, 0) && b.constraints == Constraints::default() && !b.unchecked
+        })
     }
 
     /// Whether the declared property `name` matches the pattern: `None`

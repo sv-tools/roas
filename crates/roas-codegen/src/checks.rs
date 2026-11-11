@@ -770,6 +770,51 @@ fn reaches(
     walk(ir, ty, reshaped, externs, &mut Default::default())
 }
 
+/// Whether a value of `ty`, decoded, holds anything `leaf` picks out —
+/// through containers, struct fields and catch-alls, newtypes, aliases and
+/// tagged variants. An open holder keeps its raw text, so it is not
+/// walked into.
+pub(crate) fn reaches_leaf(
+    ir: &crate::ir::Ir,
+    ty: &TypeRef,
+    leaf: &dyn Fn(&TypeRef) -> bool,
+) -> bool {
+    fn walk(
+        ir: &crate::ir::Ir,
+        ty: &TypeRef,
+        leaf: &dyn Fn(&TypeRef) -> bool,
+        seen: &mut std::collections::BTreeSet<crate::diagnostic::SchemaId>,
+    ) -> bool {
+        if leaf(ty) {
+            return true;
+        }
+        match ty {
+            TypeRef::Boxed(inner)
+            | TypeRef::Nullable(inner)
+            | TypeRef::Array(inner)
+            | TypeRef::Map(inner) => walk(ir, inner, leaf, seen),
+            TypeRef::Named(id) => {
+                if !seen.insert(id.clone()) {
+                    return false;
+                }
+                match ir.types.get(id).map(|d| &d.kind) {
+                    Some(TypeKind::Struct(s)) => {
+                        s.fields.iter().any(|f| walk(ir, &f.ty, leaf, seen))
+                            || matches!(&s.additional, crate::ir::Additional::CatchAll(t) if walk(ir, t, leaf, seen))
+                    }
+                    Some(TypeKind::Newtype(t) | TypeKind::Alias(t)) => walk(ir, t, leaf, seen),
+                    Some(TypeKind::UnionTagged(u)) => {
+                        u.variants.iter().any(|v| walk(ir, &v.ty, leaf, seen))
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+    walk(ir, ty, leaf, &mut Default::default())
+}
+
 /// Whether decoding a branch proves nothing: it declares what neither its
 /// type nor a generated check enforces.
 pub(crate) fn unsure(branch: &crate::ir::Branch) -> bool {

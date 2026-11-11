@@ -787,6 +787,13 @@ fn validated_description() -> serde_json::Value {
                 "patternProperties": {"^x": {"type": "string", "maxLength": 1}}},
             "PatAnything": {"type": "object", "properties": {"id": {"type": "string"}},
                 "patternProperties": {"\\bq": {}}},
+            "PatF64Max": {"type": "object", "properties": {"xa": {"type": "number"}, "xv": {}},
+                "patternProperties": {"^x": {"type": "integer", "maximum": 9007199254740992u64}}},
+            "Whatever": {},
+            "PatRefAnything": {"type": "object", "properties": {"id": {"type": "string"}},
+                "patternProperties": {"\\bq": {"$ref": "#/components/schemas/Whatever"}}},
+            "PatAliasRef": {"type": "object", "properties": {"xa": {"$ref": "#/components/schemas/ShortAliased"}},
+                "patternProperties": {"^x": {"type": "object", "properties": {"aa": {"type": "string", "maxLength": 1}}}}},
             "PatClosedFalse": {"type": "object", "additionalProperties": false,
                 "patternProperties": {"^x-": false}},
             "PatFalse": {"type": "object",
@@ -1294,8 +1301,15 @@ fn main() {
     assert_eq!(report::<PatF32>(r#"{"xb":0.99999999}"#), vec![u("/xb")]);
     assert_eq!(report::<PatF32>(r#"{"xc":0.5}"#), vec![]);
     assert_eq!(report::<PatSub>(r#"{"xd":"2024-01-01"}"#), vec![u("/xd")]);
+    // A float, and in Rust a `serde_json::Value`, may not keep its digits.
+    assert_eq!(report::<PatF64Max>(r#"{"xa":9007199254740993}"#), vec![u("/xa")]);
+    assert_eq!(report::<PatF64Max>(r#"{"xv":1.0000000000000000001}"#), vec![u("/xv")]);
+    assert_eq!(report::<PatF64Max>(r#"{"xb":9007199254740993}"#), vec![v("/xb")]);
+    // A type read by other names writes the member back under another.
+    assert_eq!(report::<PatAliasRef>(r#"{"xa":{"aa":"long"}}"#), vec![u("/xa"), u("/xa/a")]);
     // A pattern that lets anything be decides nothing, translated or not.
     assert_eq!(report::<PatAnything>(r#"{"id":"a","z":1}"#), vec![]);
+    assert_eq!(report::<PatRefAnything>(r#"{"id":"a","z":1}"#), vec![]);
     // Let in at decode by its pattern, refused by the pattern's `false`.
     assert_eq!(report::<PatClosedFalse>(r#"{"x-a":1}"#), vec![v("/x-a")]);
     assert!(serde_json::from_str::<PatClosedFalse>(r#"{"y":1}"#).is_err());
@@ -1722,7 +1736,14 @@ func main() {
 	check(`{"xb":0.99999999}`, report[api.PatF32](`{"xb":0.99999999}`), u("/xb"))
 	check(`{"xc":0.5}`, report[api.PatF32](`{"xc":0.5}`))
 	check(`{"xd":"2024-01-01"}`, report[api.PatSub](`{"xd":"2024-01-01"}`), u("/xd"))
+	check(`{"xa":9007199254740993}`, report[api.PatF64Max](`{"xa":9007199254740993}`), u("/xa"))
+	// Go holds an untyped member as its text: decided.
+	check(`{"xv":1.0000000000000000001}`, report[api.PatF64Max](`{"xv":1.0000000000000000001}`), v("/xv"))
+	check(`{"xb":9007199254740993}`, report[api.PatF64Max](`{"xb":9007199254740993}`), v("/xb"))
+	// Go reads no alias: the member is an undeclared one of the inner type.
+	check(`{"xa":{"aa":"long"}}`, report[api.PatAliasRef](`{"xa":{"aa":"long"}}`), v("/xa/aa"))
 	check(`{"id":"a","z":1}`, report[api.PatAnything](`{"id":"a","z":1}`))
+	check(`{"id":"a","z":1}`, report[api.PatRefAnything](`{"id":"a","z":1}`))
 	check(`{"x-a":1}`, report[api.PatClosedFalse](`{"x-a":1}`), v("/x-a"))
 	check(`{"id":"q"}`, report[api.PatFalse](`{"id":"q"}`))
 	check(`{"x-a":1}`, report[api.PatFalse](`{"x-a":1}`), v("/x-a"))
