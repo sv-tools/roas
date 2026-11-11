@@ -774,6 +774,7 @@ fn validated_description() -> serde_json::Value {
             "OneShortAliased": {"oneOf": [{"$ref": "#/components/schemas/ShortAliased"}, {"type": "integer"}]},
             "HoldsShortAliased": {"type": "object", "properties": {"inner": {"$ref": "#/components/schemas/ShortAliased"}}},
             "OneHoldsShortAliased": {"oneOf": [{"$ref": "#/components/schemas/HoldsShortAliased"}, {"type": "integer"}]},
+            "ManyShortAliased": {"oneOf": [{"type": "array", "items": {"$ref": "#/components/schemas/ShortAliased"}}, {"type": "string"}]},
             "Ip": {"oneOf": [{"type": "string", "format": "ipv4"}, {"type": "string", "maxLength": 3}]},
             "StringOnly": {"type": "string", "enum": ["a", "b"]},
             "ObjectOnly": {"type": "object", "additionalProperties": false, "properties": {"s": {"$ref": "#/components/schemas/StringOnly"}}},
@@ -1221,6 +1222,8 @@ fn main() {
     assert_eq!(report::<AllSubAliased>(r#"{"aa":"x"}"#), vec![u("")]);
     assert_eq!(report::<OneShortAliased>(r#"{"aa":"xyz"}"#), vec![u("")]);
     assert_eq!(report::<OneHoldsShortAliased>(r#"{"inner":{"aa":"xyz"}}"#), vec![u("")]);
+    assert_eq!(report::<ManyShortAliased>(r#"[{"aa":"xyz"}]"#), vec![u("")]);
+    assert_eq!(report::<ManyShortAliased>(r#"{"aa":"xyz"}"#), vec![v("")]);
     let caught: IntCatch = serde_json::from_str(r#"{"aa":"x","b":7,"c":1.0}"#).unwrap();
     assert_eq!(caught.a.as_deref(), Some("x"));
     assert_eq!(serde_json::to_string(&caught).unwrap(), r#"{"a":"x","b":7,"c":1}"#);
@@ -1582,6 +1585,8 @@ func main() {
 	check(`{"aa":"x"}`, report[api.AllSubAliased](`{"aa":"x"}`), u(""))
 	check(`{"aa":"xyz"}`, report[api.OneShortAliased](`{"aa":"xyz"}`))
 	check(`{"inner":{"aa":"xyz"}}`, report[api.OneHoldsShortAliased](`{"inner":{"aa":"xyz"}}`))
+	check(`[{"aa":"xyz"}]`, report[api.ManyShortAliased](`[{"aa":"xyz"}]`))
+	check(`{"aa":"xyz"}`, report[api.ManyShortAliased](`{"aa":"xyz"}`), v(""))
 	check(`{"a":{"kind":"ZooCat"}}`, report[api.ZooOrStr](`{"a":{"kind":"ZooCat"}}`))
 	check(`"x"`, report[api.Ip](`"x"`), u(""))
 	check(`[]`, report[api.InlineItems](`[]`))
