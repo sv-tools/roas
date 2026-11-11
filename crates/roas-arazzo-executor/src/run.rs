@@ -311,7 +311,8 @@ impl Options {
     /// [`execute_async`](crate::execute_async) and its kin send requests
     /// in flight together; [`execute`](crate::execute) and its kin still
     /// send one at a time. A caller driving [`Run`] itself hands each
-    /// response back with [`Run::supply_to`].
+    /// response back with [`Run::supply_to`], and each failure of its
+    /// client with [`Run::supply_failure`].
     #[must_use]
     pub fn parallel(mut self, requests: usize) -> Self {
         self.limits.parallel = requests.max(1);
@@ -866,7 +867,8 @@ impl<'d> Run<'d> {
     /// the run itself: [`ExecutionError::TimedOut`] once the run's
     /// [`Options::timeout`] is spent — the request's timeout was cut to
     /// it, so that is most likely why the client gave up — and
-    /// [`ExecutionError::Client`] otherwise. The `execute` functions use it.
+    /// [`ExecutionError::Client`] otherwise. [`Run::supply_failure`] hands
+    /// a failed request back and stops the run with it — when it should.
     #[must_use]
     pub fn client_failure(&self, error: crate::ClientError) -> ExecutionError {
         if self.out_of_time() {
@@ -886,7 +888,8 @@ impl<'d> Run<'d> {
     ///
     /// # Errors
     ///
-    /// The error that stops the run.
+    /// The error that stops the run; [`ExecutionError::NotWaiting`],
+    /// which does not, when `id` is not in flight (see [`Run::supply_to`]).
     pub fn supply_failure(
         &mut self,
         id: RequestId,
@@ -894,6 +897,9 @@ impl<'d> Run<'d> {
     ) -> Result<(), ExecutionError> {
         if self.halted {
             return Err(ExecutionError::Stopped);
+        }
+        if !self.in_flight().contains(&id) {
+            return Err(ExecutionError::NotWaiting);
         }
         let error = self.client_failure(error);
         let result = match self.roots.as_ref().and_then(|roots| roots.route(id)) {

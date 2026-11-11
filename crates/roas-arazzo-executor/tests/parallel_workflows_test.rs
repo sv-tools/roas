@@ -498,7 +498,7 @@ fn a_step_limit_reached_alongside_stops_the_run() {
     let options = options().parallel(4).max_steps(1);
     let mut run = Run::start(&description, &options).unwrap();
     let a = send(&mut run);
-    // `two` cannot start: the limit is held until `one` is done.
+    // `two` is out of steps: it waits while `one` may yet give some back.
     assert!(matches!(run.advance(), Ok(Progress::Await(None))));
     assert_eq!(run.in_flight(), vec![a.id]);
     let error = run.supply_to(a.id, reply(1));
@@ -549,8 +549,11 @@ fn every_driver_reports_what_one_after_another_does() {
     ))
     .unwrap();
     assert_eq!(late.sent(), ["a", "b", "c"]);
+    assert_eq!(one_by_one.outputs["one"], json!(1));
+    assert_eq!(one_by_one.outputs["two"], json!(2));
     for report in [&blocking, &parallel] {
         assert_eq!(steps(report), steps(&one_by_one));
+        assert_eq!(report.outputs, one_by_one.outputs);
         assert_eq!(report.outcome, one_by_one.outcome);
     }
 }
@@ -620,7 +623,9 @@ impl AsyncHttpClient for Late {
             } else {
                 200
             };
-            Ok(HttpResponse::json(status, &json!({ "v": 1 })))
+            // `a` is 1, `b` 2 and so on.
+            let v = u64::from(path.as_bytes()[0] - b'a' + 1);
+            Ok(HttpResponse::json(status, &json!({ "v": v })))
         })
     }
 
@@ -814,4 +819,65 @@ fn steps_given_back_count_for_the_others() {
         steps(&report),
         [("one", "s1"), ("two", "b1"), ("two", "b2"), ("t", "t1")]
     );
+}
+
+#[test]
+fn a_failure_of_a_request_no_longer_wanted_is_not_the_runs() {
+    let description = a_failing_second();
+    let options = options().parallel(4);
+    let mut run = Run::start(&description, &options).unwrap();
+    let a = send(&mut run);
+    let b = send(&mut run);
+    let c = send(&mut run);
+    run.supply_to(b.id, reply(2)).unwrap();
+    // `three` was abandoned: its client's failure does not stop the run.
+    assert!(matches!(
+        run.supply_failure(c.id, ClientError::new("boom")),
+        Err(ExecutionError::NotWaiting)
+    ));
+    run.supply_to(a.id, reply(1)).unwrap();
+    assert!(matches!(
+        run.advance(),
+        Err(ExecutionError::UnknownStep { .. })
+    ));
+}
+
+#[test]
+fn a_dependency_that_cannot_start_later_waits_for_the_ones_before_it() {
+    let description = description(json!([
+        { "workflowId": "t", "dependsOn": ["one", "two"], "steps": [{ "stepId": "c", "operationId": "c" }] },
+        workflow("one", "a", &[]),
+        {
+            "workflowId": "two",
+            "steps": [
+                { "stepId": "x", "operationId": "b", "dependsOn": ["y"] },
+                { "stepId": "y", "operationId": "b", "dependsOn": ["x"] }
+            ]
+        },
+    ]));
+    let options = options().parallel(4);
+    let mut run = Run::start(&description, &options).unwrap();
+    let a = send(&mut run);
+    assert!(matches!(run.advance(), Ok(Progress::Await(None))));
+    run.supply_to(a.id, reply(1)).unwrap();
+    let error = run.advance().unwrap_err();
+    assert!(matches!(error, ExecutionError::Circular(_)), "got: {error}");
+    assert_eq!(steps(&run.partial_report()), [("one", "a")]);
+}
+
+#[tokio::test]
+async fn a_retry_waits_by_the_clients_clock() {
+    // `Fake` does not spend the waits it is asked for.
+    let description = retrying(1.0);
+    let mut client = Fake::new()
+        .reply(503, &json!({}))
+        .reply(200, &json!({ "v": 2 }))
+        .reply(200, &json!({ "v": 1 }))
+        .reply(200, &json!({ "v": 3 }));
+    let started = Instant::now();
+    let report = execute_async(&description, &options().parallel(4), &mut client)
+        .await
+        .unwrap();
+    assert!(report.is_success(), "{report}");
+    assert!(started.elapsed() < Duration::from_millis(500));
 }

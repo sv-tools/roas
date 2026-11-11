@@ -37,6 +37,10 @@ pub(super) struct Roots<'d> {
     /// The branches' requests in flight: the id the run handed out, the
     /// entry, and the id the branch gave it.
     routes: Vec<(RequestId, usize, RequestId)>,
+    /// The wake handed out as [`Progress::Wait`]: the caller has waited
+    /// until then by its own clock once it advances again, so a branch
+    /// due by then goes on, whatever the wall clock says.
+    slept: Option<Instant>,
 }
 
 /// One workflow the one asked for depends on.
@@ -256,6 +260,7 @@ impl<'d> Run<'d> {
         let mut roots = Roots {
             entries,
             held: None,
+            slept: None,
             routes: Vec::new(),
         };
         roots.entries[0].state = State::Running {
@@ -309,6 +314,19 @@ impl<'d> Run<'d> {
     /// Advance whichever branch can go on, in the order they are listed;
     /// once every one is done, the workflow asked for starts.
     pub(super) fn advance_roots(&mut self) -> Result<Progress, ExecutionError> {
+        let roots = self.roots.as_mut().expect("root dependencies to run");
+        if let Some(slept) = roots.slept.take() {
+            for entry in &mut roots.entries {
+                if let State::Running {
+                    wake: asleep @ Some(_),
+                    ..
+                } = &mut entry.state
+                    && asleep.is_some_and(|until| until <= slept)
+                {
+                    *asleep = None;
+                }
+            }
+        }
         'pass: loop {
             let roots = self.roots.as_mut().expect("root dependencies to run");
             if roots
@@ -393,10 +411,13 @@ impl<'d> Run<'d> {
                     }
                 }
             }
-            let wake = wake.map(|wake| wake.saturating_duration_since(Instant::now()));
-            return Ok(match wake {
-                Some(wake) if self.flying() == 0 => Progress::Wait(wake),
-                wake => Progress::Await(wake),
+            let left = wake.map(|wake| wake.saturating_duration_since(Instant::now()));
+            return Ok(match left {
+                Some(left) if self.flying() == 0 => {
+                    self.roots.as_mut().expect("the roots").slept = wake;
+                    Progress::Wait(left)
+                }
+                left => Progress::Await(left),
             });
         }
     }
