@@ -924,7 +924,12 @@ impl<'a> Lowerer<'a> {
                         BTreeMap::new(),
                     ),
                 };
+            let pointer = match slot {
+                Slot::Inline(s) => s.id.pointer.clone(),
+                Slot::Ref { id, .. } => id.pointer.clone(),
+            };
             fields.push(Field {
+                pointer,
                 raw_name: raw_name.clone(),
                 ty: lowered.ty,
                 required: required.contains(raw_name),

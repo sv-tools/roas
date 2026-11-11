@@ -852,10 +852,7 @@ pub(crate) fn diagnostics(
         match &def.kind {
             TypeKind::Struct(s) => {
                 for field in &s.fields {
-                    let mut pointer = def.id.pointer.clone();
-                    push_token(&mut pointer, "properties");
-                    push_token(&mut pointer, &field.raw_name);
-                    positions.push((pointer, &field.ty, &field.constraints));
+                    positions.push((field.pointer.clone(), &field.ty, &field.constraints));
                 }
                 // The catch-all's values are the other members.
                 if let (crate::ir::Additional::CatchAll(ty), Some(items)) =

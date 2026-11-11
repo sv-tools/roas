@@ -1183,3 +1183,95 @@ fn a_component_keeps_its_name_beside_a_titled_inline_schema() {
         assert!(text.contains(want), "{text}");
     }
 }
+
+fn raw_document(raw: serde_json::Value) -> roas_codegen::ValidatedSourceDocument {
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let doc = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap())
+        .expect("parses");
+    validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid")
+}
+
+#[test]
+fn composition_annotations_are_read_from_every_version() {
+    let schemas = serde_json::json!({
+        "H": {"type": "object", "properties": {"u": {"title": "Thing", "description": "a thing",
+            "deprecated": true, "oneOf": [{"type": "string"}, {"type": "boolean"}]}}},
+        "V": {"anyOf": [{"type": "string"}, {"type": "integer"}], "xml": {"name": "v"}}
+    });
+    for openapi in ["3.0.3", "3.1.0"] {
+        let doc = raw_document(serde_json::json!({
+            "openapi": openapi, "info": {"title": "t", "version": "1"}, "paths": {},
+            "components": {"schemas": schemas.clone()}
+        }));
+        let g = generate(&doc, &rust_config("validation = true")).unwrap();
+        let text = g
+            .files
+            .iter()
+            .map(|f| f.contents.as_str())
+            .collect::<String>();
+        assert!(
+            text.contains("#[deprecated]\npub struct Thing") && text.contains("/// a thing"),
+            "{openapi}: {text}"
+        );
+        assert!(
+            !g.diagnostics
+                .iter()
+                .any(|d| d.pointer == "/components/schemas/V"),
+            "{openapi}: {:?}",
+            g.diagnostics
+        );
+    }
+    let doc = raw_document(serde_json::json!({
+        "swagger": "2.0", "info": {"title": "t", "version": "1"}, "paths": {},
+        "definitions": {
+            "Base": {"type": "object", "properties": {"a": {"type": "string"}}},
+            "H": {"type": "object", "properties": {"u": {"title": "Merged", "allOf": [
+                {"$ref": "#/definitions/Base"},
+                {"type": "object", "properties": {"b": {"type": "integer", "minimum": 1}, "c": {"type": "string", "pattern": "(?=x)"}}}
+            ]}}}
+        }
+    }));
+    let g = generate(&doc, &rust_config("validation = true")).unwrap();
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    assert!(text.contains("pub struct Merged"), "{text}");
+}
+
+#[test]
+fn merged_all_of_fields_are_reported_where_they_are_written() {
+    let g = generate(
+        &document(serde_json::json!({
+            "B": {"type": "object", "properties": {"y": {"type": "string", "pattern": "(?=b)"}}},
+            "A": {"allOf": [
+                {"type": "object", "properties": {"x": {"type": "string", "pattern": "(?=a)",
+                    "x-rust-attrs": ["#[doc = \"x\"]"]}}},
+                {"$ref": "#/components/schemas/B"}
+            ]}
+        })),
+        &rust_config("validation = true"),
+    )
+    .unwrap();
+    let mut pointers: Vec<&str> = g
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            matches!(
+                &d.kind,
+                DiagnosticKind::Unvalidated { .. } | DiagnosticKind::IgnoredExtension { .. }
+            )
+        })
+        .map(|d| d.pointer.as_str())
+        .collect();
+    pointers.sort();
+    assert_eq!(
+        pointers,
+        [
+            "/components/schemas/A/allOf/0/properties/x/pattern",
+            "/components/schemas/A/allOf/0/properties/x/x-rust-attrs",
+            "/components/schemas/B/properties/y/pattern",
+        ]
+    );
+}

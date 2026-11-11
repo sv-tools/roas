@@ -83,6 +83,9 @@ pub(crate) struct Field {
     pub constraints: Constraints,
     /// `x-` extensions on the property schema.
     pub extensions: BTreeMap<String, Value>,
+    /// Where the property is written: under the struct's own schema, or
+    /// under the `allOf` part it was merged from.
+    pub pointer: String,
 }
 
 /// How a struct treats members its fields do not name.

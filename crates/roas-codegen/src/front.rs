@@ -384,6 +384,30 @@ impl Translator<'_> {
         }
     }
 
+    /// The keywords written beside a composition. A 3.1 or 3.2 model keeps
+    /// them in its catch-all; a 2.0 or 3.0 one keeps only `x-` keys, so
+    /// they are read from the source as written.
+    fn composition_keywords(
+        &self,
+        extensions: &Option<BTreeMap<String, Value>>,
+        pointer: &str,
+    ) -> serde_json::Map<String, Value> {
+        let mut out: serde_json::Map<String, Value> = extensions
+            .iter()
+            .flatten()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if self.legacy_nullable {
+            let source = (self.source_pointer)(&source_of(pointer));
+            if let Some(raw) = self.raw.pointer(&source).and_then(Value::as_object) {
+                for (k, v) in raw {
+                    out.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+        }
+        out
+    }
+
     /// The keywords an OpenAPI 2.0 or 3.0 source wrote on this schema that
     /// its model dropped on the way to 3.2: unread, they are reported as
     /// unsupported rather than lost without a word.
@@ -620,7 +644,8 @@ impl Translator<'_> {
         let branches = self.branches(&all.all_of, &pointer, "allOf");
         let mut front = self.leaf(pointer, Kind::AllOf { branches });
         front.unsupported = catch_all_keywords(&all.extensions, &mut front.extensions);
-        composition_annotations(&mut front, &all.extensions);
+        let keywords = self.composition_keywords(&all.extensions, &front.id.pointer);
+        composition_annotations(&mut front, &keywords);
         front.dialect = dialect_of(&all.extensions);
         front.const_value = const_of(&all.extensions);
         front
@@ -630,7 +655,8 @@ impl Translator<'_> {
         let branches = self.branches(&any.any_of, &pointer, "anyOf");
         let mut front = self.leaf(pointer, Kind::AnyOf { branches });
         front.unsupported = catch_all_keywords(&any.extensions, &mut front.extensions);
-        composition_annotations(&mut front, &any.extensions);
+        let keywords = self.composition_keywords(&any.extensions, &front.id.pointer);
+        composition_annotations(&mut front, &keywords);
         front.dialect = dialect_of(&any.extensions);
         front.const_value = const_of(&any.extensions);
         front
@@ -646,7 +672,8 @@ impl Translator<'_> {
             },
         );
         front.unsupported = catch_all_keywords(&one.extensions, &mut front.extensions);
-        composition_annotations(&mut front, &one.extensions);
+        let keywords = self.composition_keywords(&one.extensions, &front.id.pointer);
+        composition_annotations(&mut front, &keywords);
         front.dialect = dialect_of(&one.extensions);
         front.const_value = const_of(&one.extensions);
         front
@@ -1155,10 +1182,7 @@ fn catch_all_keywords(
 
 /// A composition's annotations: the model keeps them in its catch-all,
 /// but they assert nothing, so they are read rather than reported.
-fn composition_annotations(front: &mut FrontSchema, extensions: &Option<BTreeMap<String, Value>>) {
-    let Some(extensions) = extensions else {
-        return;
-    };
+fn composition_annotations(front: &mut FrontSchema, keywords: &serde_json::Map<String, Value>) {
     for key in [
         "title",
         "description",
@@ -1166,8 +1190,9 @@ fn composition_annotations(front: &mut FrontSchema, extensions: &Option<BTreeMap
         "readOnly",
         "writeOnly",
         "default",
+        "xml",
     ] {
-        let Some(value) = extensions.get(key) else {
+        let Some(value) = keywords.get(key) else {
             continue;
         };
         // A value of the wrong type is not read, and stays reported.
@@ -1178,6 +1203,8 @@ fn composition_annotations(front: &mut FrontSchema, extensions: &Option<BTreeMap
             ("readOnly", Value::Bool(flag)) => front.read_only = *flag,
             ("writeOnly", Value::Bool(flag)) => front.write_only = *flag,
             ("default", value) => front.default = Some(value.clone()),
+            // Serialization hints for XML, which the generated code is not.
+            ("xml", _) => {}
             _ => continue,
         }
         front.unsupported.retain(|k| k != key);

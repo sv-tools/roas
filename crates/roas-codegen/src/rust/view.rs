@@ -706,8 +706,7 @@ impl Builder<'_> {
                     )?;
                     attrs.extend(user_attrs);
                     let mut at = def.id.clone();
-                    crate::diagnostic::push_token(&mut at.pointer, "properties");
-                    crate::diagnostic::push_token(&mut at.pointer, &field.raw_name);
+                    at.pointer = field.pointer.clone();
                     attrs.extend(self.codegen_attrs(&field.extensions, &at, true));
                     let cfg = cfg_gates(&attrs, &format!("{}.{}", view.raw_name, field.raw_name))?;
                     if matches!(s.additional, Additional::CatchAll(_)) {

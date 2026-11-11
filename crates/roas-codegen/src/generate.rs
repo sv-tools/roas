@@ -493,7 +493,14 @@ fn sort_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
             .then(a.severity.cmp(&b.severity))
             .then(a.message.cmp(&b.message))
     });
-    diagnostics.dedup();
+    // A part merged from another component is reported there too: the
+    // same finding at the same place is said once.
+    diagnostics.dedup_by(|a, b| {
+        a.pointer == b.pointer
+            && a.severity == b.severity
+            && a.kind == b.kind
+            && a.message == b.message
+    });
 }
 
 /// The files as the templates render them, before the syntax check and
