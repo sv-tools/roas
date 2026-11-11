@@ -441,3 +441,93 @@ fn a_stopped_run_wants_nothing_in_flight() {
     assert!(run.in_flight().is_empty());
     assert!(matches!(run.supply(ok()), Err(ExecutionError::Stopped)));
 }
+
+#[test]
+fn an_error_waits_for_the_steps_listed_before_it() {
+    let mut second = step("b");
+    second["outputs"] = json!({ "x": "$steps.nowhere.outputs.x" });
+    let description = description(json!([step("a"), second, step("c")]), json!({}));
+    let options = options().parallel(3);
+    // `a` fails first, as it would one at a time: `b`'s error never was.
+    let mut run = Run::start(&description, &options).unwrap();
+    let a = send(&mut run);
+    let b = send(&mut run);
+    let c = send(&mut run);
+    run.supply_to(b.id, ok()).unwrap();
+    // Nothing more starts while the error is held.
+    assert!(matches!(run.advance(), Ok(Progress::Await)));
+    run.supply_to(a.id, HttpResponse::json(500, &json!({})))
+        .unwrap();
+    assert!(run.in_flight().is_empty());
+    assert!(matches!(
+        run.supply_to(c.id, ok()),
+        Err(ExecutionError::NotWaiting)
+    ));
+    let Ok(Progress::Done(report)) = run.advance() else {
+        panic!("done");
+    };
+    assert_eq!(report.outcome, Outcome::Failed);
+    let done: Vec<_> = report.steps.iter().map(|s| s.step_id.as_str()).collect();
+    assert_eq!(done, ["a"]);
+    // `a` passes: the error is raised once it is answered.
+    let mut run = Run::start(&description, &options).unwrap();
+    let a = send(&mut run);
+    let b = send(&mut run);
+    let c = send(&mut run);
+    run.supply_to(b.id, ok()).unwrap();
+    run.supply_to(c.id, HttpResponse::json(500, &json!({})))
+        .unwrap();
+    // `c` ended the workflow, but it comes after `b`: the error stands.
+    assert!(matches!(
+        run.supply_to(a.id, ok()),
+        Err(ExecutionError::NotWaiting)
+    ));
+    assert!(matches!(run.advance(), Err(ExecutionError::Select(_))));
+    assert!(matches!(run.advance(), Err(ExecutionError::Stopped)));
+    // With nothing before it in flight, the error is raised at once.
+    let mut run = Run::start(&description, &options).unwrap();
+    let a = send(&mut run);
+    let b = send(&mut run);
+    run.supply_to(a.id, ok()).unwrap();
+    assert!(run.supply_to(b.id, ok()).is_err());
+}
+
+#[tokio::test]
+async fn the_async_driver_sends_in_the_order_the_run_asked() {
+    let description = description(json!([step("a"), step("b"), step("c")]), json!({}));
+    let mut client = Fake::new()
+        .reply(200, &json!({}))
+        .reply(200, &json!({}))
+        .reply(500, &json!({}));
+    let report = execute_async(&description, &options().parallel(3), &mut client)
+        .await
+        .unwrap();
+    let sent: Vec<_> = client.sent().iter().map(|r| path(r).to_owned()).collect();
+    assert_eq!(sent, ["a", "b", "c"]);
+    assert_eq!(report.outcome, Outcome::Failed);
+    let failed: Vec<_> = report
+        .steps
+        .iter()
+        .filter(|s| !s.passed)
+        .map(|s| s.step_id.as_str())
+        .collect();
+    assert_eq!(failed, ["c"]);
+}
+
+#[test]
+fn requests_in_flight_together_share_the_run_time() {
+    let description = description(json!([step("a"), step("b")]), json!({}));
+    let options = options().parallel(2).timeout(Duration::from_millis(20));
+    let mut run = Run::start(&description, &options).unwrap();
+    let a = send(&mut run);
+    let b = send(&mut run);
+    assert!(a.timeout.is_some_and(|t| t <= Duration::from_millis(20)));
+    assert!(b.timeout.is_some_and(|t| t <= Duration::from_millis(20)));
+    std::thread::sleep(Duration::from_millis(40));
+    assert!(matches!(run.advance(), Ok(Progress::Await)));
+    assert!(matches!(
+        run.supply_to(a.id, ok()),
+        Err(ExecutionError::TimedOut { .. })
+    ));
+    assert!(run.in_flight().is_empty());
+}

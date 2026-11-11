@@ -422,6 +422,21 @@ pub(crate) async fn drive_async_with<
     result
 }
 
+/// Hand the run the first response to come back, and stop waiting for
+/// whatever the run then abandoned.
+async fn answer_one<F: Future<Output = Result<HttpResponse, ClientError>>>(
+    run: &mut Run<'_>,
+    flying: &mut Vec<(RequestId, Pin<Box<F>>)>,
+) -> Result<(), ExecutionFailure> {
+    let (id, result) = first_answered(flying).await;
+    let response = result.map_err(|error| run.failure(run.client_failure(error)))?;
+    run.supply_to(id, response)
+        .map_err(|error| run.failure(error))?;
+    let wanted = run.in_flight();
+    flying.retain(|(id, _)| wanted.contains(id));
+    Ok(())
+}
+
 /// Wait for whichever request in flight is answered first, and take it out.
 async fn first_answered<F: Future<Output = Result<HttpResponse, ClientError>>>(
     flying: &mut Vec<(RequestId, Pin<Box<F>>)>,
@@ -429,7 +444,9 @@ async fn first_answered<F: Future<Output = Result<HttpResponse, ClientError>>>(
     std::future::poll_fn(|context| {
         for at in 0..flying.len() {
             if let std::task::Poll::Ready(result) = flying[at].1.as_mut().poll(context) {
-                let (id, _) = flying.swap_remove(at);
+                // In order: the ones still in flight are polled, and so
+                // sent, in the order they were handed out.
+                let (id, _) = flying.remove(at);
                 return std::task::Poll::Ready((id, result));
             }
         }
@@ -452,25 +469,11 @@ async fn drive_async_loop<C: AsyncHttpClient + ?Sized, M: AsyncMessageClient + ?
                 let client = &*client;
                 flying.push((id, Box::pin(async move { client.send(&request).await })));
                 // Ask for another while the run may have one more in flight.
-                if run.takes_more() {
-                    continue;
+                if !run.takes_more() {
+                    answer_one(run, &mut flying).await?;
                 }
-                let (id, result) = first_answered(&mut flying).await;
-                let response = result.map_err(|error| run.failure(run.client_failure(error)))?;
-                run.supply_to(id, response)
-                    .map_err(|error| run.failure(error))?;
-                let wanted = run.in_flight();
-                flying.retain(|(id, _)| wanted.contains(id));
             }
-            Progress::Await => {
-                let (id, result) = first_answered(&mut flying).await;
-                let response = result.map_err(|error| run.failure(run.client_failure(error)))?;
-                run.supply_to(id, response)
-                    .map_err(|error| run.failure(error))?;
-                // Whatever the run abandoned is not waited for.
-                let wanted = run.in_flight();
-                flying.retain(|(id, _)| wanted.contains(id));
-            }
+            Progress::Await => answer_one(run, &mut flying).await?,
             Progress::Wait(duration) => client.sleep(duration).await,
             Progress::Done(report) => return Ok(*report),
             progress => {

@@ -478,6 +478,15 @@ struct Completion {
     elapsed: Duration,
 }
 
+/// An error held back until the steps listed before its step are answered.
+struct Held {
+    /// Where its step is in the frame's order.
+    position: usize,
+    /// The record its step left, if it got that far.
+    record: Option<usize>,
+    error: ExecutionError,
+}
+
 /// A step waiting for a response.
 struct Pending {
     id: RequestId,
@@ -559,6 +568,10 @@ pub struct Run<'d> {
     pending: Vec<Pending>,
     /// Requests handed out so far, for their ids.
     requests: u64,
+    /// An error from a step that finished while steps listed before it
+    /// were still in flight. Raised once they are answered — unless one
+    /// of them ends the workflow first, as it would have one at a time.
+    held: Option<Held>,
     wait: Option<Duration>,
     records: Vec<StepRecord>,
     taken: usize,
@@ -694,6 +707,7 @@ impl<'d> Run<'d> {
             deferred: Vec::new(),
             pending: Vec::new(),
             requests: 0,
+            held: None,
             wait: None,
             records: Vec::new(),
             taken: 0,
@@ -871,6 +885,16 @@ impl<'d> Run<'d> {
                 method: pending.exchange.request.method.clone(),
                 url: pending.exchange.request.url.clone(),
             });
+        }
+        // Nothing more starts once an error is held; it is raised when
+        // what is in flight is answered.
+        if self.held.is_some() {
+            if !self.pending.is_empty() {
+                return Ok(Progress::Await);
+            }
+            if let Some(held) = self.held.take() {
+                return Err(held.error);
+            }
         }
         if let Some(subscription) = self.joining {
             return Err(ExecutionError::Awaiting {
@@ -1132,20 +1156,58 @@ impl<'d> Run<'d> {
             url: pending.exchange.request.url.clone(),
             status,
         };
+        let alongside = pending.alongside;
+        let step = pending.step;
+        let before = self.records.len();
         // No criteria means the status is the whole judgement.
-        self.complete(
-            pending.step,
+        let result = self.complete(
+            step,
             Completion {
                 exchange: Some(pending.exchange),
                 given: BTreeMap::new(),
                 default_pass: (200..400).contains(&status),
                 failed: false,
-                alongside: pending.alongside,
+                alongside,
                 attempt: pending.attempt,
                 performed,
                 elapsed,
             },
-        )
+        );
+        match result {
+            // A step listed before this one, still in flight, may yet end
+            // the workflow — and then this one would never have run.
+            Err(error) if alongside => {
+                let position = self.position(step);
+                if !self
+                    .pending
+                    .iter()
+                    .any(|pending| self.position(pending.step) < position)
+                {
+                    return Err(error);
+                }
+                if self
+                    .held
+                    .as_ref()
+                    .is_none_or(|held| position < held.position)
+                {
+                    self.held = Some(Held {
+                        position,
+                        record: (self.records.len() > before).then_some(before),
+                        error,
+                    });
+                }
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
+    /// Where step `index` is in the innermost frame's order.
+    fn position(&self, index: usize) -> usize {
+        self.frames
+            .last()
+            .and_then(|frame| frame.order.iter().position(|&at| at == index))
+            .unwrap_or(usize::MAX)
     }
 
     /// Hand back what came of the [`Progress::Receive`] [`Run::advance`]
@@ -1525,8 +1587,18 @@ impl<'d> Run<'d> {
             .decide(index, passed, done.exchange.as_ref(), record)
             .map_err(|error| locate(&self.documents, here, error))?;
         self.records[record].action = describe(&action);
-        if done.alongside && matches!(action, Action::Advance) {
-            return Ok(());
+        if done.alongside {
+            if matches!(action, Action::Advance) {
+                return Ok(());
+            }
+            // Ending the workflow, this step stops a later one whose error
+            // was held: that one would never have run.
+            let position = self.position(index);
+            if let Some(held) = self.held.take_if(|held| held.position > position)
+                && let Some(record) = held.record
+            {
+                self.records.remove(record);
+            }
         }
         self.apply(action)
     }
