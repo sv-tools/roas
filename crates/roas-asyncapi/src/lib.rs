@@ -71,17 +71,56 @@
 //! YAML documents work the same way — parse with `serde-saphyr` (or
 //! any other YAML crate) into a version module's `Document`.
 //!
-//! ## Scope
+//! ## Resolving references
 //!
-//! The document model, its validators and document-local `$ref`
-//! resolution are the whole surface: this crate does not resolve
-//! `$ref`s across files, apply message / operation traits, or type
-//! protocol bindings. No other document is ever loaded, so a
-//! cross-reference check that would have to look inside one does not
-//! run — see [`ValidationOptions`](validation::ValidationOptions) to
-//! require a self-contained document instead.
+//! Each version's `Document` can follow a `$ref` to the object it
+//! names, as long as the chain stays inside that document:
 //!
-//! The same resolution is open to callers.
+//! ```rust
+//! # // Gated on the v3_1 feature like the example above: with v3_1 off
+//! # // the doctest compiles to an empty `fn main()`.
+//! # #[cfg(feature = "v3_1")] {
+//! use roas_asyncapi::v3_1::{Document, Resolution};
+//!
+//! let doc: Document = serde_json::from_str(r##"{
+//!     "asyncapi": "3.1.0",
+//!     "info": { "title": "Streetlights", "version": "1.0.0" },
+//!     "channels": {
+//!         "lightMeasured": {
+//!             "address": "lighting/measured",
+//!             "messages": { "lightMeasured": { "name": "LightMeasured" } }
+//!         }
+//!     },
+//!     "operations": {
+//!         "receiveLightMeasurement": {
+//!             "action": "receive",
+//!             "channel": { "$ref": "#/channels/lightMeasured" },
+//!             "messages": [ { "$ref": "#/channels/lightMeasured/messages/lightMeasured" } ]
+//!         }
+//!     }
+//! }"##).unwrap();
+//!
+//! // A `RefOr<T>` entry: the item itself, or what its `$ref` leads to.
+//! let operation = doc.operations["receiveLightMeasurement"]
+//!     .get_item(&doc)
+//!     .found()
+//!     .expect("declared inline");
+//!
+//! // A bare `Reference`, which says nothing of its kind: the document's
+//! // method for that kind follows it.
+//! match doc.resolve_channel(&operation.channel) {
+//!     Resolution::Found(channel) => assert_eq!(channel.messages.len(), 1),
+//!     // Another document (nothing is loaded), or a place in this one
+//!     // the channel resolver does not hand back an object from.
+//!     Resolution::Opaque => {}
+//!     other => panic!("channel {}", other.problem().unwrap_or("did not resolve")),
+//! }
+//!
+//! let message = doc.resolve_message(&operation.messages[0]).found().unwrap();
+//! assert_eq!(message.name.as_deref(), Some("LightMeasured"));
+//! # }
+//! ```
+//!
 //! [`RefOr::get_item`](common::reference::RefOr::get_item) takes a
 //! version's `Document` and returns a
 //! [`Resolution`](common::Resolution): the item itself, the object at
@@ -97,6 +136,15 @@
 //! another file is reported as opaque rather than followed — or as
 //! unrecognized when its fragment is not a JSON Pointer, which shows
 //! without loading anything.
+//!
+//! ## Scope
+//!
+//! This crate does not resolve `$ref`s across files, apply message /
+//! operation traits, or type protocol bindings. No other document is
+//! ever loaded, so a cross-reference check that would have to look
+//! inside one does not run — see
+//! [`ValidationOptions`](validation::ValidationOptions) to require a
+//! self-contained document instead.
 //!
 //! ## Versions
 //!

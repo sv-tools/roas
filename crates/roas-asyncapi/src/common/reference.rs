@@ -141,6 +141,14 @@ impl<T> RefOr<T> {
     /// Pointer, which shows without loading anything. `Opaque` is not
     /// only for other documents, though: see its own documentation.
     ///
+    /// With a version's `Document`, a reference that resolves is found
+    /// by lookup; telling apart one whose pointer is usable but names
+    /// no entry the resolver looks up — [`Resolution::Missing`], an
+    /// `Opaque` inside this document, or a
+    /// [`Resolution::WrongKind`] decided by what is there rather than
+    /// by where the pointer points — serializes the document, so it
+    /// costs time proportional to the document's size.
+    ///
     /// `doc` is a version's `Document`, which implements
     /// [`ResolveReference<T>`] for the kinds it can follow:
     ///
