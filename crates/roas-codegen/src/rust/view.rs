@@ -400,6 +400,46 @@ impl Builder<'_> {
             .and_then(|c| self.config.types.get(c))
     }
 
+    /// Whether the struct `id` reads its members by other names than the
+    /// schema does: a field compiled out by a `cfg` gate (its member then
+    /// lands among the others) or read under a `serde(alias)`. A value
+    /// valid for the schema may then fail to decode. A configured
+    /// attribute that does not parse counts: generation fails on it anyway.
+    fn reshaped(&self, id: &SchemaId) -> bool {
+        let def = &self.ir.types[id];
+        let TypeKind::Struct(s) = &def.kind else {
+            return false;
+        };
+        s.fields.iter().any(|field| {
+            let mut attrs: Vec<String> = self
+                .field_config(def, &field.raw_name)
+                .map(|f| f.attrs.clone())
+                .unwrap_or_default();
+            if self.config.allow_codegen_extensions {
+                let described: Vec<String> = match field.extensions.get("x-rust-attrs") {
+                    Some(serde_json::Value::String(a)) => vec![a.clone()],
+                    Some(serde_json::Value::Array(items)) => items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                // Only the entries generation applies: a failing one is
+                // dropped there with a warning.
+                attrs.extend(
+                    described
+                        .into_iter()
+                        .filter(|a| check_field_attrs(std::slice::from_ref(a), "").is_ok()),
+                );
+            }
+            attrs.iter().any(|attr| {
+                let one = std::slice::from_ref(attr);
+                !matches!(cfg_gates(one, ""), Ok(g) if g.is_empty())
+                    || !matches!(serde_aliases(one, ""), Ok(a) if a.is_empty())
+            })
+        })
+    }
+
     fn field_config<'c>(&'c self, def: &TypeDef, raw_name: &str) -> Option<&'c FieldConfig> {
         self.type_config(def).and_then(|t| t.fields.get(raw_name))
     }
@@ -622,7 +662,9 @@ impl Builder<'_> {
             let opted_out = self.type_config(def).and_then(|t| t.validation) == Some(false);
             let emitted = |id: &SchemaId| self.names.contains_key(id);
             let generated = |ty: &TypeRef| crate::checks::validates(self.ir, &emitted, ty);
-            view.validate = super::validation::body(self.ir, def, &view, &generated, opted_out);
+            let reshaped = |id: &SchemaId| self.reshaped(id);
+            view.validate =
+                super::validation::body(self.ir, def, &view, &generated, &reshaped, opted_out);
             if view.validate.is_some() && !opted_out {
                 view.validate_null = super::validation::null_body(def);
                 // An alias spelled as a newtype has its target's null.

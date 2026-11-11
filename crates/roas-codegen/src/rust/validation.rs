@@ -370,6 +370,41 @@ fn branch(
 /// valid.
 const NULL_IS_VALID: &str = "if self.raw.get().trim() == \"null\" { return; }";
 
+/// When decoding `ty` may fail for the decoder rather than the value, the
+/// Rust condition on the holder's raw value under which a failure proves
+/// nothing: always for a substitution, which may take any value; for a
+/// struct Rust reads by other names than the schema, only when the value
+/// is of the JSON kind the type reads, since no other kind could match.
+fn decoder_rules(
+    ir: &crate::ir::Ir,
+    ty: &TypeRef,
+    reshaped: &dyn Fn(&crate::diagnostic::SchemaId) -> bool,
+) -> Option<String> {
+    if checks::reaches_extern(ir, ty) {
+        return Some("true".to_owned());
+    }
+    if !checks::reaches_decoder_rules(ir, ty, reshaped) {
+        return None;
+    }
+    fn opens(ir: &crate::ir::Ir, ty: &TypeRef, depth: usize) -> Option<char> {
+        match ty {
+            TypeRef::Boxed(inner) | TypeRef::Nullable(inner) => opens(ir, inner, depth),
+            TypeRef::Array(_) => Some('['),
+            TypeRef::Map(_) => Some('{'),
+            TypeRef::Named(id) if depth < 64 => match ir.types.get(id).map(|d| &d.kind) {
+                Some(TypeKind::Struct(_) | TypeKind::UnionTagged(_)) => Some('{'),
+                Some(TypeKind::Newtype(t) | TypeKind::Alias(t)) => opens(ir, t, depth + 1),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    Some(match opens(ir, ty, 0) {
+        Some(c) => format!("self.raw.get().trim_start().starts_with('{c}')"),
+        None => "true".to_owned(),
+    })
+}
+
 /// Whether a holder's raw value has a number its branches' types may fail
 /// to decode for their range: such a failure proves no mismatch.
 fn rust_wide<'a>(ir: &crate::ir::Ir, tys: impl Iterator<Item = &'a TypeRef>) -> String {
@@ -415,6 +450,7 @@ pub(crate) fn body(
     def: &TypeDef,
     view: &TypeView,
     generated: &dyn Fn(&TypeRef) -> bool,
+    reshaped: &dyn Fn(&crate::diagnostic::SchemaId) -> bool,
     opted_out: bool,
 ) -> Option<Vec<String>> {
     // A branch that comes back to this holder with the same raw value would
@@ -749,19 +785,28 @@ pub(crate) fn body(
             let wide = rust_wide(ir, u.branches.iter().map(|b| &b.ty));
             for (b, branch_view) in u.branches.iter().zip(&view.branches) {
                 let accessor = &branch_view.accessor;
-                let (body, reads) = branch(ir, b, &progressing, ("branch", "&mut branch"));
+                // Read by other names than the schema, a decoded branch is
+                // no proof either way, and neither is what its checks find:
+                // an alias's member is checked as the field it is read into.
+                let renamed = checks::reaches_reshaped(ir, &b.ty, reshaped);
+                let (body, reads) = if renamed {
+                    (Vec::new(), false)
+                } else {
+                    branch(ir, b, &progressing, ("branch", "&mut branch"))
+                };
                 // Decoding proves a match only when nothing the branch says
                 // goes unchecked.
-                let sure = !checks::unsure(b) && (!generated(&b.ty) || progressing(&b.ty));
+                let sure =
+                    !checks::unsure(b) && !renamed && (!generated(&b.ty) || progressing(&b.ty));
                 let counter = if sure { "certain" } else { "uncertain" };
                 counts_certain |= sure;
                 // A number past what the branch's type holds fails to decode
                 // for the representation: no proof it matches no branch.
                 checked = true;
-                let beyond = if checks::reaches_extern(ir, &b.ty) {
-                    " else { uncertain += 1; }".to_owned()
-                } else {
-                    format!(" else if {wide} {{ uncertain += 1; }}")
+                let beyond = match decoder_rules(ir, &b.ty, reshaped) {
+                    Some(cond) if cond == "true" => " else { uncertain += 1; }".to_owned(),
+                    Some(cond) => format!(" else if {wide} || {cond} {{ uncertain += 1; }}"),
+                    None => format!(" else if {wide} {{ uncertain += 1; }}"),
                 };
                 if body.is_empty() {
                     checked |= !sure;
@@ -804,8 +849,23 @@ pub(crate) fn body(
                     "does not satisfy the allOf part read by {}",
                     accessor.trim_start_matches("as_")
                 );
-                let (mut body, reads) = branch(ir, b, &progressing, ("report", "report"));
-                if checks::part_unsure(b) || (generated(&b.ty) && !progressing(&b.ty)) {
+                // Read by other names than the schema, neither a decoded part
+                // nor what its checks find is proof: it is not walked.
+                let renamed = checks::reaches_reshaped(ir, &b.ty, reshaped);
+                let (mut body, reads) = if renamed {
+                    (Vec::new(), false)
+                } else {
+                    branch(ir, b, &progressing, ("report", "report"))
+                };
+                if renamed {
+                    body.push(format!(
+                        "report.unevaluated(pointer, {:?});",
+                        format!(
+                            "allOf part read by {}: its Rust type reads members by other names than the schema",
+                            accessor.trim_start_matches("as_")
+                        )
+                    ));
+                } else if checks::part_unsure(b) || (generated(&b.ty) && !progressing(&b.ty)) {
                     body.push(format!(
                         "report.unevaluated(pointer, {:?});",
                         format!(
@@ -816,16 +876,20 @@ pub(crate) fn body(
                 }
                 // A number past what the part's type holds fails to decode for
                 // the representation: undecided, not a miss.
-                let fragile = if checks::reaches_extern(ir, &b.ty) {
-                    "true"
-                } else {
-                    wide.as_str()
+                let part_name = accessor.trim_start_matches("as_");
+                let decoder = match decoder_rules(ir, &b.ty, reshaped) {
+                    Some(cond) => format!(
+                        " else if {cond} {{ report.unevaluated(pointer, {:?}); }}",
+                        format!(
+                            "allOf part read by {part_name}: its Rust type may not decode a value the schema allows"
+                        )
+                    ),
+                    None => String::new(),
                 };
                 let miss = format!(
-                    "if {fragile} {{ report.unevaluated(pointer, {:?}); }} else {{ report.violation(pointer, {message:?}); }}",
+                    "if {wide} {{ report.unevaluated(pointer, {:?}); }}{decoder} else {{ report.violation(pointer, {message:?}); }}",
                     format!(
-                        "allOf part read by {}: a number in the value is past what its type holds",
-                        accessor.trim_start_matches("as_")
+                        "allOf part read by {part_name}: a number in the value is past what its type holds"
                     )
                 );
                 let part = if body.is_empty() {

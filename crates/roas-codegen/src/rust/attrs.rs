@@ -109,10 +109,31 @@ pub(crate) fn cfg_gates(attrs: &[String], at: &str) -> Result<Vec<String>, Gener
     Ok(out)
 }
 
+/// The serde keys `attr` sets, including those under a `cfg_attr`, which
+/// set them just the same when the predicate holds.
 fn serde_keys(attr: &syn::Attribute) -> Vec<String> {
     let mut keys = Vec::new();
-    if attr.path().is_ident("serde") {
-        let _ = attr.parse_nested_meta(|meta| {
+    meta_serde_keys(&attr.meta, &mut keys);
+    keys
+}
+
+fn meta_serde_keys(meta: &syn::Meta, keys: &mut Vec<String>) {
+    if meta.path().is_ident("cfg_attr") {
+        if let Ok(list) = meta.require_list()
+            && let Ok(args) = list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            )
+        {
+            for nested in args.iter().skip(1) {
+                meta_serde_keys(nested, keys);
+            }
+        }
+        return;
+    }
+    if meta.path().is_ident("serde")
+        && let Ok(list) = meta.require_list()
+    {
+        let _ = list.parse_nested_meta(|meta| {
             if let Some(ident) = meta.path.get_ident() {
                 keys.push(ident.to_string());
             }
@@ -129,7 +150,6 @@ fn serde_keys(attr: &syn::Attribute) -> Vec<String> {
             Ok(())
         });
     }
-    keys
 }
 
 /// The names `#[serde(alias = "…")]` among `attrs` lets a field also be
@@ -261,6 +281,21 @@ mod tests {
             .is_ok()
         );
         assert!(check_container_attrs(&["#[derive(Eq, Hash)]".into()], "Pet").is_ok());
+        // Under a `cfg_attr`, an owned key is set all the same.
+        let error = check_field_attrs(
+            &["#[cfg_attr(all(), serde(rename = \"zz\"))]".into()],
+            "Pet.tag",
+        )
+        .unwrap_err();
+        assert!(matches!(&error, GenerateError::ReservedAttribute { key, .. } if key == "rename"));
+        let error = check_container_attrs(
+            &["#[cfg_attr(test, derive(Eq), serde(deny_unknown_fields))]".into()],
+            "Pet",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, GenerateError::ReservedAttribute { key, .. } if key == "deny_unknown_fields")
+        );
     }
 
     #[test]
