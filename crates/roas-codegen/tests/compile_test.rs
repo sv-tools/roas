@@ -757,6 +757,10 @@ fn validated_description() -> serde_json::Value {
             "Zoo": {"type": "object", "properties": {"title": {"type": "string"}}, "additionalProperties": {"$ref": "#/components/schemas/ZooAnimal"}},
             "ZooOrStr": {"oneOf": [{"$ref": "#/components/schemas/Zoo"}, {"type": "string"}]},
             "IntCatchOrStr": {"oneOf": [{"$ref": "#/components/schemas/IntCatch"}, {"type": "string"}]},
+            "AliasU": {"anyOf": [{"$ref": "#/components/schemas/IntCatch"}, {"type": "string"}]},
+            "GatedInt": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "integer"}},
+            "GatedIntU": {"oneOf": [{"$ref": "#/components/schemas/GatedInt"}, {"type": "string"}]},
+            "GatedIntAll": {"allOf": [{"$ref": "#/components/schemas/GatedInt"}, {"type": "object", "properties": {"q": {"type": "integer"}}}]},
             "Ip": {"oneOf": [{"type": "string", "format": "ipv4"}, {"type": "string", "maxLength": 3}]},
             "StringOnly": {"type": "string", "enum": ["a", "b"]},
             "ObjectOnly": {"type": "object", "additionalProperties": false, "properties": {"s": {"$ref": "#/components/schemas/StringOnly"}}},
@@ -814,7 +818,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
-        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "IntCatch": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
+        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedInt": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "IntCatch": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
@@ -1184,6 +1188,11 @@ fn main() {
     assert_eq!(report::<PatMapAdd>(r#"{"x":1}"#), vec![u("")]);
     // Integers, raw holders and tagged unions decode inside a catch-all.
     assert_eq!(report::<IntCatchOrStr>(r#"{"x":1}"#), vec![]);
+    // A member Rust reads under another name than the schema (a field
+    // compiled out, an alias) may fail to decode though valid: undecided.
+    assert_eq!(report::<AliasU>(r#"{"aa":5}"#), vec![u("")]);
+    assert_eq!(report::<GatedIntU>(r#"{"a":"xyz"}"#), vec![u("")]);
+    assert_eq!(report::<GatedIntAll>(r#"{"a":"xyz"}"#), vec![u("")]);
     let caught: IntCatch = serde_json::from_str(r#"{"aa":"x","b":7,"c":1.0}"#).unwrap();
     assert_eq!(caught.a.as_deref(), Some("x"));
     assert_eq!(serde_json::to_string(&caught).unwrap(), r#"{"a":"x","b":7,"c":1}"#);
@@ -1530,6 +1539,10 @@ func main() {
 	check(`{"x":""}`, report[api.PatAdd](`{"x":""}`), u(""))
 	check(`{"x":1}`, report[api.PatMapAdd](`{"x":1}`), u(""))
 	check(`{"x":1}`, report[api.IntCatchOrStr](`{"x":1}`))
+	// Go has no cfg gates or aliases: these decode and match.
+	check(`{"aa":5}`, report[api.AliasU](`{"aa":5}`))
+	check(`{"a":"xyz"}`, report[api.GatedIntU](`{"a":"xyz"}`))
+	check(`{"a":"xyz"}`, report[api.GatedIntAll](`{"a":"xyz"}`))
 	check(`{"a":{"kind":"ZooCat"}}`, report[api.ZooOrStr](`{"a":{"kind":"ZooCat"}}`))
 	check(`"x"`, report[api.Ip](`"x"`), u(""))
 	check(`[]`, report[api.InlineItems](`[]`))

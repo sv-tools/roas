@@ -415,6 +415,7 @@ pub(crate) fn body(
     def: &TypeDef,
     view: &TypeView,
     generated: &dyn Fn(&TypeRef) -> bool,
+    reshaped: &dyn Fn(&crate::diagnostic::SchemaId) -> bool,
     opted_out: bool,
 ) -> Option<Vec<String>> {
     // A branch that comes back to this holder with the same raw value would
@@ -758,7 +759,7 @@ pub(crate) fn body(
                 // A number past what the branch's type holds fails to decode
                 // for the representation: no proof it matches no branch.
                 checked = true;
-                let beyond = if checks::reaches_extern(ir, &b.ty) {
+                let beyond = if checks::reaches_decoder_rules(ir, &b.ty, reshaped) {
                     " else { uncertain += 1; }".to_owned()
                 } else {
                     format!(" else if {wide} {{ uncertain += 1; }}")
@@ -816,7 +817,7 @@ pub(crate) fn body(
                 }
                 // A number past what the part's type holds fails to decode for
                 // the representation: undecided, not a miss.
-                let fragile = if checks::reaches_extern(ir, &b.ty) {
+                let fragile = if checks::reaches_decoder_rules(ir, &b.ty, reshaped) {
                     "true"
                 } else {
                     wide.as_str()

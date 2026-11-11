@@ -694,9 +694,22 @@ pub(crate) fn number_range(ir: &crate::ir::Ir, tys: &[&TypeRef]) -> (Option<&'st
 /// Whether `ty` reaches a substituted type, whose decoding is the user's:
 /// a failure says nothing about the schema.
 pub(crate) fn reaches_extern(ir: &crate::ir::Ir, ty: &TypeRef) -> bool {
+    reaches_decoder_rules(ir, ty, &|_| false)
+}
+
+/// Whether decoding `ty` may fail for the decoder rather than the value:
+/// it reaches a substitution, or a struct `reshaped` says reads its
+/// members by other names than the schema does (a field compiled out,
+/// whose member then lands among the others; an alias, read as the field).
+pub(crate) fn reaches_decoder_rules(
+    ir: &crate::ir::Ir,
+    ty: &TypeRef,
+    reshaped: &dyn Fn(&crate::diagnostic::SchemaId) -> bool,
+) -> bool {
     fn walk(
         ir: &crate::ir::Ir,
         ty: &TypeRef,
+        reshaped: &dyn Fn(&crate::diagnostic::SchemaId) -> bool,
         seen: &mut std::collections::BTreeSet<crate::diagnostic::SchemaId>,
     ) -> bool {
         match ty {
@@ -704,7 +717,7 @@ pub(crate) fn reaches_extern(ir: &crate::ir::Ir, ty: &TypeRef) -> bool {
             TypeRef::Boxed(inner)
             | TypeRef::Nullable(inner)
             | TypeRef::Array(inner)
-            | TypeRef::Map(inner) => walk(ir, inner, seen),
+            | TypeRef::Map(inner) => walk(ir, inner, reshaped, seen),
             TypeRef::Named(id) => {
                 if !seen.insert(id.clone()) {
                     return false;
@@ -712,12 +725,13 @@ pub(crate) fn reaches_extern(ir: &crate::ir::Ir, ty: &TypeRef) -> bool {
                 match ir.types.get(id).map(|d| &d.kind) {
                     Some(TypeKind::Extern) => true,
                     Some(TypeKind::Struct(s)) => {
-                        s.fields.iter().any(|f| walk(ir, &f.ty, seen))
-                            || matches!(&s.additional, crate::ir::Additional::CatchAll(t) if walk(ir, t, seen))
+                        reshaped(id)
+                            || s.fields.iter().any(|f| walk(ir, &f.ty, reshaped, seen))
+                            || matches!(&s.additional, crate::ir::Additional::CatchAll(t) if walk(ir, t, reshaped, seen))
                     }
-                    Some(TypeKind::Newtype(t) | TypeKind::Alias(t)) => walk(ir, t, seen),
+                    Some(TypeKind::Newtype(t) | TypeKind::Alias(t)) => walk(ir, t, reshaped, seen),
                     Some(TypeKind::UnionTagged(u)) => {
-                        u.variants.iter().any(|v| walk(ir, &v.ty, seen))
+                        u.variants.iter().any(|v| walk(ir, &v.ty, reshaped, seen))
                     }
                     // A raw holder decodes anything: its branches are
                     // judged inside it.
@@ -727,7 +741,7 @@ pub(crate) fn reaches_extern(ir: &crate::ir::Ir, ty: &TypeRef) -> bool {
             _ => false,
         }
     }
-    walk(ir, ty, &mut Default::default())
+    walk(ir, ty, reshaped, &mut Default::default())
 }
 
 /// Whether decoding a branch proves nothing: it declares what neither its
