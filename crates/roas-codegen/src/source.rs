@@ -222,7 +222,8 @@ impl SourceDocument {
 
     /// What normalizing to 3.2 lost. Recorded by the source-version
     /// adapter before the lossy conversion runs, since a 2.0
-    /// `discriminator` that 3.0 drops cannot be recovered afterwards.
+    /// `collectionFormat: tsv` that 3.0 drops cannot be recovered
+    /// afterwards.
     pub fn normalization(&self) -> &[Diagnostic] {
         &self.normalization
     }
