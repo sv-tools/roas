@@ -475,15 +475,21 @@ fn an_error_waits_for_the_steps_listed_before_it() {
     let b = send(&mut run);
     let c = send(&mut run);
     run.supply_to(b.id, ok()).unwrap();
+    // `c` comes after `b`, which would have stopped the run first: its
+    // failure is not judged, and `a` is still wanted.
     run.supply_to(c.id, HttpResponse::json(500, &json!({})))
         .unwrap();
-    // `c` ended the workflow, but it comes after `b`: the error stands.
-    assert!(matches!(
-        run.supply_to(a.id, ok()),
-        Err(ExecutionError::NotWaiting)
-    ));
+    assert_eq!(run.in_flight(), [a.id]);
+    run.supply_to(a.id, ok()).unwrap();
     assert!(matches!(run.advance(), Err(ExecutionError::Select(_))));
     assert!(matches!(run.advance(), Err(ExecutionError::Stopped)));
+    let done: Vec<_> = run
+        .partial_report()
+        .steps
+        .iter()
+        .map(|s| s.step_id.clone())
+        .collect();
+    assert_eq!(done, ["b", "a"]);
     // With nothing before it in flight, the error is raised at once.
     let mut run = Run::start(&description, &options).unwrap();
     let a = send(&mut run);
@@ -530,4 +536,45 @@ fn requests_in_flight_together_share_the_run_time() {
         Err(ExecutionError::TimedOut { .. })
     ));
     assert!(run.in_flight().is_empty());
+}
+
+#[test]
+fn an_earlier_error_replaces_the_one_held() {
+    let broken = |id: &str| {
+        let mut step = step(id);
+        step["outputs"] = json!({ "x": "$steps.nowhere.outputs.x" });
+        step
+    };
+    let steps = |first: Value| json!([first, broken("b"), broken("c")]);
+    let options = options().parallel(3);
+    // `c` is held, then `b`: only `b` would have run, and `a` ends it.
+    let description = description(steps(step("a")), json!({}));
+    let mut run = Run::start(&description, &options).unwrap();
+    let a = send(&mut run);
+    let b = send(&mut run);
+    let c = send(&mut run);
+    run.supply_to(c.id, ok()).unwrap();
+    run.supply_to(b.id, ok()).unwrap();
+    run.supply_to(a.id, HttpResponse::json(500, &json!({})))
+        .unwrap();
+    let Ok(Progress::Done(report)) = run.advance() else {
+        panic!("done");
+    };
+    let done: Vec<_> = report.steps.iter().map(|s| s.step_id.as_str()).collect();
+    assert_eq!(done, ["a"]);
+    // `a`'s own error comes before the one held, and is raised at once.
+    let description = self::description(steps(broken("a")), json!({}));
+    let mut run = Run::start(&description, &options).unwrap();
+    let a = send(&mut run);
+    let b = send(&mut run);
+    send(&mut run);
+    run.supply_to(b.id, ok()).unwrap();
+    assert!(run.supply_to(a.id, ok()).is_err());
+    let done: Vec<_> = run
+        .partial_report()
+        .steps
+        .iter()
+        .map(|s| s.step_id.clone())
+        .collect();
+    assert_eq!(done, ["a"]);
 }

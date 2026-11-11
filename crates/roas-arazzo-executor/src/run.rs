@@ -1158,6 +1158,16 @@ impl<'d> Run<'d> {
         };
         let alongside = pending.alongside;
         let step = pending.step;
+        // With an error held, a step listed after it would not have run:
+        // its response is not judged.
+        let position = self.position(step);
+        if self
+            .held
+            .as_ref()
+            .is_some_and(|held| position > held.position)
+        {
+            return Ok(());
+        }
         let before = self.records.len();
         // No criteria means the status is the whole judgement.
         let result = self.complete(
@@ -1177,7 +1187,9 @@ impl<'d> Run<'d> {
             // A step listed before this one, still in flight, may yet end
             // the workflow — and then this one would never have run.
             Err(error) if alongside => {
-                let position = self.position(step);
+                let mut record = (self.records.len() > before).then_some(before);
+                // Listed before the one held, so that one would not have run.
+                let dropped = self.drop_held();
                 if !self
                     .pending
                     .iter()
@@ -1185,21 +1197,28 @@ impl<'d> Run<'d> {
                 {
                     return Err(error);
                 }
-                if self
-                    .held
-                    .as_ref()
-                    .is_none_or(|held| position < held.position)
+                if let (Some(at), Some(removed)) = (&mut record, dropped)
+                    && *at > removed
                 {
-                    self.held = Some(Held {
-                        position,
-                        record: (self.records.len() > before).then_some(before),
-                        error,
-                    });
+                    *at -= 1;
                 }
+                self.held = Some(Held {
+                    position,
+                    record,
+                    error,
+                });
                 Ok(())
             }
             other => other,
         }
+    }
+
+    /// Forget the held error, and the record its step left; say where that
+    /// record was.
+    fn drop_held(&mut self) -> Option<usize> {
+        let record = self.held.take()?.record?;
+        self.records.remove(record);
+        Some(record)
     }
 
     /// Where step `index` is in the innermost frame's order.
@@ -1593,11 +1612,12 @@ impl<'d> Run<'d> {
             }
             // Ending the workflow, this step stops a later one whose error
             // was held: that one would never have run.
-            let position = self.position(index);
-            if let Some(held) = self.held.take_if(|held| held.position > position)
-                && let Some(record) = held.record
+            if self
+                .held
+                .as_ref()
+                .is_some_and(|held| held.position > self.position(index))
             {
-                self.records.remove(record);
+                self.drop_held();
             }
         }
         self.apply(action)
