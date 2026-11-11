@@ -70,6 +70,54 @@ One limit is worth stating: `enum` uniqueness compares numbers after the parser 
 
 `ValidationOptions` (EnumSet): `IgnoreEmptyInfoTitle`, `IgnoreEmptyInfoVersion`, `IgnoreUnusedChannelParameter`, and `ErrorOnExternalReference`. Behind the `clap` feature, the enum implements `clap::ValueEnum` so downstream CLIs can surface it directly.
 
+## Resolving references
+
+Each version's `Document` can follow a `$ref` to the object it names, as long as the chain stays inside that document:
+
+```rust
+use roas_asyncapi::common::Resolution;
+use roas_asyncapi::v3_1::Document;
+
+let doc: Document = serde_json::from_str(r##"{
+    "asyncapi": "3.1.0",
+    "info": { "title": "Streetlights", "version": "1.0.0" },
+    "channels": {
+        "lightMeasured": {
+            "address": "lighting/measured",
+            "messages": { "lightMeasured": { "name": "LightMeasured" } }
+        }
+    },
+    "operations": {
+        "receiveLightMeasurement": {
+            "action": "receive",
+            "channel": { "$ref": "#/channels/lightMeasured" },
+            "messages": [ { "$ref": "#/channels/lightMeasured/messages/lightMeasured" } ]
+        }
+    }
+}"##).unwrap();
+
+let operation = doc
+    .resolve_operation(&doc.operations["receiveLightMeasurement"])
+    .found()
+    .expect("declared inline");
+
+match doc.resolve_channel_ref(&operation.channel) {
+    Resolution::Found(channel) => assert_eq!(channel.messages.len(), 1),
+    Resolution::Opaque => { /* another document: not loaded here */ }
+    other => panic!("channel {}", other.problem().unwrap_or("did not resolve")),
+}
+
+let message = doc.resolve_message_ref(&operation.messages[0]).found().unwrap();
+assert_eq!(message.name.as_deref(), Some("LightMeasured"));
+```
+
+A resolver takes the entry the model holds — a `RefOr<T>`, where an inline item resolves to itself — and returns a `Resolution<T>`: `Found`, `Opaque` (the chain leaves the document, or lands somewhere the model does not hold as that kind), `Missing`, `Cycle`, `Unrecognized`, or `WrongKind`. `found()` gives the object and `problem()` says why a reference is a document bug, if it is one.
+
+| Version | Resolvers on `Document` |
+|---|---|
+| 3.0 / 3.1 | `resolve_server`, `resolve_channel`, `resolve_operation`, `resolve_message`, `resolve_reply`, plus `resolve_server_ref`, `resolve_channel_ref` and `resolve_message_ref` for the places the model holds a bare `Reference` (a channel's `servers`, an operation's `channel` and `messages`) |
+| 2.6 | `resolve_channel` (a channel item carries its own `$ref`), `resolve_server`, `resolve_message`, `resolve_security_scheme` |
+
 ## What 2.6 does differently
 
 2.6 is a different document rather than an earlier draft of v3, so `v2_6` is its own model rather than a variation on `v3_0`:
@@ -91,7 +139,7 @@ The `publish` / `subscribe` inversion is the migration trap worth naming: 2.6's 
 
 The model and its validators are the whole surface. Out of scope for this release:
 
-- **`$ref` resolution across documents.** Cross-reference checks run on document-local pointers; an external `$ref` is accepted without further checking unless `ErrorOnExternalReference` asks for a self-contained document.
+- **`$ref` resolution across documents.** Cross-reference checks and the `resolve_*` methods work on document-local pointers; no other document is loaded. The validator accepts an external `$ref` without further checking unless `ErrorOnExternalReference` asks for a self-contained document, and a resolver reports one as `Resolution::Opaque`.
 - **Trait merging.** `message.traits` and `operation.traits` are parsed and validated, not applied.
 - **Typed protocol bindings.** AsyncAPI 3.0 types ~17 protocols across server / channel / operation / message, each with its own independently versioned `bindingVersion`. Bindings are held as raw JSON keyed by protocol, so they round-trip losslessly and typed accessors can be layered on later without a breaking change.
 - **Payload dialects other than the default.** Only the AsyncAPI Schema Object dialect — JSON Schema draft-07 plus `discriminator` / `externalDocs` / `deprecated` — is typed, and every draft-07 keyword is modeled so a schema round-trips unchanged. A payload carrying a `schema` property is a Multi Format Schema Object (that presence is the discriminator, exactly as the specification's `anySchema` defines it, not the optional `schemaFormat`), and its `schema` stays raw JSON whatever dialect it names.

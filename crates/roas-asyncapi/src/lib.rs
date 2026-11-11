@@ -8,8 +8,9 @@
 //! ## Modules
 //!
 //! - [`common`] — version-agnostic helpers: the `x-` extensions serde
-//!   helper, the `$ref` wrapper, untyped protocol bindings, and the
-//!   runtime-expression grammar.
+//!   helper, the `$ref` wrapper and the
+//!   [`Resolution`](common::Resolution) of following one, untyped
+//!   protocol bindings, and the runtime-expression grammar.
 //! - [`validation`] — [`Validate`](validation::Validate) trait,
 //!   [`ValidationOptions`](validation::ValidationOptions) flag set,
 //!   `Context` / `ValidationError` types.
@@ -77,6 +78,15 @@
 //! therefore run on document-local pointers only — see
 //! [`ValidationOptions`](validation::ValidationOptions) to require a
 //! self-contained document instead.
+//!
+//! Document-local resolution is available to callers as well. Each
+//! version's `Document` has typed `resolve_*` methods — `resolve_channel`,
+//! `resolve_server`, `resolve_message`, and the other kinds that version
+//! can follow — which take the entry the model holds and return a
+//! [`Resolution`](common::Resolution): the object at the end of the
+//! `$ref` chain, or whether the chain left the document, dangles, loops,
+//! or names something of another kind. Nothing is loaded, so a `$ref`
+//! into another file is reported as opaque rather than followed.
 //!
 //! ## Versions
 //!

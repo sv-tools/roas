@@ -17,24 +17,39 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
 
-/// What following a document-local pointer turned out to be.
+/// What resolving a reference inside one document turned out to be.
+///
+/// Returned by the `resolve_*` methods on each version's `Document`.
+/// Resolution is document-local: a chain of `$ref`s is followed as far
+/// as it stays in the document it started in, and no other document is
+/// ever loaded. The variants tell apart the ways that can end, because
+/// only some of them are the document's fault — see
+/// [`problem`](Resolution::problem).
+///
+/// The enum is `#[non_exhaustive]`: match with a wildcard arm, or use
+/// [`found`](Resolution::found) when only the object matters.
 #[derive(Debug)]
-pub(crate) enum Resolution<'a, T> {
-    /// Resolved to a concrete object in this document.
+#[non_exhaustive]
+pub enum Resolution<'a, T> {
+    /// Resolved to a concrete object in this document — the inline
+    /// item itself, or the object at the end of a chain of `$ref`s.
     Found(&'a T),
-    /// The chain ends at a reference into another document, or at a
-    /// location this crate does not model. Either way it is not a
-    /// document bug, and not something this crate can inspect.
+    /// The chain ends at a reference into another document
+    /// (`./other.yaml#/…`), or at a location in this one that the
+    /// typed model does not hold as an object of this kind — a
+    /// suitably shaped `x-` extension, say. Either way it is not a
+    /// document bug, and there is no typed object to hand back.
     Opaque,
-    /// A local pointer that names nothing.
+    /// A local pointer that names nothing: a dangling reference.
     Missing,
     /// The chain revisits a pointer it already followed.
     Cycle,
-    /// Not a usable pointer: malformed escapes, or a shape that is not
-    /// a JSON Pointer at all.
+    /// Not a usable pointer: an empty reference, malformed escapes, or
+    /// a fragment that is not a JSON Pointer at all.
     Unrecognized,
     /// A pointer at a location the document itself declares to be some
-    /// *other* kind of object — a server where a channel belongs, say.
+    /// *other* kind of object — a server where a channel belongs, say —
+    /// or at a value that cannot be read as this kind at all.
     ///
     /// Distinct from [`Opaque`](Resolution::Opaque): there the target
     /// is something this crate does not model and cannot judge; here
@@ -43,25 +58,27 @@ pub(crate) enum Resolution<'a, T> {
 }
 
 impl<'a, T> Resolution<'a, T> {
-    /// The object, if the pointer resolved inside this document.
+    /// The object, if the reference resolved inside this document.
     ///
     /// Takes `self` so the borrow is the document's, not this
     /// `Resolution`'s — callers routinely resolve into a temporary.
     #[must_use]
-    pub(crate) fn found(self) -> Option<&'a T> {
+    pub fn found(self) -> Option<&'a T> {
         match self {
             Resolution::Found(item) => Some(item),
             _ => None,
         }
     }
 
-    /// Why this pointer is a document bug, if it is one.
+    /// Why this reference is a document bug, if it is one, phrased to
+    /// follow the reference it describes (`"names nothing in this
+    /// document"`).
     ///
     /// `None` means it resolved, left the document, or landed somewhere
     /// this crate does not model — none of which the document is at
     /// fault for.
     #[must_use]
-    pub(crate) fn problem(&self) -> Option<&'static str> {
+    pub fn problem(&self) -> Option<&'static str> {
         match self {
             Resolution::Found(_) | Resolution::Opaque => None,
             Resolution::Missing => Some("names nothing in this document"),
