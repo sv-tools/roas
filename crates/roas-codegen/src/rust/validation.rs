@@ -184,6 +184,94 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                     Err(_) => {}
                 }
             }
+            Check::NumberIn {
+                values,
+                keyword,
+                literal,
+            } => {
+                let what = if *keyword == "const" {
+                    format!("the const {literal}")
+                } else {
+                    format!("one of the enum values {literal}")
+                };
+                match kind {
+                    ValueKind::Integer(_) => {
+                        // Exactly, as integers; a fraction is no integer's value.
+                        let mut set: Vec<i128> =
+                            values.iter().filter_map(checks::exact_integer).collect();
+                        set.sort_unstable();
+                        set.dedup();
+                        let violation = format!(
+                            "{r}.violation({p}, format!(\"{{}} is not {what}\", {v}.0));"
+                        );
+                        out.push(if set.is_empty() {
+                            violation
+                        } else {
+                            let list = set
+                                .iter()
+                                .map(i128::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            format!("if ![{list}].contains(&{int}) {{ {violation} }}")
+                        });
+                    }
+                    ValueKind::Number(FloatWidth::Float) => {
+                        // A `float` equal to a value is ambiguous: literals
+                        // around it decode to it, as at a bound.
+                        let mut set: Vec<f32> = values
+                            .iter()
+                            .filter_map(serde_json::Number::as_f64)
+                            .filter(|f| f.is_finite())
+                            .flat_map(|f| {
+                                let (below, above) = checks::f32_neighbours(f);
+                                [below, above]
+                            })
+                            .filter(|f| f.is_finite())
+                            .collect();
+                        set.sort_by(f32::total_cmp);
+                        set.dedup();
+                        let violation = format!(
+                            "{r}.violation({p}, format!(\"{{}} is not {what}\", {v}))"
+                        );
+                        out.push(if set.is_empty() {
+                            format!("{violation};")
+                        } else {
+                            let at = set
+                                .iter()
+                                .map(|f| format!("*{v} == {f:?}_f32"))
+                                .collect::<Vec<_>>()
+                                .join(" || ");
+                            format!(
+                                "if {at} {{ {r}.unevaluated({p}, {:?}); }} else {{ {violation}; }}",
+                                format!("{keyword} {literal}: the value rounds to the same float as a listed value")
+                            )
+                        });
+                    }
+                    _ => {
+                        // Decided as far as an `f64` holds the value.
+                        let mut set: Vec<f64> = values
+                            .iter()
+                            .filter_map(serde_json::Number::as_f64)
+                            .filter(|f| f.is_finite())
+                            .collect();
+                        set.sort_by(f64::total_cmp);
+                        set.dedup();
+                        let violation = format!(
+                            "{r}.violation({p}, format!(\"{{}} is not {what}\", {v}))"
+                        );
+                        out.push(if set.is_empty() {
+                            format!("{violation};")
+                        } else {
+                            let at = set
+                                .iter()
+                                .map(|f| format!("f64::from(*{v}) == {f:?}"))
+                                .collect::<Vec<_>>()
+                                .join(" || ");
+                            format!("if !({at}) {{ {violation}; }}")
+                        });
+                    }
+                }
+            }
             Check::NumMultipleOf { integral, literal } => {
                 let unevaluated = format!(
                     "{r}.unevaluated({p}, \"multipleOf {literal}: a decoded float has lost its literal, so only a fraction against a whole multiple is decided\")"

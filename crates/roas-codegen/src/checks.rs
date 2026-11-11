@@ -80,6 +80,13 @@ pub(crate) enum Check {
         integral: bool,
         literal: String,
     },
+    /// A number's `enum` or `const`: the values it may be. `literal` is
+    /// how they are written in a message.
+    NumberIn {
+        values: Vec<Number>,
+        keyword: &'static str,
+        literal: String,
+    },
     MinItems(u64),
     MaxItems(u64),
     UniqueItems(Unique),
@@ -237,6 +244,7 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                     literal: n.to_string(),
                 });
             }
+            out.extend(number_in(c));
             if let Some(n) = &c.multiple_of {
                 out.push(match decimal(n) {
                     Some((factor, scale)) if factor != 0 => Check::IntMultipleOf {
@@ -280,6 +288,7 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                     }
                 });
             }
+            out.extend(number_in(c));
             if let Some(n) = &c.multiple_of {
                 out.push(Check::NumMultipleOf {
                     integral: n.is_i64() || n.is_u64(),
@@ -901,6 +910,8 @@ pub(crate) fn unchecked_keywords(ty: &TypeRef, c: &Constraints) -> Vec<&'static 
         (c.max_properties.is_some(), "maxProperties", map),
         (c.property_names, "propertyNames", map),
         (!c.pattern_properties.is_empty(), "patternProperties", map),
+        (c.enum_numbers.is_some(), "enum", number),
+        (c.const_number.is_some(), "const", number),
     ] {
         if present && !applies {
             out.push(keyword);
@@ -1128,6 +1139,8 @@ fn declared_keywords(c: &Constraints) -> Vec<&'static str> {
         (c.max_properties.is_some(), "maxProperties"),
         (c.property_names, "propertyNames"),
         (!c.pattern_properties.is_empty(), "patternProperties"),
+        (c.enum_numbers.is_some(), "enum"),
+        (c.const_number.is_some(), "const"),
     ]
     .into_iter()
     .filter_map(|(present, keyword)| present.then_some(keyword))
@@ -1246,6 +1259,39 @@ fn floor_ceil(n: &Number) -> (i128, i128) {
 }
 
 /// The smallest integer satisfying `>= n` (or `> n`).
+/// A number's `enum` and `const`, as checks.
+fn number_in(c: &Constraints) -> Vec<Check> {
+    let mut out = Vec::new();
+    if let Some(values) = &c.enum_numbers {
+        out.push(Check::NumberIn {
+            values: values.clone(),
+            keyword: "enum",
+            literal: format!(
+                "[{}]",
+                values
+                    .iter()
+                    .map(Number::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
+    if let Some(n) = &c.const_number {
+        out.push(Check::NumberIn {
+            values: vec![n.clone()],
+            keyword: "const",
+            literal: n.to_string(),
+        });
+    }
+    out
+}
+
+/// The integer `n` is, when it is one.
+pub(crate) fn exact_integer(n: &Number) -> Option<i128> {
+    let (floor, ceil) = floor_ceil(n);
+    (floor == ceil).then_some(floor)
+}
+
 fn int_lower(n: &Number, exclusive: bool) -> i128 {
     let (floor, ceil) = floor_ceil(n);
     if exclusive { floor + 1 } else { ceil }

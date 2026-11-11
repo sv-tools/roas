@@ -642,6 +642,10 @@ fn validated_description() -> serde_json::Value {
             "Sib": {"$ref": "#/components/schemas/Short", "minLength": 2},
             "SibC": {"$ref": "#/components/schemas/Short", "const": "zz"},
             "Ni": {"type": "integer", "enum": [1, 2]},
+            "FloatEnum": {"type": "number", "format": "float", "enum": [0.5, 1.25]},
+            "DoubleEnum": {"type": "number", "enum": [0.1, 2]},
+            "IntConst": {"type": "integer", "const": 7},
+            "NumConst": {"type": "object", "properties": {"c": {"type": "number", "const": 1.5}}},
             "Pins": {"type": "object", "properties": {
                 "n": {"type": "integer", "enum": [1, 2]},
                 "k": {"type": "boolean", "const": true}
@@ -1104,8 +1108,9 @@ fn main() {
     assert_eq!(report::<MaybeShort>(r#""ab""#), vec![]);
     assert_eq!(report::<MaybeShort>(r#""abc""#), vec![v("")]);
     assert_eq!(report::<MaybeShort>("null"), vec![]);
-    // Decoding proves no match where an enum goes unchecked.
-    assert_eq!(report::<Picks>("1"), vec![u("")]);
+    // A numeric enum is checked, so a branch with one decides.
+    assert_eq!(report::<Picks>("1"), vec![]);
+    assert_eq!(report::<Picks>("3"), vec![v("")]);
     // A composition naming itself is decoded, not validated forever.
     assert_eq!(report::<Itself>(r#""a""#), vec![]);
     // A null through an alias of an open union is still checked.
@@ -1121,7 +1126,8 @@ fn main() {
     assert!(serde_json::from_str::<Tiny>(r#"{"f":1e39}"#).is_err());
     assert_eq!(report::<Tiny>(r#"{"f":1.5}"#), vec![]);
     // A referenced numeric enum is unchecked too: no certain double match.
-    assert_eq!(report::<PicksRef>("1"), vec![u("")]);
+    assert_eq!(report::<PicksRef>("1"), vec![]);
+    assert_eq!(report::<PicksRef>("3"), vec![v("")]);
     // A deprecated field is still checked, without a warning.
     assert_eq!(report::<Old>(r#"{"name":""}"#), vec![v("/name")]);
     // An intersection allows null only when every side does.
@@ -1130,13 +1136,27 @@ fn main() {
     // `$ref` siblings nothing checks prove no match.
     assert_eq!(report::<Sib>(r#""a""#), vec![u("")]);
     assert_eq!(report::<SibC>(r#""a""#), vec![u("")]);
-    // A numeric enum or a const is never taken as satisfied.
-    assert_eq!(report::<Ni>("3"), vec![u("")]);
-    assert_eq!(report::<Pins>(r#"{"n":3}"#), vec![u("/n")]);
+    // A number's enum and const are checked: integers exactly, a double
+    // as far as an f64 holds it, a float equal to a value is undecided.
+    assert_eq!(report::<Ni>("3"), vec![v("")]);
+    assert_eq!(report::<Ni>("2"), vec![]);
+    assert_eq!(report::<Ni>("2.0"), vec![]);
+    assert_eq!(report::<Pins>(r#"{"n":3}"#), vec![v("/n")]);
+    assert_eq!(report::<FloatEnum>("0.5"), vec![u("")]);
+    assert_eq!(report::<FloatEnum>("0.75"), vec![v("")]);
+    assert_eq!(report::<DoubleEnum>("0.1"), vec![]);
+    assert_eq!(report::<DoubleEnum>("2"), vec![]);
+    assert_eq!(report::<DoubleEnum>("3"), vec![v("")]);
+    assert_eq!(report::<IntConst>("7"), vec![]);
+    assert_eq!(report::<IntConst>("8"), vec![v("")]);
+    assert_eq!(report::<NumConst>(r#"{"c":1.5}"#), vec![]);
+    assert_eq!(report::<NumConst>(r#"{"c":2}"#), vec![v("/c")]);
+    // A const that is not a number is still not checked.
     assert_eq!(report::<Pins>(r#"{"k":false}"#), vec![u("/k")]);
     // A type list's enum and default are split among its members.
     assert_eq!(report::<EnumO>(r#""ab""#), vec![]);
-    assert_eq!(report::<EnumO>("5"), vec![u("")]);
+    assert_eq!(report::<EnumO>("5"), vec![]);
+    assert_eq!(report::<EnumO>("6"), vec![v("")]);
     assert_eq!(report::<Def>("5"), vec![]);
     assert_eq!(report::<Def>("0"), vec![v("")]);
     assert_eq!(report::<EnumN>(r#""cde""#), vec![v("")]);
@@ -1641,14 +1661,16 @@ func main() {
 	check(`"ab"`, report[api.MaybeShort](`"ab"`))
 	check(`"abc"`, report[api.MaybeShort](`"abc"`), v(""))
 	check(`null`, report[api.MaybeShort](`null`))
-	check(`1`, report[api.Picks](`1`), u(""))
+	check(`1`, report[api.Picks](`1`))
+	check(`3`, report[api.Picks](`3`), v(""))
 	check(`"a"`, report[api.Itself](`"a"`))
 	check(`{"c":null}`, report[api.Holds](`{"c":null}`), v("/c"))
 	check(`null`, report[api.OrNull](`null`))
 	check(`"ab"`, report[api.OrNull](`"ab"`), v(""))
 	check(`{"q":"a","z":"b"}`, report[api.Extended](`{"q":"a","z":"b"}`))
 	check(`{"q":"a","z":"bc"}`, report[api.Extended](`{"q":"a","z":"bc"}`), v("/z"))
-	check(`1`, report[api.PicksRef](`1`), u(""))
+	check(`1`, report[api.PicksRef](`1`))
+	check(`3`, report[api.PicksRef](`3`), v(""))
 	check(`{"name":""}`, report[api.Old](`{"name":""}`), v("/name"))
 	check(`"a"`, report[api.Both](`"a"`))
 	if got := report[api.Both](`null`); len(got) == 0 || got[0] != v("") {
@@ -1656,11 +1678,23 @@ func main() {
 	}
 	check(`"a"`, report[api.Sib](`"a"`), u(""))
 	check(`"a"`, report[api.SibC](`"a"`), u(""))
-	check(`3`, report[api.Ni](`3`), u(""))
-	check(`{"n":3}`, report[api.Pins](`{"n":3}`), u("/n"))
+	check(`3`, report[api.Ni](`3`), v(""))
+	check(`2`, report[api.Ni](`2`))
+	check(`2.0`, report[api.Ni](`2.0`))
+	check(`{"n":3}`, report[api.Pins](`{"n":3}`), v("/n"))
+	check(`0.5`, report[api.FloatEnum](`0.5`), u(""))
+	check(`0.75`, report[api.FloatEnum](`0.75`), v(""))
+	check(`0.1`, report[api.DoubleEnum](`0.1`))
+	check(`2`, report[api.DoubleEnum](`2`))
+	check(`3`, report[api.DoubleEnum](`3`), v(""))
+	check(`7`, report[api.IntConst](`7`))
+	check(`8`, report[api.IntConst](`8`), v(""))
+	check(`{"c":1.5}`, report[api.NumConst](`{"c":1.5}`))
+	check(`{"c":2}`, report[api.NumConst](`{"c":2}`), v("/c"))
 	check(`{"k":false}`, report[api.Pins](`{"k":false}`), u("/k"))
 	check(`"ab"`, report[api.EnumO](`"ab"`))
-	check(`5`, report[api.EnumO](`5`), u(""))
+	check(`5`, report[api.EnumO](`5`))
+	check(`6`, report[api.EnumO](`6`), v(""))
 	check(`5`, report[api.Def](`5`))
 	check(`0`, report[api.Def](`0`), v(""))
 	check(`"cde"`, report[api.EnumN](`"cde"`), v(""))

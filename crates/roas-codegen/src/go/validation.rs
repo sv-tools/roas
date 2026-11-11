@@ -168,6 +168,101 @@ fn render(
                     ));
                 }
             }
+            Check::NumberIn {
+                values,
+                keyword,
+                literal,
+            } => {
+                let what = if *keyword == "const" {
+                    format!("the const {literal}")
+                } else {
+                    format!("one of the enum values {literal}")
+                };
+                match kind {
+                    ValueKind::Integer(_) => {
+                        // Exactly, as integers; a fraction is no integer's
+                        // value, nor is one past every int64.
+                        let mut set: Vec<i64> = values
+                            .iter()
+                            .filter_map(checks::exact_integer)
+                            .filter_map(|n| i64::try_from(n).ok())
+                            .collect();
+                        set.sort_unstable();
+                        set.dedup();
+                        let violation = format!(
+                            "{r}.violation({p}, fmt.Sprintf({}, int64({e})))",
+                            lit(&format!("%d is not {what}"))
+                        );
+                        out.push(if set.is_empty() {
+                            violation
+                        } else {
+                            let list = set
+                                .iter()
+                                .map(i64::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            format!("switch int64({e}) {{ case {list}: default: {violation} }}")
+                        });
+                    }
+                    ValueKind::Number(FloatWidth::Float) => {
+                        // A `float` equal to a value is ambiguous: literals
+                        // around it decode to it, as at a bound.
+                        let mut set: Vec<f32> = values
+                            .iter()
+                            .filter_map(serde_json::Number::as_f64)
+                            .filter(|f| f.is_finite())
+                            .flat_map(|f| {
+                                let (below, above) = checks::f32_neighbours(f);
+                                [below, above]
+                            })
+                            .filter(|f| f.is_finite())
+                            .collect();
+                        set.sort_by(f32::total_cmp);
+                        set.dedup();
+                        let violation = format!(
+                            "{r}.violation({p}, fmt.Sprintf({}, float32({e})))",
+                            lit(&format!("%v is not {what}"))
+                        );
+                        out.push(if set.is_empty() {
+                            violation
+                        } else {
+                            let at = set
+                                .iter()
+                                .map(|f| format!("float32({e}) == {f:?}"))
+                                .collect::<Vec<_>>()
+                                .join(" || ");
+                            format!(
+                                "if {at} {{ {r}.unevaluated({p}, {}) }} else {{ {violation} }}",
+                                lit(&format!("{keyword} {literal}: the value rounds to the same float as a listed value"))
+                            )
+                        });
+                    }
+                    _ => {
+                        // Decided as far as a float64 holds the value.
+                        let mut set: Vec<f64> = values
+                            .iter()
+                            .filter_map(serde_json::Number::as_f64)
+                            .filter(|f| f.is_finite())
+                            .collect();
+                        set.sort_by(f64::total_cmp);
+                        set.dedup();
+                        let violation = format!(
+                            "{r}.violation({p}, fmt.Sprintf({}, float64({e})))",
+                            lit(&format!("%v is not {what}"))
+                        );
+                        out.push(if set.is_empty() {
+                            violation
+                        } else {
+                            let at = set
+                                .iter()
+                                .map(|f| format!("float64({e}) == {f:?}"))
+                                .collect::<Vec<_>>()
+                                .join(" || ");
+                            format!("if !({at}) {{ {violation} }}")
+                        });
+                    }
+                }
+            }
             Check::NumAtLeast {
                 bound,
                 exclusive,
