@@ -23,7 +23,7 @@ Both forms are `Clone` so a single fetcher can be registered for both `http://` 
 
 ```toml
 [dependencies]
-roas-http-fetcher = { version = "0.2.5", features = ["yaml"] }
+roas-http-fetcher = { version = "0.3", features = ["yaml"] }
 ```
 
 ## Usage
