@@ -878,7 +878,11 @@ pub(crate) fn diagnostics(
             TypeKind::UnionOpen(crate::ir::OpenUnion { branches, .. })
             | TypeKind::ComposedOpen(branches) => {
                 for branch in branches {
-                    positions.push((def.id.pointer.clone(), &branch.ty, &branch.constraints));
+                    let pointer = branch
+                        .pointer
+                        .clone()
+                        .unwrap_or_else(|| def.id.pointer.clone());
+                    positions.push((pointer, &branch.ty, &branch.constraints));
                 }
             }
             _ => {}

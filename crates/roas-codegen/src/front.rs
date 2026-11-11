@@ -620,6 +620,7 @@ impl Translator<'_> {
         let branches = self.branches(&all.all_of, &pointer, "allOf");
         let mut front = self.leaf(pointer, Kind::AllOf { branches });
         front.unsupported = catch_all_keywords(&all.extensions, &mut front.extensions);
+        composition_annotations(&mut front, &all.extensions);
         front.dialect = dialect_of(&all.extensions);
         front.const_value = const_of(&all.extensions);
         front
@@ -629,6 +630,7 @@ impl Translator<'_> {
         let branches = self.branches(&any.any_of, &pointer, "anyOf");
         let mut front = self.leaf(pointer, Kind::AnyOf { branches });
         front.unsupported = catch_all_keywords(&any.extensions, &mut front.extensions);
+        composition_annotations(&mut front, &any.extensions);
         front.dialect = dialect_of(&any.extensions);
         front.const_value = const_of(&any.extensions);
         front
@@ -644,6 +646,7 @@ impl Translator<'_> {
             },
         );
         front.unsupported = catch_all_keywords(&one.extensions, &mut front.extensions);
+        composition_annotations(&mut front, &one.extensions);
         front.dialect = dialect_of(&one.extensions);
         front.const_value = const_of(&one.extensions);
         front
@@ -1148,6 +1151,36 @@ fn catch_all_keywords(
         }
     }
     unsupported
+}
+
+/// A composition's annotations: the model keeps them in its catch-all,
+/// but they assert nothing, so they are read rather than reported.
+fn composition_annotations(front: &mut FrontSchema, extensions: &Option<BTreeMap<String, Value>>) {
+    let Some(extensions) = extensions else {
+        return;
+    };
+    for key in [
+        "title",
+        "description",
+        "deprecated",
+        "readOnly",
+        "writeOnly",
+        "default",
+    ] {
+        let Some(value) = extensions.get(key) else {
+            continue;
+        };
+        front.unsupported.retain(|k| k != key);
+        match (key, value) {
+            ("title", Value::String(text)) => front.title = Some(text.clone()),
+            ("description", Value::String(text)) => front.description = Some(text.clone()),
+            ("deprecated", Value::Bool(flag)) => front.deprecated = *flag,
+            ("readOnly", Value::Bool(flag)) => front.read_only = *flag,
+            ("writeOnly", Value::Bool(flag)) => front.write_only = *flag,
+            ("default", value) => front.default = Some(value.clone()),
+            _ => {}
+        }
+    }
 }
 
 fn const_of(extensions: &Option<BTreeMap<String, Value>>) -> Option<Value> {

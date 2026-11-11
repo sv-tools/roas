@@ -404,6 +404,7 @@ impl<'a> Lowerer<'a> {
                     constraints: Default::default(),
                     object_only: false,
                     unchecked: false,
+                    pointer: None,
                 },
                 Branch {
                     suggested_name: sibling_hint,
@@ -411,6 +412,7 @@ impl<'a> Lowerer<'a> {
                     ty: wrap_nullable(projection),
                     object_only: false,
                     unchecked: schema_unchecked(siblings),
+                    pointer: None,
                 },
             ]),
             has_error: false,
@@ -813,6 +815,7 @@ impl<'a> Lowerer<'a> {
                     constraints: Default::default(),
                     object_only: true,
                     unchecked: false,
+                    pointer: None,
                 }])
             }
             Kind::Object { .. } if named => TypeKind::Struct(self.object(schema, &name)),
@@ -850,7 +853,7 @@ impl<'a> Lowerer<'a> {
     /// A typeless schema's object keywords as a struct of their own.
     fn object_projection(&mut self, schema: &FrontSchema, hint: &[String]) -> SchemaId {
         let mut id = schema.id.clone();
-        id.pointer.push_str("/(object)");
+        id.pointer = crate::diagnostic::synthetic(&id.pointer, "object");
         let def = TypeDef {
             id: id.clone(),
             suggested_name: hint.to_vec(),
@@ -987,6 +990,10 @@ impl<'a> Lowerer<'a> {
                     unchecked: self.slot_unchecked(slot),
                     ty,
                     object_only: false,
+                    pointer: Some(match slot {
+                        Slot::Inline(schema) => schema.id.pointer.clone(),
+                        Slot::Ref { id, .. } => id.pointer.clone(),
+                    }),
                 }
             })
             .collect()
@@ -1010,6 +1017,7 @@ impl<'a> Lowerer<'a> {
                     unchecked: self.slot_unchecked(slot),
                     ty,
                     object_only: false,
+                    pointer: None,
                 }
             })
             .collect()
@@ -1990,7 +1998,7 @@ mod tests {
             panic!("{:?}", loose.kind)
         };
         assert_eq!(branches.len(), 1);
-        let projection = def(&ir, "/components/schemas/Loose/(object)");
+        let projection = def(&ir, "/components/schemas/Loose/~object");
         assert!(matches!(&projection.kind, TypeKind::Struct(s) if s.fields.len() == 1));
         assert!(
             ir.diagnostics

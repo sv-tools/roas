@@ -1070,3 +1070,53 @@ fn items_beside_prefix_items_is_reported_not_applied() {
         "{text}"
     );
 }
+
+#[test]
+fn branch_and_projection_warnings_point_where_they_are_written() {
+    let g = generate(
+        &document(serde_json::json!({
+            "BStr": {"oneOf": [{"type": "integer"}, {"type": "string", "pattern": "(?=a)"}]},
+            "BAll": {"allOf": [{"type": "string"}, {"type": "string", "pattern": "(?=b)"}]},
+            "X": {"properties": {"x": {"type": "string", "pattern": "(?=e)"}}, "propertyNames": {"pattern": "(?=f)"}},
+            "Y": {"type": ["object", "string"], "pattern": "(?=g)"},
+            "A": {"title": "T", "description": "D", "deprecated": true, "readOnly": true, "default": "x",
+                "anyOf": [{"type": "string"}, {"type": "boolean"}]}
+        })),
+        &rust_config("validation = true"),
+    )
+    .unwrap();
+    let pointers: Vec<&str> = g
+        .diagnostics
+        .iter()
+        .filter(
+            |d| matches!(&d.kind, DiagnosticKind::Unvalidated { keyword } if keyword == "pattern"),
+        )
+        .map(|d| d.pointer.as_str())
+        .collect();
+    for want in [
+        "/components/schemas/BStr/oneOf/1/pattern",
+        "/components/schemas/BAll/allOf/1/pattern",
+        "/components/schemas/X/properties/x/pattern",
+        "/components/schemas/X/propertyNames/pattern",
+        "/components/schemas/Y/pattern",
+    ] {
+        assert!(pointers.contains(&want), "{want} in {pointers:?}");
+    }
+    // A composition's annotations are read, not reported.
+    assert!(
+        !g.diagnostics
+            .iter()
+            .any(|d| d.pointer == "/components/schemas/A"),
+        "{:?}",
+        g.diagnostics
+    );
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    assert!(
+        text.contains("/// D\n") && text.contains("#[deprecated]\npub struct A"),
+        "{text}"
+    );
+}
