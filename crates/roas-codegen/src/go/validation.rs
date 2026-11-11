@@ -493,7 +493,8 @@ fn pattern_members(s: &crate::ir::StructDef, view: &TypeView, cx: &mut Context<'
         // A pattern that lets anything be only says whether a member is
         // one of the others: nothing when that is not asked.
         let accepts = pattern.accepts_anything(cx.ir);
-        if accepts && !others_checked {
+        // Untranslated, whether it matches is still not known: below.
+        if accepts && !others_checked && pattern.regex.is_ok() {
             continue;
         }
         let part = if accepts {

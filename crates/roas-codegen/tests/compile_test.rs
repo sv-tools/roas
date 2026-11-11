@@ -800,6 +800,10 @@ fn validated_description() -> serde_json::Value {
             "PatAnyTranslated": {"type": "object", "patternProperties": {"^x": {}}},
             "PatAnyBeside": {"type": "object", "additionalProperties": {},
                 "patternProperties": {"\\bx": {}}},
+            "PatAnyUntranslatedClosed": {"type": "object", "additionalProperties": false,
+                "patternProperties": {"\\bx": {}}},
+            "PatAnyUntranslatedTyped": {"type": "object", "additionalProperties": {"type": "string"},
+                "patternProperties": {"\\bx": {}}},
             "PatAnyOthers": {"type": "object", "additionalProperties": {"type": "string"},
                 "patternProperties": {"^x": {}}},
             "PatClosedFalse": {"type": "object", "additionalProperties": false,
@@ -1324,6 +1328,10 @@ fn main() {
     // not one of the others.
     assert_eq!(report::<PatAnyOthers>(r#"{"x":5,"y":"s"}"#), vec![]);
     assert_eq!(report::<PatAnyOthers>(r#"{"y":5}"#), vec![v("/y")]);
+    // Untranslated, whether it matches is not known, so neither is whether
+    // `additionalProperties` applies.
+    assert_eq!(report::<PatAnyUntranslatedClosed>(r#"{"zzz":1}"#), vec![u("/zzz")]);
+    assert_eq!(report::<PatAnyUntranslatedTyped>(r#"{"zzz":1}"#), vec![u("/zzz")]);
     // A struct holding its pattern members as text keeps them exactly.
     assert_eq!(report::<PatHoldsPatterned>(r#"{"xInner":{"ab":"xy"}}"#), vec![v("/xInner")]);
     assert_eq!(report::<PatHoldsPatterned>(r#"{"xInner":{}}"#), vec![]);
@@ -1765,6 +1773,8 @@ func main() {
 	check(`{"x":1,"y":1}`, report[api.PatAnyBeside](`{"x":1,"y":1}`))
 	check(`{"x":5,"y":"s"}`, report[api.PatAnyOthers](`{"x":5,"y":"s"}`))
 	check(`{"y":5}`, report[api.PatAnyOthers](`{"y":5}`), v("/y"))
+	check(`{"zzz":1}`, report[api.PatAnyUntranslatedClosed](`{"zzz":1}`), u("/zzz"))
+	check(`{"zzz":1}`, report[api.PatAnyUntranslatedTyped](`{"zzz":1}`), u("/zzz"))
 	check(`{"xInner":{"ab":"xy"}}`, report[api.PatHoldsPatterned](`{"xInner":{"ab":"xy"}}`), v("/xInner"))
 	check(`{"xInner":{}}`, report[api.PatHoldsPatterned](`{"xInner":{}}`))
 	check(`{"x-a":1}`, report[api.PatClosedFalse](`{"x-a":1}`), v("/x-a"))
