@@ -136,7 +136,8 @@ impl<T> RefOr<T> {
     /// dangling, looping, or naming something of another kind.
     ///
     /// Resolution is document-local. Nothing is loaded, so a `$ref`
-    /// into another document is [`Resolution::Opaque`] — or
+    /// into another document — the one given, or an alias the resolver
+    /// looks up — is [`Resolution::Opaque`], or
     /// [`Resolution::Unrecognized`] when its fragment is not a JSON
     /// Pointer, which shows without loading anything. `Opaque` is not
     /// only for other documents, though: see its own documentation.

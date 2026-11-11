@@ -2,11 +2,11 @@
 //!
 //! Every AsyncAPI version lets a `$ref` stand in for an object, and a
 //! validator has to know more than "did that work": an external
-//! reference with a usable fragment is fine and simply unresolvable here, a dangling one is a
-//! document bug, a cycle is a different bug, and a pointer at a place
-//! the resolver for that kind does not hand back an object from is
-//! neither. [`Resolution`] carries that distinction so each version
-//! module reports it the same way.
+//! reference with a usable fragment is fine and simply unresolvable
+//! here, a dangling one is a document bug, a cycle is a different bug,
+//! and a pointer at a place the resolver for that kind does not hand
+//! back an object from is neither. [`Resolution`] carries that
+//! distinction so each version module reports it the same way.
 //!
 //! Pointer syntax lives in [`pointer`](crate::common::pointer); this
 //! module is about what the pointers *mean*.
@@ -35,6 +35,7 @@ use std::collections::BTreeSet;
 /// [`Found`](Resolution::Found), the objects compare equal.
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 pub enum Resolution<'a, T> {
     /// Resolved to a concrete object in this document — the inline
     /// item itself, or the object at the end of a chain of `$ref`s.
@@ -62,8 +63,9 @@ pub enum Resolution<'a, T> {
     /// In every case nothing is handed back, and
     /// [`problem`](Resolution::problem) is `None`.
     ///
-    /// A reference into another document is `Opaque` only when its
-    /// fragment is a JSON Pointer; otherwise it is
+    /// A reference the resolver follows — the one given, or an alias it
+    /// looks up — that leads into another document is `Opaque` only
+    /// when its fragment is a JSON Pointer; otherwise it is
     /// [`Unrecognized`](Resolution::Unrecognized).
     Opaque,
     /// A local pointer that names nothing: a dangling reference.
@@ -78,6 +80,9 @@ pub enum Resolution<'a, T> {
     /// Not a usable pointer: an empty reference, malformed escapes, or
     /// a fragment that is not a JSON Pointer at all — in this document
     /// or, since it shows without fetching anything, in another one.
+    ///
+    /// It is said of a reference the resolver follows — the one given,
+    /// or an alias it looks up.
     Unrecognized,
     /// A pointer at a location the document itself declares to be some
     /// *other* kind of object — a server where a channel belongs, say —

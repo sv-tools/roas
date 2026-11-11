@@ -86,7 +86,8 @@ impl Document {
     /// this returns the one at the end of the chain.
     ///
     /// Resolution is document-local: nothing is loaded, so a `$ref`
-    /// into another document is [`Resolution::Opaque`] — or
+    /// into another document — the one given, or an alias the resolver
+    /// looks up — is [`Resolution::Opaque`], or
     /// [`Resolution::Unrecognized`] when its fragment is not a JSON
     /// Pointer, which shows without loading anything. A pointer at a
     /// channel-shaped `x-` extension is `Opaque` too.
@@ -826,6 +827,7 @@ mod tests {
 
     #[test]
     fn an_external_channel_reference_is_left_alone() {
+        // Left alone because its fragment is a usable pointer.
         let mut value = minimal();
         value["channels"] = json!({ "user": { "$ref": "./channels.yaml#/user" } });
         assert!(errors_for(value).is_empty());
@@ -919,8 +921,8 @@ mod tests {
             e.contains("message `#/components/messages/missing` names nothing in this document")
         }),);
 
-        // Declared is fine; external is left alone; `oneOf` members are
-        // checked individually.
+        // Declared is fine; external with a usable fragment is left
+        // alone; `oneOf` members are checked individually.
         let mut value = minimal();
         value["components"] = json!({ "messages": { "signup": { "name": "S" } } });
         value["channels"] = json!({
@@ -1110,7 +1112,8 @@ mod tests {
 
     #[test]
     fn a_chain_ending_outside_the_document_is_accepted() {
-        // root alias → component channel → external `$ref`.
+        // root alias → component channel → external `$ref` with a
+        // usable fragment.
         let value = json!({
             "asyncapi": "2.6.0",
             "info": { "title": "T", "version": "1" },
@@ -1121,7 +1124,7 @@ mod tests {
         });
         assert!(
             errors_for(value).is_empty(),
-            "an external terminus is not a document bug",
+            "an external terminus with a usable fragment is not a document bug",
         );
     }
 
@@ -1236,7 +1239,8 @@ mod tests {
     #[test]
     fn external_aliases_terminate_every_resolver() {
         // Security scheme, server, and message chains that leave the
-        // document are all accepted.
+        // document through a reference with a usable fragment are all
+        // accepted.
         let value = json!({
             "asyncapi": "2.6.0",
             "info": { "title": "T", "version": "1" },
@@ -1257,7 +1261,7 @@ mod tests {
         });
         assert!(
             errors_for(value).is_empty(),
-            "external termini are accepted"
+            "external termini with a usable fragment are accepted"
         );
     }
 
@@ -2503,7 +2507,7 @@ mod tests {
             // Neither external nor a pointer.
             ("empty", Resolution::Unrecognized),
             // Another document, but not a pointer into it — which shows
-            // without fetching anything, however the chain got there.
+            // without fetching anything, directly or through an alias.
             ("badFragment", Resolution::Unrecognized),
             ("viaBadFragment", Resolution::Unrecognized),
         ]

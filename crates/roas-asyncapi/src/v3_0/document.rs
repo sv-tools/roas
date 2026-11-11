@@ -176,7 +176,8 @@ impl Document {
     /// `#/components/servers/…`.
     ///
     /// Resolution is document-local: nothing is loaded, so a `$ref`
-    /// into another document is [`Resolution::Opaque`] — or
+    /// into another document — the one given, or an alias the resolver
+    /// looks up — is [`Resolution::Opaque`], or
     /// [`Resolution::Unrecognized`] when its fragment is not a JSON
     /// Pointer, which shows without loading anything. A pointer at a
     /// server-shaped `x-` extension is `Opaque` too. For a
@@ -196,7 +197,8 @@ impl Document {
     /// `#/components/channels/…`.
     ///
     /// Resolution is document-local: nothing is loaded, so a `$ref`
-    /// into another document is [`Resolution::Opaque`] — or
+    /// into another document — the one given, or an alias the resolver
+    /// looks up — is [`Resolution::Opaque`], or
     /// [`Resolution::Unrecognized`] when its fragment is not a JSON
     /// Pointer, which shows without loading anything. For a
     /// `RefOr<Channel>` use [`RefOr::get_item`].
@@ -263,7 +265,8 @@ impl Document {
     /// `#/components/channels`.
     ///
     /// Resolution is document-local: nothing is loaded, so a `$ref`
-    /// into another document is [`Resolution::Opaque`] — or
+    /// into another document — the one given, or an alias the resolver
+    /// looks up — is [`Resolution::Opaque`], or
     /// [`Resolution::Unrecognized`] when its fragment is not a JSON
     /// Pointer, which shows without loading anything. For a
     /// `RefOr<Message>` use [`RefOr::get_item`].
@@ -2601,7 +2604,7 @@ mod tests {
             // Neither external nor a pointer.
             ("empty", Resolution::Unrecognized),
             // Another document, but not a pointer into it — which shows
-            // without fetching anything, however the chain got there.
+            // without fetching anything, directly or through an alias.
             ("badFragment", Resolution::Unrecognized),
             ("viaBadFragment", Resolution::Unrecognized),
         ]
