@@ -1557,3 +1557,30 @@ fn a_go_import_may_not_shadow_a_pattern_helper_that_is_generated() {
     .unwrap();
     generate(&document(checked), &config).expect("`memberMatches` is not declared");
 }
+
+#[test]
+fn pattern_schemas_are_warned_about_where_they_are_written() {
+    let components = serde_json::json!({
+        "P": {"type": "object",
+            "patternProperties": {
+                "^a": {"type": "string", "pattern": "(?=x)"},
+                "\\bz": {"type": "integer"}},
+            "additionalProperties": {"type": "string", "if": {}}}
+    });
+    for language in [Target::Rust, Target::Go] {
+        let config = ConfigFile::from_toml("validation = true", Path::new("/"))
+            .unwrap()
+            .merge(target(language))
+            .build()
+            .unwrap();
+        let g = generate(&document(components.clone()), &config).unwrap();
+        let at = |pointer: &str| g.diagnostics.iter().any(|d| d.pointer == pointer);
+        for pointer in [
+            "/components/schemas/P/patternProperties/^a/pattern",
+            "/components/schemas/P/patternProperties/\\bz",
+            "/components/schemas/P/additionalProperties",
+        ] {
+            assert!(at(pointer), "{pointer}: {:?}", g.diagnostics);
+        }
+    }
+}

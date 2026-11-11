@@ -24,6 +24,8 @@ pub(crate) struct SupportView {
     pub object_only: bool,
     /// A string enum reads through `StringOnly`.
     pub string_only: bool,
+    /// A member beside `patternProperties` is held as `RawJson`.
+    pub raw_json: bool,
     /// A struct with a catch-all reads through `roas_catch_all`.
     pub catch_all: bool,
     /// Generated validation is on: the report types and `Validate`.
@@ -120,6 +122,12 @@ pub(crate) struct TypeView {
     /// A struct with a catch-all: the members it does not declare decode
     /// into the catch-all as they stream by.
     pub catch_all: Option<CatchAllView>,
+    /// The Rust spelling of each `patternProperties` schema, in order.
+    #[serde(skip)]
+    pub pattern_tys: Vec<String>,
+    /// The Rust spelling of the `additionalProperties` schema beside them.
+    #[serde(skip)]
+    pub others_ty: Option<String>,
     /// The type's conditional-compilation gates (`#[cfg(...)]` among its
     /// configured attributes), repeated on every impl generated beside it.
     pub cfg: Vec<String>,
@@ -353,6 +361,7 @@ impl Builder<'_> {
             "reject_null",
             "require_present",
             "integer_token",
+            "RawJson",
         ] {
             allocator.reserve(reserved);
         }
@@ -655,6 +664,8 @@ impl Builder<'_> {
             object_only: false,
             string_only: false,
             catch_all: None,
+            pattern_tys: Vec::new(),
+            others_ty: None,
             cfg,
         };
         let result = self.fill_kind(def, &mut view)?;
@@ -796,7 +807,22 @@ impl Builder<'_> {
                         self.support.object_only = true;
                     }
                     Additional::CatchAll(ty) => {
-                        let inner = self.spell(ty)?;
+                        // Beside `patternProperties`, a member is held as
+                        // the text it was read from, to be read again as
+                        // each schema it is checked against.
+                        let inner = if s.patterns.is_empty() {
+                            self.spell(ty)?
+                        } else {
+                            self.support.raw_json = true;
+                            "RawJson".to_owned()
+                        };
+                        for pattern in &s.patterns {
+                            let spelled = self.spell(&pattern.branch.ty)?;
+                            view.pattern_tys.push(spelled);
+                        }
+                        if let crate::ir::Others::Schema(b) = &s.others {
+                            view.others_ty = Some(self.spell(&b.ty)?);
+                        }
                         let name = allocator.allocate("additional_properties".to_owned());
                         view.fields.push(FieldView {
                             name: name.clone(),

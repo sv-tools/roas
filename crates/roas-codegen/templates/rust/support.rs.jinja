@@ -109,6 +109,33 @@ impl From<Int32> for i32 {
     }
 }
 
+{% endif %}{% if support.raw_json %}/// A member held as the JSON text it was read from, so that it can be read
+/// again as each schema it is checked against.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RawJson(pub Box<serde_json::value::RawValue>);
+
+impl RawJson {
+    /// The JSON text.
+    pub fn get(&self) -> &str {
+        self.0.get()
+    }
+}
+
+impl PartialEq for RawJson {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
+}
+
+impl Eq for RawJson {}
+
+impl std::hash::Hash for RawJson {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.get().hash(state);
+    }
+}
+
 {% endif %}{% if support.double_option %}/// Optional and nullable: absent, `null` and present are three states.
 mod double_option {
     pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>

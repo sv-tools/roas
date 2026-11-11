@@ -131,6 +131,12 @@ impl<'a> Lowerer<'a> {
                         }
                         TypeKind::StringEnum(_) | TypeKind::Extern => {}
                     }
+                    if let TypeKind::Struct(s) = &def.kind {
+                        inner.extend(s.patterns.iter().map(|p| &p.branch.ty));
+                        if let crate::ir::Others::Schema(b) = &s.others {
+                            inner.push(&b.ty);
+                        }
+                    }
                     inner.into_iter().any(|ty| reaches(ir, opted, ty, seen))
                 }
                 _ => false,
@@ -635,13 +641,16 @@ impl<'a> Lowerer<'a> {
             } => {
                 let keyworded = !properties.is_empty()
                     || !required.is_empty()
-                    || !matches!(additional, FrontAdditional::Any);
+                    || !matches!(additional, FrontAdditional::Any)
+                    || !schema.patterns.is_empty();
                 if *typeless {
                     keyworded
                 } else {
+                    // Pattern members are checked by a generated struct.
                     !properties.is_empty()
                         || !required.is_empty()
                         || matches!(additional, FrontAdditional::Denied)
+                        || !schema.patterns.is_empty()
                 }
             }
             Kind::AllOf { .. }
@@ -730,19 +739,18 @@ impl<'a> Lowerer<'a> {
             } => {
                 let keyworded = !properties.is_empty()
                     || !required.is_empty()
-                    || !matches!(additional, FrontAdditional::Any);
+                    || !matches!(additional, FrontAdditional::Any)
+                    || !schema.patterns.is_empty();
                 if *typeless && !keyworded {
                     TypeRef::Any
-                } else if properties.is_empty() && required.is_empty() && !*typeless {
+                } else if properties.is_empty()
+                    && required.is_empty()
+                    && !*typeless
+                    // Pattern members are checked by a generated struct.
+                    && schema.patterns.is_empty()
+                {
                     match additional {
                         FrontAdditional::Any => TypeRef::Map(Box::new(TypeRef::Any)),
-                        // Pattern members are not the other members the
-                        // value schema speaks of.
-                        FrontAdditional::Schema(_)
-                            if !schema.constraints.pattern_properties.is_empty() =>
-                        {
-                            TypeRef::Map(Box::new(TypeRef::Any))
-                        }
                         FrontAdditional::Schema(slot) => {
                             let mut value_hint = hint.to_vec();
                             value_hint.push("value".to_owned());
@@ -964,6 +972,28 @@ impl<'a> Lowerer<'a> {
                 .collect::<Option<Vec<_>>>()
         })
         .flatten();
+        // Each pattern's schema, and beside them the other members' schema,
+        // judge the members held raw in the catch-all.
+        let mut patterns = Vec::new();
+        for (i, (source, slot)) in schema.patterns.iter().enumerate() {
+            let mut hint = name.to_vec();
+            hint.push(format!("pattern {}", i + 1));
+            patterns.push(crate::ir::PatternDef {
+                source: source.clone(),
+                regex: crate::pattern::translate(source),
+                branch: self.slot_branch(slot, &hint),
+            });
+        }
+        let others = match additional {
+            _ if patterns.is_empty() => crate::ir::Others::Any,
+            FrontAdditional::Schema(slot) => {
+                let mut hint = name.to_vec();
+                hint.push("value".to_owned());
+                crate::ir::Others::Schema(Box::new(self.slot_branch(slot, &hint)))
+            }
+            FrontAdditional::Denied => crate::ir::Others::Denied,
+            FrontAdditional::Any => crate::ir::Others::Any,
+        };
         let additional = match additional {
             // Members the patterns allow are not unknown: refusing them
             // would refuse valid values. They land in the catch-all.
@@ -985,7 +1015,7 @@ impl<'a> Lowerer<'a> {
         };
         if !schema.constraints.pattern_properties.is_empty() {
             let message = if only_patterns.is_some() {
-                "`patternProperties` schemas are not represented in the type: matching members land in the catch-all, and a member matching no pattern is refused at decode"
+                "`patternProperties` schemas are not represented in the type: matching members are held as raw JSON in the catch-all, checked against their patterns' schemas by generated validation, and a member matching no pattern is refused at decode"
             } else if matches!(additional, Additional::CatchAll(_))
                 && matches!(
                     &schema.kind,
@@ -995,9 +1025,9 @@ impl<'a> Lowerer<'a> {
                     }
                 )
             {
-                "`patternProperties` is not represented in the type: matching members land in the catch-all, and since a pattern cannot be translated, a member matching none is not refused at decode"
+                "`patternProperties` schemas are not represented in the type: matching members are held as raw JSON in the catch-all, checked against their patterns' schemas by generated validation, and since a pattern cannot be translated, a member matching none is not refused at decode"
             } else {
-                "`patternProperties` is not represented in the type; matching members land in the catch-all"
+                "`patternProperties` schemas are not represented in the type: matching members are held as raw JSON in the catch-all, checked against their patterns' schemas by generated validation"
             };
             self.warn(
                 DiagnosticKind::UnsupportedKeyword {
@@ -1011,6 +1041,8 @@ impl<'a> Lowerer<'a> {
             fields,
             additional,
             only_patterns,
+            patterns,
+            others,
         }
     }
 
@@ -1065,6 +1097,23 @@ impl<'a> Lowerer<'a> {
 
     /// What to call a branch: the component it references, its title,
     /// or its position.
+    /// A schema in a slot as a branch checked against a raw value.
+    fn slot_branch(&mut self, slot: &Slot, hint: &[String]) -> Branch {
+        let lowered = self.position(slot, hint);
+        let ty = wrap_nullable(lowered);
+        Branch {
+            suggested_name: self.branch_name(slot, hint),
+            constraints: slot_constraints(slot, &ty),
+            unchecked: self.slot_unchecked(slot),
+            ty,
+            object_only: false,
+            pointer: Some(match slot {
+                Slot::Inline(schema) => schema.id.pointer.clone(),
+                Slot::Ref { id, .. } => id.pointer.clone(),
+            }),
+        }
+    }
+
     fn branch_name(&self, slot: &Slot, hint: &[String]) -> Vec<String> {
         match slot {
             Slot::Ref {
@@ -1104,6 +1153,8 @@ impl<'a> Lowerer<'a> {
                 fields,
                 additional: Additional::CatchAll(TypeRef::Any),
                 only_patterns: None,
+                patterns: Vec::new(),
+                others: crate::ir::Others::Any,
             });
         }
         self.warn(

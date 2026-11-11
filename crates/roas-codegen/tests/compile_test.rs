@@ -766,6 +766,15 @@ fn validated_description() -> serde_json::Value {
             "PatAdd": {"type": "object", "properties": {"k": {"type": "string"}},
                 "patternProperties": {"^x": {"type": "string"}},
                 "additionalProperties": {"$ref": "#/components/schemas/Long3"}},
+            "PatBoth": {"type": "object", "patternProperties": {
+                "^a": {"type": "string", "maxLength": 2},
+                "b$": {"type": "string", "minLength": 2}}},
+            "PatOwners": {"type": "object", "properties": {"id": {"type": "string"}},
+                "patternProperties": {"^o": {"$ref": "#/components/schemas/Owner"}}},
+            "PatUntranslated": {"type": "object",
+                "patternProperties": {"\\bx": {"type": "integer"}},
+                "additionalProperties": {"type": "string"}},
+            "PatTypeless": {"patternProperties": {"^a": {"type": "integer"}}},
             "PatMapAdd": {"type": "object",
                 "patternProperties": {"^x": {"type": "integer"}},
                 "additionalProperties": {"$ref": "#/components/schemas/Long3"}},
@@ -1119,7 +1128,10 @@ fn main() {
     assert_eq!(report::<Items>("[5]"), vec![v("")]);
     assert_eq!(report::<StrItems>(r#"["a"]"#), vec![]);
     // Member patterns are not checked yet, and say so.
-    assert_eq!(report::<PatMap>(r#"{"a":"x"}"#), vec![u("")]);
+    // Pattern members are checked against their patterns' schemas.
+    assert_eq!(report::<PatMap>(r#"{"a":"x"}"#), vec![]);
+    assert_eq!(report::<PatMap>(r#"{"a":1}"#), vec![]);
+    assert_eq!(report::<PatMap>(r#"{"a":true}"#), vec![v("")]);
     // A type list left with only its null.
     assert_eq!(report::<NullOnly>("null"), vec![]);
     // A present null reaches a JSON-value wrapper.
@@ -1239,14 +1251,32 @@ fn main() {
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
     // No items, nothing unchecked about them.
     // Pattern members are not judged by `additionalProperties`.
-    assert_eq!(report::<PatAdd>(r#"{"x":""}"#), vec![u("")]);
+    assert_eq!(report::<PatAdd>(r#"{"x":""}"#), vec![]);
+    assert_eq!(report::<PatAdd>(r#"{"x":5}"#), vec![v("/x")]);
+    assert_eq!(report::<PatAdd>(r#"{"z":"ab"}"#), vec![v("/z")]);
+    assert_eq!(report::<PatAdd>(r#"{"z":"abc","k":"q"}"#), vec![]);
+    // A member matching several patterns satisfies every one.
+    assert_eq!(report::<PatBoth>(r#"{"ab":"xy"}"#), vec![]);
+    assert_eq!(report::<PatBoth>(r#"{"ab":"xyz"}"#), vec![v("/ab")]);
+    assert_eq!(report::<PatBoth>(r#"{"ab":"x"}"#), vec![v("/ab")]);
+    assert_eq!(report::<PatBoth>(r#"{"zz":5}"#), vec![]);
+    // A pattern's schema is walked into.
+    assert_eq!(report::<PatOwners>(r#"{"id":"1","o1":{"nick":"abcd"}}"#), vec![v("/o1/nick")]);
+    assert_eq!(report::<PatOwners>(r#"{"o1":{"nick":"ab"},"z":[]}"#), vec![]);
+    // A pattern the generator cannot translate leaves its members undecided.
+    assert_eq!(report::<PatUntranslated>(r#"{"x":"s"}"#), vec![u("/x")]);
+    // With no `type`, the patterns speak of objects only.
+    assert_eq!(report::<PatTypeless>("5"), vec![]);
+    assert_eq!(report::<PatTypeless>(r#"{"a":1}"#), vec![]);
+    assert_eq!(report::<PatTypeless>(r#"{"a":"x"}"#), vec![v("/a")]);
     // Deprecated types of every kind are used without a warning, and a
     // deprecated composition's annotations are not unevaluated keywords
     // (the typeless `allOf` part's `maxLength` is).
     assert_eq!(report::<UsesOld>(r#"{"o":"x","l":"abc","t":{"kind":"ZooCat"},"c":{"k":1}}"#), vec![u("/l")]);
     // A typeless member takes null.
     assert_eq!(report::<NullName>(r#"{"ab":null,"c":null}"#), vec![v("/ab")]);
-    assert_eq!(report::<PatMapAdd>(r#"{"x":1}"#), vec![u("")]);
+    assert_eq!(report::<PatMapAdd>(r#"{"x":1}"#), vec![]);
+    assert_eq!(report::<PatMapAdd>(r#"{"x":"s"}"#), vec![v("/x")]);
     // Integers, raw holders and tagged unions decode inside a catch-all
     // (`ZooOrStr` below); `IntCatch` has an alias, so it proves nothing.
     assert_eq!(report::<IntCatchOrStr>(r#"{"x":1}"#), vec![u("")]);
@@ -1309,7 +1339,8 @@ fn main() {
     assert_eq!(report::<EnumItems>(r#"[{"a":null}]"#), vec![]);
     assert_eq!(report::<EnumItems>(r#"["a"]"#), vec![]);
     // Members a pattern allows are not refused as unknown.
-    assert_eq!(report::<PatOrStr>(r#"{"x":1}"#), vec![u("")]);
+    assert_eq!(report::<PatOrStr>(r#"{"x":1}"#), vec![]);
+    assert_eq!(report::<PatOrStr>(r#"{"x":"s"}"#), vec![v("")]);
     // A member matching no pattern is refused at decode: no branch matches.
     assert_eq!(report::<PatOrStr>(r#"{"y":1}"#), vec![v("")]);
     // A branch that misses for its value is still a miss.
@@ -1573,7 +1604,9 @@ func main() {
 	check(`[1]`, report[api.Items](`[1]`))
 	check(`[5]`, report[api.Items](`[5]`), v(""))
 	check(`["a"]`, report[api.StrItems](`["a"]`))
-	check(`{"a":"x"}`, report[api.PatMap](`{"a":"x"}`), u(""))
+	check(`{"a":"x"}`, report[api.PatMap](`{"a":"x"}`))
+	check(`{"a":1}`, report[api.PatMap](`{"a":1}`))
+	check(`{"a":true}`, report[api.PatMap](`{"a":true}`), v(""))
 	check(`null`, report[api.NullOnly](`null`))
 	check(`{"n":null}`, report[api.HoldsScalar](`{"n":null}`), u("/n"))
 	check(`{"k":[1]}`, report[api.PickK](`{"k":[1]}`))
@@ -1630,10 +1663,24 @@ func main() {
 	}
 	check(`{"a":null}`, report[api.EnumOrObj](`{"a":null}`))
 	check(`[{"a":null}]`, report[api.EnumItems](`[{"a":null}]`))
-	check(`{"x":""}`, report[api.PatAdd](`{"x":""}`), u(""))
+	check(`{"x":""}`, report[api.PatAdd](`{"x":""}`))
+	check(`{"x":5}`, report[api.PatAdd](`{"x":5}`), v("/x"))
+	check(`{"z":"ab"}`, report[api.PatAdd](`{"z":"ab"}`), v("/z"))
+	check(`{"z":"abc","k":"q"}`, report[api.PatAdd](`{"z":"abc","k":"q"}`))
+	check(`{"ab":"xy"}`, report[api.PatBoth](`{"ab":"xy"}`))
+	check(`{"ab":"xyz"}`, report[api.PatBoth](`{"ab":"xyz"}`), v("/ab"))
+	check(`{"ab":"x"}`, report[api.PatBoth](`{"ab":"x"}`), v("/ab"))
+	check(`{"zz":5}`, report[api.PatBoth](`{"zz":5}`))
+	check(`{"id":"1","o1":{"nick":"abcd"}}`, report[api.PatOwners](`{"id":"1","o1":{"nick":"abcd"}}`), v("/o1/nick"))
+	check(`{"o1":{"nick":"ab"},"z":[]}`, report[api.PatOwners](`{"o1":{"nick":"ab"},"z":[]}`))
+	check(`{"x":"s"}`, report[api.PatUntranslated](`{"x":"s"}`), u("/x"))
+	check(`5`, report[api.PatTypeless](`5`))
+	check(`{"a":1}`, report[api.PatTypeless](`{"a":1}`))
+	check(`{"a":"x"}`, report[api.PatTypeless](`{"a":"x"}`), v("/a"))
 	check(`{"o":"x","l":"abc","t":{"kind":"ZooCat"},"c":{"k":1}}`, report[api.UsesOld](`{"o":"x","l":"abc","t":{"kind":"ZooCat"},"c":{"k":1}}`), u("/l"))
 	check(`{"ab":null,"c":null}`, report[api.NullName](`{"ab":null,"c":null}`), v("/ab"))
-	check(`{"x":1}`, report[api.PatMapAdd](`{"x":1}`), u(""))
+	check(`{"x":1}`, report[api.PatMapAdd](`{"x":1}`))
+	check(`{"x":"s"}`, report[api.PatMapAdd](`{"x":"s"}`), v("/x"))
 	check(`{"x":1}`, report[api.IntCatchOrStr](`{"x":1}`))
 	// Go has no cfg gates or aliases: these decode and match (beside a
 	// substitution, a failed decode is undecided in Go too).
@@ -1660,7 +1707,8 @@ func main() {
 	check(`["a","bc","d"]`, report[api.InlineItems](`["a","bc","d"]`), v("/0"), v("/2"))
 	padded := strings.Repeat(`{"next":`, 30) + `{"pad":"` + strings.Repeat("x", 1<<20) + `"}` + strings.Repeat("}", 30)
 	_ = report[api.PadNode](padded)
-	check(`{"x":1}`, report[api.PatOrStr](`{"x":1}`), u(""))
+	check(`{"x":1}`, report[api.PatOrStr](`{"x":1}`))
+	check(`{"x":"s"}`, report[api.PatOrStr](`{"x":"s"}`), v(""))
 	check(`{"y":1}`, report[api.PatOrStr](`{"y":1}`), v(""))
 	twice := strings.Repeat(`{"h":`, 40) + `{}` + strings.Repeat("}", 40)
 	if got := report[api.Twice](twice); len(got) == 0 {

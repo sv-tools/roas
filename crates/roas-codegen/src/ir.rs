@@ -104,6 +104,36 @@ pub(crate) struct StructDef {
     /// match one, or it is refused at decode. `None` when any member is
     /// let in, including when a pattern cannot be translated.
     pub only_patterns: Option<Vec<String>>,
+    /// `patternProperties`: a member no property names is checked against
+    /// the schema of every pattern it matches. Such members are held raw.
+    pub patterns: Vec<PatternDef>,
+    /// Beside `patternProperties`, what `additionalProperties` says of a
+    /// member matching no pattern.
+    pub others: Others,
+}
+
+/// Beside `patternProperties`, what `additionalProperties` says of a
+/// member matching no pattern.
+#[derive(Debug, Clone)]
+pub(crate) enum Others {
+    /// Anything goes, or there are no patterns.
+    Any,
+    /// `false`: no such member.
+    Denied,
+    /// A schema it is checked against.
+    Schema(Box<Branch>),
+}
+
+/// One pattern of `patternProperties` and the schema of the members it
+/// matches.
+#[derive(Debug, Clone)]
+pub(crate) struct PatternDef {
+    /// The pattern as written.
+    pub source: String,
+    /// The pattern translated for both engines, or why it cannot be.
+    pub regex: Result<String, String>,
+    /// The schema a matching member is checked against.
+    pub branch: Branch,
 }
 
 #[derive(Debug, Clone)]
@@ -247,6 +277,13 @@ impl Ir {
                 }
                 if let Additional::CatchAll(ty) = &s.additional {
                     ty.named(&mut out);
+                }
+                // Checked against, so emitted alongside.
+                for pattern in &s.patterns {
+                    pattern.branch.ty.named(&mut out);
+                }
+                if let Others::Schema(others) = &s.others {
+                    others.ty.named(&mut out);
                 }
             }
             TypeKind::UnionTagged(u) => {

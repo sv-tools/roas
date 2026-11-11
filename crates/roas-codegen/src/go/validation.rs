@@ -457,12 +457,110 @@ fn recurse(ty: &TypeRef, at: At<'_>, depth: usize, out: &mut Vec<String>, cx: &m
 /// Whether a holder's raw value has a number its branches' types may fail
 /// to decode for their range: such a failure proves no mismatch.
 fn go_wide<'a>(ir: &crate::ir::Ir, tys: impl Iterator<Item = &'a TypeRef>) -> String {
+    go_wide_of(ir, tys, "v.raw")
+}
+
+/// [`go_wide`] over the raw JSON `raw`.
+fn go_wide_of<'a>(ir: &crate::ir::Ir, tys: impl Iterator<Item = &'a TypeRef>, raw: &str) -> String {
     let tys: Vec<&TypeRef> = tys.collect();
     let (limit, float32) = checks::number_range(ir, &tys);
     format!(
-        "wideNumber(v.raw, {}, {float32})",
+        "wideNumber({raw}, {}, {float32})",
         limit.unwrap_or("math.Inf(1)")
     )
+}
+
+/// The checks on one member a struct holds raw beside `patternProperties`,
+/// its name in `name` and its JSON in `value`, at `pointer`: against the
+/// schema of every pattern it matches, or of `additionalProperties` when
+/// it matches none.
+fn pattern_members(s: &crate::ir::StructDef, view: &TypeView, cx: &mut Context<'_>) -> Vec<String> {
+    // A pattern that cannot be translated may match any member, so
+    // whether `additionalProperties` applies is never known.
+    let others_checked =
+        !matches!(s.others, crate::ir::Others::Any) && s.patterns.iter().all(|p| p.regex.is_ok());
+    let mut out = Vec::new();
+    if others_checked {
+        out.push("matched := false".to_owned());
+    }
+    let matched = if others_checked {
+        "matched = true; "
+    } else {
+        ""
+    };
+    for (pattern, ty) in s.patterns.iter().zip(&view.pattern_tys) {
+        let label = format!("patternProperties `{}`", pattern.source);
+        let part = part(&pattern.branch, ty, &label, cx);
+        out.push(match &pattern.regex {
+            Ok(regex) => {
+                cx.needs.pattern = true;
+                format!(
+                    "if m, ok := matchPattern({}, name); !ok {{ {matched}r.unevaluated(pointer, {}) }} else if m {{ {matched}{part} }}",
+                    lit(regex),
+                    lit(&format!("{label}: the pattern is too large to compile, so the member is not checked against it"))
+                )
+            }
+            // Whether the member matches is not known: nor whether
+            // `additionalProperties` applies to it.
+            Err(reason) => format!(
+                "{matched}r.unevaluated(pointer, {})",
+                lit(&format!("{label}: {reason}, so whether the member matches it is not known"))
+            ),
+        });
+    }
+    match (&s.others, &view.others_ty) {
+        _ if !others_checked => {}
+        (crate::ir::Others::Schema(b), Some(ty)) => {
+            let part = part(b, ty, "additionalProperties", cx);
+            out.push(format!("if !matched {{ {part} }}"));
+        }
+        (crate::ir::Others::Denied, _) => out.push(format!(
+            "if !matched {{ r.violation(pointer, {}) }}",
+            lit("is not allowed: it matches no property and no pattern")
+        )),
+        _ => {}
+    }
+    out
+}
+
+/// One schema a raw member is read as and checked against, as an `allOf`
+/// part is: a value that does not decode misses it, unless the decoder
+/// rather than the value is why.
+fn part(b: &Branch, ty: &str, label: &str, cx: &mut Context<'_>) -> String {
+    let (mut body, reads) = branch(b, "r", cx);
+    if checks::part_unsure(b) || (cx.loops)(&b.ty) {
+        body.push(format!(
+            "r.unevaluated(pointer, {})",
+            lit(&format!("{label}: it says more than is checked"))
+        ));
+    }
+    let fragile = if checks::reaches_extern(cx.ir, &b.ty) {
+        "true".to_owned()
+    } else {
+        go_wide_of(cx.ir, std::iter::once(&b.ty), "value")
+    };
+    let miss = format!(
+        "if {fragile} {{ r.unevaluated(pointer, {}) }} else {{ r.violation(pointer, {}) }}",
+        lit(&format!(
+            "{label}: a number in the value is past what its type holds"
+        )),
+        lit(&format!("does not satisfy {label}"))
+    );
+    if reads {
+        format!(
+            "{{ var x {ty}; if err := json.Unmarshal(value, &x, decodeOptions); err == nil {{ {} }} else {{ {miss} }} }}",
+            body.join("; ")
+        )
+    } else if body.is_empty() {
+        format!(
+            "if err := json.Unmarshal(value, new({ty}), decodeOptions); err != nil {{ {miss} }}"
+        )
+    } else {
+        format!(
+            "if err := json.Unmarshal(value, new({ty}), decodeOptions); err == nil {{ {} }} else {{ {miss} }}",
+            body.join("; ")
+        )
+    }
 }
 
 /// A `null` of the type `name` checked at `p` into `r`.
@@ -717,6 +815,26 @@ pub(crate) fn body(
                     block.push(format!("{}{statements}", bind(&format!("v.{name}"))));
                 }
                 out.push(format!("{{ {} }}", block.join("; ")));
+            }
+            if let Additional::CatchAll(ty) = &s.additional
+                && !s.patterns.is_empty()
+            {
+                let name = &view.extra_name;
+                let checks = pattern_members(s, view, cx);
+                cx.needs.sorted = true;
+                // A member is read only against a pattern's schema: with
+                // every pattern untranslated, never.
+                let read = s.patterns.iter().any(|p| p.regex.is_ok());
+                let value = if read {
+                    format!("value := v.{name}[name]; ")
+                } else {
+                    String::new()
+                };
+                out.push(format!(
+                    "for _, name := range slices.Sorted(maps.Keys(v.{name})) {{ {value}pointer := childPointer(pointer, name); {} }}",
+                    checks.join("; ")
+                ));
+                let _ = ty;
             }
             if let Additional::CatchAll(ty) = &s.additional {
                 let name = &view.extra_name;

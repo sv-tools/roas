@@ -193,6 +193,12 @@ pub(crate) struct TypeView {
     /// Beside `additionalProperties: false`, the quoted patterns a member
     /// no field reads must match.
     pub member_patterns: Vec<String>,
+    /// The Go spelling of each `patternProperties` schema, in order.
+    #[serde(skip)]
+    pub pattern_tys: Vec<String>,
+    /// The Go spelling of the `additionalProperties` schema beside them.
+    #[serde(skip)]
+    pub others_ty: Option<String>,
     /// A member name no struct tag can carry: the struct writes itself.
     pub marshal: bool,
     /// The raw constructor of a composed holder.
@@ -626,6 +632,8 @@ impl Builder<'_> {
             extra_ty: String::new(),
             extra_name: String::new(),
             member_patterns: Vec::new(),
+            pattern_tys: Vec::new(),
+            others_ty: None,
             marshal: false,
             from_raw: String::new(),
             validate: None,
@@ -826,6 +834,13 @@ impl Builder<'_> {
                     self.needs.pattern = true;
                     self.support.member_patterns = true;
                     view.member_patterns = patterns.iter().map(|p| quote(p)).collect();
+                }
+                for pattern in &s.patterns {
+                    let spelled = self.spell(unboxed(&pattern.branch.ty))?;
+                    view.pattern_tys.push(spelled);
+                }
+                if let crate::ir::Others::Schema(b) = &s.others {
+                    view.others_ty = Some(self.spell(unboxed(&b.ty))?);
                 }
                 if let Additional::CatchAll(ty) = &s.additional {
                     let inner = self.spell(unboxed(ty))?;

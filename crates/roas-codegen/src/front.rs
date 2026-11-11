@@ -196,6 +196,8 @@ pub(crate) struct FrontSchema {
     /// `const`, which the model keeps only in its catch-all. Consumed
     /// by the discriminator proof; reported as unsupported otherwise.
     pub const_value: Option<Value>,
+    /// `patternProperties`: each pattern, as written, with its schema.
+    pub patterns: Vec<(String, Slot)>,
 }
 
 /// The translation of one document's components.
@@ -619,6 +621,7 @@ impl Translator<'_> {
             extensions: BTreeMap::new(),
             dialect: None,
             const_value: None,
+            patterns: Vec::new(),
         }
     }
 
@@ -1092,6 +1095,14 @@ impl Translator<'_> {
             .as_ref()
             .map(|p| p.keys().cloned().collect())
             .unwrap_or_default();
+        for (source, slot) in s.pattern_properties.iter().flatten() {
+            let mut child = pointer_text.clone();
+            push_token(&mut child, "patternProperties");
+            push_token(&mut child, source);
+            front
+                .patterns
+                .push((source.clone(), self.slot(slot, child)));
+        }
         front.unsupported = catch_all_keywords(&s.extensions, &mut front.extensions);
         if s.unevaluated_properties.is_some() {
             front.unsupported.push("unevaluatedProperties".to_owned());

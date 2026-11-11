@@ -7,7 +7,7 @@
 //! exactly on the mapped type is never turned into a guessed verdict: it
 //! becomes [`Check::Unevaluated`], reported as such at run time.
 
-use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, source_of};
+use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, push_token, source_of};
 use crate::front::{Constraints, FloatWidth, IntWidth};
 use crate::ir::{Ir, TypeKind, TypeRef};
 use serde_json::Number;
@@ -351,7 +351,7 @@ pub(crate) fn object_checks(constraints: &Constraints) -> Vec<Check> {
             .map(Check::MaxProperties),
     );
     out.extend(names(constraints));
-    out.extend(pattern_properties(constraints));
+    // A struct checks its pattern members itself.
     out
 }
 
@@ -893,6 +893,35 @@ pub(crate) fn diagnostics(
             TypeKind::Struct(s) => {
                 for field in &s.fields {
                     positions.push((field.pointer.clone(), &field.ty, &field.constraints));
+                }
+                // Each pattern's schema judges the members it matches,
+                // and `additionalProperties` beside them the rest.
+                for pattern in &s.patterns {
+                    let mut pointer = def.id.pointer.clone();
+                    push_token(&mut pointer, "patternProperties");
+                    push_token(&mut pointer, &pattern.source);
+                    if !opted_out(def)
+                        && let Err(reason) = &pattern.regex
+                    {
+                        warn(
+                            &def.id,
+                            pointer.clone(),
+                            "patternProperties",
+                            format!(
+                                "pattern {:?} is reported as unevaluated for every member: {reason}",
+                                pattern.source
+                            ),
+                        );
+                    }
+                    let at = pattern.branch.pointer.clone().unwrap_or(pointer);
+                    positions.push((at, &pattern.branch.ty, &pattern.branch.constraints));
+                }
+                if let crate::ir::Others::Schema(b) = &s.others {
+                    let at = b
+                        .pointer
+                        .clone()
+                        .unwrap_or_else(|| format!("{}/additionalProperties", def.id.pointer));
+                    positions.push((at, &b.ty, &b.constraints));
                 }
                 // The catch-all's values are the other members.
                 if let (crate::ir::Additional::CatchAll(ty), Some(items)) =
