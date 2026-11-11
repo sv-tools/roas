@@ -104,6 +104,105 @@ pub(crate) struct StructDef {
     /// match one, or it is refused at decode. `None` when any member is
     /// let in, including when a pattern cannot be translated.
     pub only_patterns: Option<Vec<String>>,
+    /// `patternProperties`: a member no property names is checked against
+    /// the schema of every pattern it matches. Such members are held raw.
+    pub patterns: Vec<PatternDef>,
+    /// Beside `patternProperties`, what `additionalProperties` says of a
+    /// member matching no pattern.
+    pub others: Others,
+}
+
+/// Beside `patternProperties`, what `additionalProperties` says of a
+/// member matching no pattern.
+#[derive(Debug, Clone)]
+pub(crate) enum Others {
+    /// Anything goes, or there are no patterns.
+    Any,
+    /// `false`: no such member.
+    Denied,
+    /// A schema it is checked against.
+    Schema(Box<Branch>),
+}
+
+/// One pattern of `patternProperties` and the schema of the members it
+/// matches.
+#[derive(Debug, Clone)]
+pub(crate) struct PatternDef {
+    /// The pattern as written.
+    pub source: String,
+    /// The pattern translated for both engines, or why it cannot be.
+    pub regex: Result<String, String>,
+    /// The schema a matching member is checked against.
+    pub schema: PatternSchema,
+}
+
+impl PatternDef {
+    /// The schema a matching member is read as, when it is read at all.
+    pub(crate) fn branch(&self) -> Option<&Branch> {
+        match &self.schema {
+            PatternSchema::Branch(b) => Some(b.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Whether the pattern's schema lets any member be: `{}` or `true`,
+    /// written in place or behind references.
+    pub(crate) fn accepts_anything(&self, ir: &Ir) -> bool {
+        self.branch().is_some_and(|b| accepts_anything(ir, b))
+    }
+
+    /// Whether the declared property `name` matches the pattern: `None`
+    /// for no, `Some(Err)` when that cannot be known.
+    pub(crate) fn matches_name(&self, name: &str) -> Option<Result<(), String>> {
+        let regex = match &self.regex {
+            Ok(regex) => regex,
+            Err(reason) => return Some(Err(reason.clone())),
+        };
+        match regex::Regex::new(regex) {
+            Ok(re) => re.is_match(name).then_some(Ok(())),
+            Err(_) => Some(Err("the pattern is too large to compile".to_owned())),
+        }
+    }
+}
+
+/// Whether `branch` lets any value be: `{}` or `true`, written in place or
+/// behind references.
+pub(crate) fn accepts_anything(ir: &Ir, branch: &Branch) -> bool {
+    fn any(ir: &Ir, ty: &TypeRef, depth: usize) -> bool {
+        match ty {
+            TypeRef::Any => true,
+            TypeRef::Nullable(inner) | TypeRef::Boxed(inner) => any(ir, inner, depth),
+            TypeRef::Named(id) if depth < 64 => ir.types.get(id).is_some_and(|def| {
+                def.constraints == Constraints::default()
+                    && matches!(&def.kind, TypeKind::Newtype(t) | TypeKind::Alias(t) if any(ir, t, depth + 1))
+            }),
+            _ => false,
+        }
+    }
+    any(ir, &branch.ty, 0) && branch.constraints == Constraints::default() && !branch.unchecked
+}
+
+impl StructDef {
+    /// Beside `patternProperties`, whether a member matching no pattern
+    /// may be anything.
+    pub(crate) fn others_accept_anything(&self, ir: &Ir) -> bool {
+        match &self.others {
+            Others::Any => true,
+            Others::Denied => false,
+            Others::Schema(b) => accepts_anything(ir, b),
+        }
+    }
+}
+
+/// What a pattern's schema says of the members it matches.
+#[derive(Debug, Clone)]
+pub(crate) enum PatternSchema {
+    /// A schema each is read as and checked against.
+    Branch(Box<Branch>),
+    /// `false`: no such member.
+    Never,
+    /// A schema no type can represent (`not`): each is unevaluated.
+    Unchecked(String),
 }
 
 #[derive(Debug, Clone)]
@@ -247,6 +346,15 @@ impl Ir {
                 }
                 if let Additional::CatchAll(ty) = &s.additional {
                     ty.named(&mut out);
+                }
+                // Checked against, so emitted alongside.
+                for pattern in &s.patterns {
+                    if let Some(b) = pattern.branch() {
+                        b.ty.named(&mut out);
+                    }
+                }
+                if let Others::Schema(others) = &s.others {
+                    others.ty.named(&mut out);
                 }
             }
             TypeKind::UnionTagged(u) => {

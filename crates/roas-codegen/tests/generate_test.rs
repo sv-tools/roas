@@ -1557,3 +1557,123 @@ fn a_go_import_may_not_shadow_a_pattern_helper_that_is_generated() {
     .unwrap();
     generate(&document(checked), &config).expect("`memberMatches` is not declared");
 }
+
+#[test]
+fn pattern_schemas_are_warned_about_where_they_are_written() {
+    let components = serde_json::json!({
+        "P": {"type": "object",
+            "patternProperties": {
+                "^a": {"type": "string", "pattern": "(?=x)"},
+                "\\bz": {"type": "integer"}},
+            "additionalProperties": {"type": "string", "if": {}}}
+    });
+    for language in [Target::Rust, Target::Go] {
+        let config = ConfigFile::from_toml("validation = true", Path::new("/"))
+            .unwrap()
+            .merge(target(language))
+            .build()
+            .unwrap();
+        let g = generate(&document(components.clone()), &config).unwrap();
+        let at = |pointer: &str| g.diagnostics.iter().any(|d| d.pointer == pointer);
+        for pointer in [
+            "/components/schemas/P/patternProperties/^a/pattern",
+            "/components/schemas/P/patternProperties/\\bz",
+            "/components/schemas/P/additionalProperties",
+        ] {
+            assert!(at(pointer), "{pointer}: {:?}", g.diagnostics);
+        }
+    }
+}
+
+#[test]
+fn raw_json_is_reserved_only_beside_pattern_properties() {
+    let plain = generate(
+        &document(serde_json::json!({"RawJson": {"type": "object", "properties": {"q": {"type": "string"}}}})),
+        &rust_config(""),
+    )
+    .unwrap();
+    let text = plain
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    assert!(text.contains("pub struct RawJson {"), "{text}");
+    let patterned = generate(
+        &document(serde_json::json!({
+            "RawJson": {"type": "object", "properties": {"q": {"type": "string"}}},
+            "P": {"type": "object", "patternProperties": {"^a": {"type": "string"}}}
+        })),
+        &rust_config(""),
+    )
+    .unwrap();
+    let text = patterned
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    assert!(
+        text.contains("pub struct RawJson2 {") && text.contains("pub struct RawJson("),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_false_or_not_pattern_schema_generates() {
+    let g = generate(
+        &document(serde_json::json!({
+            "F": {"type": "object", "properties": {"id": {"type": "string"}},
+                "patternProperties": {"^x-": false, "^n": {"not": {"type": "string"}}}}
+        })),
+        &rust_config("validation = true"),
+    )
+    .unwrap();
+    assert!(
+        g.diagnostics.iter().all(|d| d.severity != Severity::Error),
+        "{:?}",
+        g.diagnostics
+    );
+    assert!(
+        g.diagnostics.iter().any(|d| d.pointer == "/components/schemas/F/patternProperties/^n"
+            && matches!(&d.kind, DiagnosticKind::UnsupportedKeyword { keyword } if keyword == "not")),
+        "{:?}",
+        g.diagnostics
+    );
+}
+
+#[test]
+fn a_struct_whose_patterns_decide_nothing_compiles_alone() {
+    // Nothing is checked on its members: no loop, and no imports for one.
+    for language in [Target::Rust, Target::Go] {
+        let config = ConfigFile::from_toml("validation = true", Path::new("/"))
+            .unwrap()
+            .merge(target(language))
+            .build()
+            .unwrap();
+        let g = generate(
+            &document(serde_json::json!({
+                "A": {"type": "object", "properties": {"id": {"type": "string"}},
+                    "patternProperties": {"\\bq": {}}}
+            })),
+            &config,
+        )
+        .unwrap();
+        let code = g
+            .files
+            .iter()
+            .map(|f| f.contents.as_str())
+            .collect::<String>();
+        assert!(
+            !code.contains("for (name, value)") && !code.contains("range slices.Sorted"),
+            "{code}"
+        );
+        // Nor is it warned about as unevaluated.
+        assert!(
+            !g.diagnostics.iter().any(|d| matches!(&d.kind, DiagnosticKind::Unvalidated { keyword } if keyword == "patternProperties")),
+            "{:?}",
+            g.diagnostics
+        );
+        if language == Target::Go {
+            assert!(!code.contains("\"slices\""), "{code}");
+        }
+    }
+}

@@ -7,7 +7,7 @@
 //! exactly on the mapped type is never turned into a guessed verdict: it
 //! becomes [`Check::Unevaluated`], reported as such at run time.
 
-use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, source_of};
+use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, push_token, source_of};
 use crate::front::{Constraints, FloatWidth, IntWidth};
 use crate::ir::{Ir, TypeKind, TypeRef};
 use serde_json::Number;
@@ -351,7 +351,7 @@ pub(crate) fn object_checks(constraints: &Constraints) -> Vec<Check> {
             .map(Check::MaxProperties),
     );
     out.extend(names(constraints));
-    out.extend(pattern_properties(constraints));
+    // A struct checks its pattern members itself.
     out
 }
 
@@ -770,6 +770,54 @@ fn reaches(
     walk(ir, ty, reshaped, externs, &mut Default::default())
 }
 
+/// Whether a value of `ty`, decoded, holds anything `leaf` picks out —
+/// through containers, struct fields and catch-alls, newtypes, aliases and
+/// tagged variants. An open holder keeps its raw text, so it is not
+/// walked into.
+pub(crate) fn reaches_leaf(
+    ir: &crate::ir::Ir,
+    ty: &TypeRef,
+    leaf: &dyn Fn(&TypeRef) -> bool,
+) -> bool {
+    fn walk(
+        ir: &crate::ir::Ir,
+        ty: &TypeRef,
+        leaf: &dyn Fn(&TypeRef) -> bool,
+        seen: &mut std::collections::BTreeSet<crate::diagnostic::SchemaId>,
+    ) -> bool {
+        if leaf(ty) {
+            return true;
+        }
+        match ty {
+            TypeRef::Boxed(inner)
+            | TypeRef::Nullable(inner)
+            | TypeRef::Array(inner)
+            | TypeRef::Map(inner) => walk(ir, inner, leaf, seen),
+            TypeRef::Named(id) => {
+                if !seen.insert(id.clone()) {
+                    return false;
+                }
+                match ir.types.get(id).map(|d| &d.kind) {
+                    // Beside `patternProperties`, the other members are held
+                    // as their text in both languages.
+                    Some(TypeKind::Struct(s)) => {
+                        s.fields.iter().any(|f| walk(ir, &f.ty, leaf, seen))
+                            || (s.patterns.is_empty()
+                                && matches!(&s.additional, crate::ir::Additional::CatchAll(t) if walk(ir, t, leaf, seen)))
+                    }
+                    Some(TypeKind::Newtype(t) | TypeKind::Alias(t)) => walk(ir, t, leaf, seen),
+                    Some(TypeKind::UnionTagged(u)) => {
+                        u.variants.iter().any(|v| walk(ir, &v.ty, leaf, seen))
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+    walk(ir, ty, leaf, &mut Default::default())
+}
+
 /// Whether decoding a branch proves nothing: it declares what neither its
 /// type nor a generated check enforces.
 pub(crate) fn unsure(branch: &crate::ir::Branch) -> bool {
@@ -893,6 +941,41 @@ pub(crate) fn diagnostics(
             TypeKind::Struct(s) => {
                 for field in &s.fields {
                     positions.push((field.pointer.clone(), &field.ty, &field.constraints));
+                }
+                // Each pattern's schema judges the members it matches,
+                // and `additionalProperties` beside them the rest.
+                for pattern in &s.patterns {
+                    let mut pointer = def.id.pointer.clone();
+                    push_token(&mut pointer, "patternProperties");
+                    push_token(&mut pointer, &pattern.source);
+                    // A pattern that lets anything be, beside members that may
+                    // be anything too, decides nothing: nothing is reported.
+                    let decides = !(pattern.accepts_anything(ir) && s.others_accept_anything(ir));
+                    if !opted_out(def)
+                        && decides
+                        && let Err(reason) = &pattern.regex
+                    {
+                        warn(
+                            &def.id,
+                            pointer.clone(),
+                            "patternProperties",
+                            format!(
+                                "pattern {:?} is reported as unevaluated for every member: {reason}",
+                                pattern.source
+                            ),
+                        );
+                    }
+                    if let Some(b) = pattern.branch() {
+                        let at = b.pointer.clone().unwrap_or(pointer);
+                        positions.push((at, &b.ty, &b.constraints));
+                    }
+                }
+                if let crate::ir::Others::Schema(b) = &s.others {
+                    let at = b
+                        .pointer
+                        .clone()
+                        .unwrap_or_else(|| format!("{}/additionalProperties", def.id.pointer));
+                    positions.push((at, &b.ty, &b.constraints));
                 }
                 // The catch-all's values are the other members.
                 if let (crate::ir::Additional::CatchAll(ty), Some(items)) =

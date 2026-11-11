@@ -391,6 +391,7 @@ fn decoder_rules(
     ir: &crate::ir::Ir,
     ty: &TypeRef,
     reshaped: &dyn Fn(&crate::diagnostic::SchemaId) -> bool,
+    raw: &str,
 ) -> Option<String> {
     if checks::reaches_extern(ir, ty) {
         return Some("true".to_owned());
@@ -412,7 +413,7 @@ fn decoder_rules(
         }
     }
     Some(match opens(ir, ty, 0) {
-        Some(c) => format!("self.raw.get().trim_start().starts_with('{c}')"),
+        Some(c) => format!("{raw}.trim_start().starts_with('{c}')"),
         None => "true".to_owned(),
     })
 }
@@ -420,11 +421,259 @@ fn decoder_rules(
 /// Whether a holder's raw value has a number its branches' types may fail
 /// to decode for their range: such a failure proves no mismatch.
 fn rust_wide<'a>(ir: &crate::ir::Ir, tys: impl Iterator<Item = &'a TypeRef>) -> String {
+    rust_wide_of(ir, tys, "self.raw.get()")
+}
+
+/// [`rust_wide`] over the raw JSON text `raw`.
+fn rust_wide_of<'a>(
+    ir: &crate::ir::Ir,
+    tys: impl Iterator<Item = &'a TypeRef>,
+    raw: &str,
+) -> String {
     let tys: Vec<&TypeRef> = tys.collect();
     let (limit, float32) = checks::number_range(ir, &tys);
     format!(
-        "wide_number(self.raw.get(), {}, {float32})",
+        "wide_number({raw}, {}, {float32})",
         limit.unwrap_or("f64::INFINITY")
+    )
+}
+
+/// The checks on one member a struct holds raw beside `patternProperties`,
+/// its name in `name` and its text in `raw`, at `pointer`: against the
+/// schema of every pattern it matches, or of `additionalProperties` when
+/// it matches none.
+fn pattern_members(
+    ir: &crate::ir::Ir,
+    s: &crate::ir::StructDef,
+    view: &TypeView,
+    generated: &dyn Fn(&TypeRef) -> bool,
+    reshaped: &dyn Fn(&crate::diagnostic::SchemaId) -> bool,
+) -> Vec<String> {
+    // A pattern that cannot be translated may match any member, so
+    // whether `additionalProperties` applies is never known.
+    let others_any = s.others_accept_anything(ir);
+    let others_checked = !others_any && s.patterns.iter().all(|p| p.regex.is_ok());
+    let mut out = Vec::new();
+    if others_checked {
+        out.push("let mut matched = false;".to_owned());
+    }
+    let matched = if others_checked {
+        "matched = true; "
+    } else {
+        ""
+    };
+    for (pattern, ty) in s.patterns.iter().zip(&view.pattern_tys) {
+        let label = format!("patternProperties `{}`", pattern.source);
+        // A pattern that lets anything be only says whether a member is
+        // one of the others: nothing when that is not asked.
+        let accepts = pattern.accepts_anything(ir);
+        // Untranslated, whether it matches is still not known: below.
+        if accepts && !others_checked && pattern.regex.is_ok() {
+            continue;
+        }
+        let part = if accepts {
+            String::new()
+        } else {
+            pattern_part(ir, pattern, ty.as_deref(), generated, reshaped)
+        };
+        out.push(match &pattern.regex {
+            Ok(regex) => {
+                mark_uses_regex();
+                format!(
+                    "{{ static RE: std::sync::LazyLock<Option<regex::Regex>> = std::sync::LazyLock::new(|| regex::Regex::new({regex:?}).ok()); match RE.as_ref() {{ Some(re) => {{ if re.is_match(name) {{ {matched}{part} }} }} None => {{ {matched}report.unevaluated(pointer, {:?}); }} }} }}",
+                    format!("{label}: the pattern is too large to compile, so the member is not checked against it")
+                )
+            }
+            // Matching or not, nothing is decided against a pattern that
+            // lets anything be, when the other members may be anything too.
+            Err(_) if accepts && others_any => continue,
+            // Whether the member matches is not known: nor whether
+            // `additionalProperties` applies to it.
+            Err(reason) => format!(
+                "{matched}report.unevaluated(pointer, {:?});",
+                format!("{label}: {reason}, so whether the member matches it is not known")
+            ),
+        });
+    }
+    match (&s.others, &view.others_ty) {
+        _ if !others_checked => {}
+        (crate::ir::Others::Schema(b), Some(ty)) => {
+            let part = part(ir, b, ty, "additionalProperties", generated, reshaped);
+            out.push(format!("if !matched {{ {part} }}"));
+        }
+        (crate::ir::Others::Denied, _) => out.push(
+            "if !matched { report.violation(pointer, \"is not allowed: it matches no property and no pattern\"); }".to_owned(),
+        ),
+        _ => {}
+    }
+    out
+}
+
+/// What `pattern`'s schema says of a member matching it, its text in
+/// `raw`, at `pointer`.
+fn pattern_part(
+    ir: &crate::ir::Ir,
+    pattern: &crate::ir::PatternDef,
+    ty: Option<&str>,
+    generated: &dyn Fn(&TypeRef) -> bool,
+    reshaped: &dyn Fn(&crate::diagnostic::SchemaId) -> bool,
+) -> String {
+    let label = format!("patternProperties `{}`", pattern.source);
+    match (&pattern.schema, ty) {
+        (crate::ir::PatternSchema::Branch(b), Some(ty)) => {
+            part(ir, b, ty, &label, generated, reshaped)
+        }
+        (crate::ir::PatternSchema::Unchecked(reason), _) => format!(
+            "report.unevaluated(pointer, {:?});",
+            format!("{label}: {reason}")
+        ),
+        _ => format!(
+            "report.violation(pointer, {:?});",
+            format!("is not allowed by {label}")
+        ),
+    }
+}
+
+/// The checks the patterns a declared property's name matches put on its
+/// value, known at generation: the value is written out and read again
+/// as each pattern's schema, as an undeclared member is.
+fn declared_patterns(
+    ir: &crate::ir::Ir,
+    s: &crate::ir::StructDef,
+    view: &TypeView,
+    generated: &dyn Fn(&TypeRef) -> bool,
+    reshaped: &dyn Fn(&crate::diagnostic::SchemaId) -> bool,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (field, field_view) in s.fields.iter().zip(&view.fields) {
+        // Reported once already: the name it was read by is not known.
+        if aliased(field_view) {
+            continue;
+        }
+        let mut parts = Vec::new();
+        let mut reads = false;
+        // Decoded into a substitution or a 32-bit float, the value written
+        // out is not the one that was sent.
+        // So is one read as a float, or as `serde_json::Value`, which
+        // reads a number as a float too; and one read by other names.
+        let lossy = checks::reaches_leaf(ir, &field.ty, &|ty| {
+            matches!(ty, TypeRef::Extern(_) | TypeRef::Number(_) | TypeRef::Any)
+                || matches!(ty, TypeRef::Named(id) if matches!(ir.types.get(id).map(|d| &d.kind), Some(TypeKind::Extern)))
+        }) || checks::reaches_decoder_rules(ir, &field.ty, reshaped);
+        for (pattern, ty) in s.patterns.iter().zip(&view.pattern_tys) {
+            match pattern.matches_name(&field.raw_name) {
+                None => {}
+                // Matching or not, a pattern that lets anything be decides
+                // nothing.
+                Some(_) if pattern.accepts_anything(ir) => {}
+                Some(Ok(())) if lossy && pattern.branch().is_some() => parts.push(format!(
+                    "report.unevaluated(pointer, {:?});",
+                    format!(
+                        "patternProperties `{}`: `{}` is held as a type that does not keep the value as it was sent, so it is not checked against it",
+                        pattern.source, field.raw_name
+                    )
+                )),
+                Some(Ok(())) => {
+                    reads |= pattern.branch().is_some();
+                    parts.push(pattern_part(
+                        ir,
+                        pattern,
+                        ty.as_deref(),
+                        generated,
+                        reshaped,
+                    ));
+                }
+                Some(Err(reason)) => parts.push(format!(
+                    "report.unevaluated(pointer, {:?});",
+                    format!(
+                        "patternProperties `{}`: {reason}, so whether `{}` matches it is not known",
+                        pattern.source, field.raw_name
+                    )
+                )),
+            }
+        }
+        if parts.is_empty() {
+            continue;
+        }
+        let name = &field_view.name;
+        let checks = parts.join(" ");
+        let inner = if reads {
+            format!(
+                "if let Ok(text) = serde_json::to_string(member) {{ let raw = text.as_str(); {checks} }}"
+            )
+        } else {
+            format!("let _ = member; {checks}")
+        };
+        let present = if field.required {
+            format!("{{ let member = &self.{name}; {inner} }}")
+        } else {
+            format!("if let Some(member) = self.{name}.as_ref() {{ {inner} }}")
+        };
+        let gates = field_view.cfg.join(" ");
+        if !gates.is_empty()
+            && !out
+                .iter()
+                .any(|l: &String| l.starts_with("let _ = (pointer"))
+        {
+            out.insert(0, "let _ = (pointer, &report);".to_owned());
+        }
+        out.push(
+            format!(
+                "{gates} {{ let p = child_pointer(pointer, {:?}); let pointer: &str = &p; {present} }}",
+                field.raw_name
+            )
+            .trim_start()
+            .to_owned(),
+        );
+    }
+    out
+}
+
+/// One schema a raw member is read as and checked against, as an `allOf`
+/// part is: a value that does not decode misses it, unless the decoder
+/// rather than the value is why.
+fn part(
+    ir: &crate::ir::Ir,
+    b: &Branch,
+    ty: &str,
+    label: &str,
+    generated: &dyn Fn(&TypeRef) -> bool,
+    reshaped: &dyn Fn(&crate::diagnostic::SchemaId) -> bool,
+) -> String {
+    let renamed = checks::reaches_reshaped(ir, &b.ty, reshaped);
+    let (mut body, reads) = if renamed {
+        (Vec::new(), false)
+    } else {
+        branch(ir, b, generated, ("report", "report"))
+    };
+    if renamed {
+        body.push(format!(
+            "report.unevaluated(pointer, {:?});",
+            format!("{label}: its Rust type reads members by other names than the schema")
+        ));
+    } else if checks::part_unsure(b) {
+        body.push(format!(
+            "report.unevaluated(pointer, {:?});",
+            format!("{label}: it says more than is checked")
+        ));
+    }
+    let wide = rust_wide_of(ir, std::iter::once(&b.ty), "raw");
+    let decoder = match decoder_rules(ir, &b.ty, reshaped, "raw") {
+        Some(cond) => format!(
+            " else if {cond} {{ report.unevaluated(pointer, {:?}); }}",
+            format!("{label}: its Rust type may not decode a value the schema allows")
+        ),
+        None => String::new(),
+    };
+    let miss = format!(
+        "if {wide} {{ report.unevaluated(pointer, {:?}); }}{decoder} else {{ report.violation(pointer, {:?}); }}",
+        format!("{label}: a number in the value is past what its type holds"),
+        format!("does not satisfy {label}")
+    );
+    let binding = if reads { "v" } else { "_" };
+    format!(
+        "match serde_json::from_str::<{ty}>(raw) {{ Ok({binding}) => {{ {} }} Err(_) => {{ {miss} }} }}",
+        body.join(" ")
     )
 }
 
@@ -501,6 +750,7 @@ pub(crate) fn body(
             // what a member read under an alias really is.
             let others_constrained = (def.constraints.property_names
                 && def.constraints.names.as_deref() != Some(&crate::front::Constraints::default()))
+                || !s.patterns.is_empty()
                 || match &s.additional {
                     Additional::Denied => true,
                     Additional::CatchAll(TypeRef::Any) => def.constraints.items.is_some(),
@@ -626,7 +876,47 @@ pub(crate) fn body(
                 // members, where `additionalProperties` does not apply to
                 // it: with any gated, their values are not checked.
                 let gates = view.fields.iter().any(|f| !f.cfg.is_empty());
-                if gates && (generated(ty) || each.is_some()) {
+                if !s.patterns.is_empty() {
+                    // A declared property matching a pattern is checked
+                    // against its schema too.
+                    for line in declared_patterns(ir, s, view, generated, reshaped) {
+                        if line.starts_with("let _ = (pointer") {
+                            if !out.iter().any(|l| l.starts_with("let _ = (pointer")) {
+                                out.insert(0, line);
+                            }
+                        } else {
+                            out.push(line);
+                        }
+                    }
+                    if gates {
+                        out.push(format!(
+                            "if !self.{name}.is_empty() {{ report.unevaluated(pointer, \"patternProperties: a property compiled out with cfg lands among the other members, so they are not checked\"); }}"
+                        ));
+                    } else {
+                        let checks = pattern_members(ir, s, view, generated, reshaped);
+                        // A member is read only against a pattern's schema: with
+                        // every pattern untranslated, never.
+                        let read = s.patterns.iter().any(|p| {
+                            p.regex.is_ok() && p.branch().is_some() && !p.accepts_anything(ir)
+                        }) || (matches!(s.others, crate::ir::Others::Schema(_))
+                            && !s.others_accept_anything(ir)
+                            && s.patterns.iter().all(|p| p.regex.is_ok()));
+                        // Nothing a member could be is decided: no loop.
+                        if checks.is_empty() {
+                            // Nothing to check on any member.
+                        } else if read {
+                            out.push(format!(
+                                "for (name, value) in &self.{name} {{ let p = child_pointer(pointer, name); let pointer: &str = &p; let raw = value.get(); {} }}",
+                                checks.join(" ")
+                            ));
+                        } else {
+                            out.push(format!(
+                                "for name in self.{name}.keys() {{ let p = child_pointer(pointer, name); let pointer: &str = &p; {} }}",
+                                checks.join(" ")
+                            ));
+                        }
+                    }
+                } else if gates && (generated(ty) || each.is_some()) {
                     out.push(format!(
                         "if !self.{name}.is_empty() {{ report.unevaluated(pointer, \"additionalProperties: a property compiled out with cfg lands among the other members, so their values are not checked\"); }}"
                     ));
@@ -853,7 +1143,7 @@ pub(crate) fn body(
                 // A number past what the branch's type holds fails to decode
                 // for the representation: no proof it matches no branch.
                 checked = true;
-                let beyond = match decoder_rules(ir, &b.ty, reshaped) {
+                let beyond = match decoder_rules(ir, &b.ty, reshaped, "self.raw.get()") {
                     Some(cond) if cond == "true" => " else { uncertain += 1; }".to_owned(),
                     Some(cond) => format!(" else if {wide} || {cond} {{ uncertain += 1; }}"),
                     None => format!(" else if {wide} {{ uncertain += 1; }}"),
@@ -927,7 +1217,7 @@ pub(crate) fn body(
                 // A number past what the part's type holds fails to decode for
                 // the representation: undecided, not a miss.
                 let part_name = accessor.trim_start_matches("as_");
-                let decoder = match decoder_rules(ir, &b.ty, reshaped) {
+                let decoder = match decoder_rules(ir, &b.ty, reshaped, "self.raw.get()") {
                     Some(cond) => format!(
                         " else if {cond} {{ report.unevaluated(pointer, {:?}); }}",
                         format!(

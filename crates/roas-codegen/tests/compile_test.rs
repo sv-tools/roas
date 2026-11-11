@@ -766,6 +766,51 @@ fn validated_description() -> serde_json::Value {
             "PatAdd": {"type": "object", "properties": {"k": {"type": "string"}},
                 "patternProperties": {"^x": {"type": "string"}},
                 "additionalProperties": {"$ref": "#/components/schemas/Long3"}},
+            "PatBoth": {"type": "object", "patternProperties": {
+                "^a": {"type": "string", "maxLength": 2},
+                "b$": {"type": "string", "minLength": 2}}},
+            "PatOwners": {"type": "object", "properties": {"id": {"type": "string"}},
+                "patternProperties": {"^o": {"$ref": "#/components/schemas/Owner"}}},
+            "PatUntranslated": {"type": "object",
+                "patternProperties": {"\\bx": {"type": "integer"}},
+                "additionalProperties": {"type": "string"}},
+            "PatTypeless": {"patternProperties": {"^a": {"type": "integer"}}},
+            "PatDecl": {"type": "object", "required": ["ar"],
+                "properties": {"ab": {"type": "string"}, "ar": {"type": "string"}, "an": {"type": ["string", "null"]}},
+                "patternProperties": {"^a": {"type": "string", "maxLength": 1}}},
+            "PatDeclDenied": {"type": "object", "additionalProperties": false,
+                "properties": {"ab": {"type": "string"}},
+                "patternProperties": {"^a": {"type": "string", "maxLength": 1}}},
+            "PatF32": {"type": "object", "properties": {"xb": {"type": "number", "format": "float"}},
+                "patternProperties": {"^x": {"type": "number", "exclusiveMaximum": 1}}},
+            "PatSub": {"type": "object", "properties": {"xd": {"type": "string", "format": "date"}},
+                "patternProperties": {"^x": {"type": "string", "maxLength": 1}}},
+            "PatAnything": {"type": "object", "properties": {"id": {"type": "string"}},
+                "patternProperties": {"\\bq": {}}},
+            "PatF64Max": {"type": "object", "properties": {"xa": {"type": "number"}, "xv": {}},
+                "patternProperties": {"^x": {"type": "integer", "maximum": 9007199254740992u64}}},
+            "Whatever": {},
+            "PatRefAnything": {"type": "object", "properties": {"id": {"type": "string"}},
+                "patternProperties": {"\\bq": {"$ref": "#/components/schemas/Whatever"}}},
+            "PatAliasRef": {"type": "object", "properties": {"xa": {"$ref": "#/components/schemas/ShortAliased"}},
+                "patternProperties": {"^x": {"type": "object", "properties": {"aa": {"type": "string", "maxLength": 1}}}}},
+            "PatHoldsPatterned": {"type": "object",
+                "properties": {"xInner": {"$ref": "#/components/schemas/PatBoth"}},
+                "patternProperties": {"^x": {"type": "object", "maxProperties": 0}}},
+            "PatAnyTranslated": {"type": "object", "patternProperties": {"^x": {}}},
+            "PatAnyBeside": {"type": "object", "additionalProperties": {},
+                "patternProperties": {"\\bx": {}}},
+            "PatAnyUntranslatedClosed": {"type": "object", "additionalProperties": false,
+                "patternProperties": {"\\bx": {}}},
+            "PatAnyUntranslatedTyped": {"type": "object", "additionalProperties": {"type": "string"},
+                "patternProperties": {"\\bx": {}}},
+            "PatAnyOthers": {"type": "object", "additionalProperties": {"type": "string"},
+                "patternProperties": {"^x": {}}},
+            "PatClosedFalse": {"type": "object", "additionalProperties": false,
+                "patternProperties": {"^x-": false}},
+            "PatFalse": {"type": "object",
+                "properties": {"id": {"type": "string"}, "x-id": {"type": "string"}},
+                "patternProperties": {"^x-": false, "^n": {"not": {"type": "string"}}}},
             "PatMapAdd": {"type": "object",
                 "patternProperties": {"^x": {"type": "integer"}},
                 "additionalProperties": {"$ref": "#/components/schemas/Long3"}},
@@ -1119,7 +1164,10 @@ fn main() {
     assert_eq!(report::<Items>("[5]"), vec![v("")]);
     assert_eq!(report::<StrItems>(r#"["a"]"#), vec![]);
     // Member patterns are not checked yet, and say so.
-    assert_eq!(report::<PatMap>(r#"{"a":"x"}"#), vec![u("")]);
+    // Pattern members are checked against their patterns' schemas.
+    assert_eq!(report::<PatMap>(r#"{"a":"x"}"#), vec![]);
+    assert_eq!(report::<PatMap>(r#"{"a":1}"#), vec![]);
+    assert_eq!(report::<PatMap>(r#"{"a":true}"#), vec![v("")]);
     // A type list left with only its null.
     assert_eq!(report::<NullOnly>("null"), vec![]);
     // A present null reaches a JSON-value wrapper.
@@ -1239,14 +1287,74 @@ fn main() {
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
     // No items, nothing unchecked about them.
     // Pattern members are not judged by `additionalProperties`.
-    assert_eq!(report::<PatAdd>(r#"{"x":""}"#), vec![u("")]);
+    assert_eq!(report::<PatAdd>(r#"{"x":""}"#), vec![]);
+    assert_eq!(report::<PatAdd>(r#"{"x":5}"#), vec![v("/x")]);
+    assert_eq!(report::<PatAdd>(r#"{"z":"ab"}"#), vec![v("/z")]);
+    assert_eq!(report::<PatAdd>(r#"{"z":"abc","k":"q"}"#), vec![]);
+    // A member matching several patterns satisfies every one.
+    assert_eq!(report::<PatBoth>(r#"{"ab":"xy"}"#), vec![]);
+    assert_eq!(report::<PatBoth>(r#"{"ab":"xyz"}"#), vec![v("/ab")]);
+    assert_eq!(report::<PatBoth>(r#"{"ab":"x"}"#), vec![v("/ab")]);
+    assert_eq!(report::<PatBoth>(r#"{"zz":5}"#), vec![]);
+    // A pattern's schema is walked into.
+    assert_eq!(report::<PatOwners>(r#"{"id":"1","o1":{"nick":"abcd"}}"#), vec![v("/o1/nick")]);
+    assert_eq!(report::<PatOwners>(r#"{"o1":{"nick":"ab"},"z":[]}"#), vec![]);
+    // A pattern the generator cannot translate leaves its members undecided.
+    assert_eq!(report::<PatUntranslated>(r#"{"x":"s"}"#), vec![u("/x")]);
+    // A declared property matching a pattern is checked against it too.
+    assert_eq!(report::<PatDecl>(r#"{"ar":"x","ab":"xyz"}"#), vec![v("/ab")]);
+    assert_eq!(report::<PatDecl>(r#"{"ar":"xy"}"#), vec![v("/ar")]);
+    assert_eq!(report::<PatDecl>(r#"{"ar":"x","an":null}"#), vec![v("/an")]);
+    assert_eq!(report::<PatDecl>(r#"{"ar":"x","ab":"y","an":"z","ac":"w"}"#), vec![]);
+    assert_eq!(report::<PatDecl>(r#"{"ar":"x","an":"zz"}"#), vec![v("/an")]);
+    assert_eq!(report::<PatDeclDenied>(r#"{"ab":"xyz"}"#), vec![v("/ab")]);
+    // A field that does not keep the value as sent is not judged by a
+    // pattern: a 32-bit float, a substitution.
+    assert_eq!(report::<PatF32>(r#"{"xb":0.99999999}"#), vec![u("/xb")]);
+    assert_eq!(report::<PatF32>(r#"{"xc":0.5}"#), vec![]);
+    assert_eq!(report::<PatSub>(r#"{"xd":"2024-01-01"}"#), vec![u("/xd")]);
+    // A float, and in Rust a `serde_json::Value`, may not keep its digits.
+    assert_eq!(report::<PatF64Max>(r#"{"xa":9007199254740993}"#), vec![u("/xa")]);
+    assert_eq!(report::<PatF64Max>(r#"{"xv":1.0000000000000000001}"#), vec![u("/xv")]);
+    assert_eq!(report::<PatF64Max>(r#"{"xb":9007199254740993}"#), vec![v("/xb")]);
+    // A type read by other names writes the member back under another.
+    assert_eq!(report::<PatAliasRef>(r#"{"xa":{"aa":"long"}}"#), vec![u("/xa"), u("/xa/a")]);
+    // A pattern that lets anything be decides nothing, translated or not.
+    assert_eq!(report::<PatAnything>(r#"{"id":"a","z":1}"#), vec![]);
+    assert_eq!(report::<PatRefAnything>(r#"{"id":"a","z":1}"#), vec![]);
+    assert_eq!(report::<PatAnyTranslated>(r#"{"x":1e400}"#), vec![]);
+    assert_eq!(report::<PatAnyBeside>(r#"{"x":1,"y":1}"#), vec![]);
+    // Matching a pattern that lets anything be still says the member is
+    // not one of the others.
+    assert_eq!(report::<PatAnyOthers>(r#"{"x":5,"y":"s"}"#), vec![]);
+    assert_eq!(report::<PatAnyOthers>(r#"{"y":5}"#), vec![v("/y")]);
+    // Untranslated, whether it matches is not known, so neither is whether
+    // `additionalProperties` applies.
+    assert_eq!(report::<PatAnyUntranslatedClosed>(r#"{"zzz":1}"#), vec![u("/zzz")]);
+    assert_eq!(report::<PatAnyUntranslatedTyped>(r#"{"zzz":1}"#), vec![u("/zzz")]);
+    // A struct holding its pattern members as text keeps them exactly.
+    assert_eq!(report::<PatHoldsPatterned>(r#"{"xInner":{"ab":"xy"}}"#), vec![v("/xInner")]);
+    assert_eq!(report::<PatHoldsPatterned>(r#"{"xInner":{}}"#), vec![]);
+    // Let in at decode by its pattern, refused by the pattern's `false`.
+    assert_eq!(report::<PatClosedFalse>(r#"{"x-a":1}"#), vec![v("/x-a")]);
+    assert!(serde_json::from_str::<PatClosedFalse>(r#"{"y":1}"#).is_err());
+    // `false` refuses a matching member, declared or not; `not` is unchecked.
+    assert_eq!(report::<PatFalse>(r#"{"id":"q"}"#), vec![]);
+    assert_eq!(report::<PatFalse>(r#"{"x-a":1}"#), vec![v("/x-a")]);
+    assert_eq!(report::<PatFalse>(r#"{"x-id":"a"}"#), vec![v("/x-id")]);
+    assert_eq!(report::<PatFalse>(r#"{"n1":1}"#), vec![u("/n1")]);
+    // With no `type`, the patterns speak of objects only.
+    assert_eq!(report::<PatTypeless>("5"), vec![]);
+    assert_eq!(report::<PatTypeless>(r#"{"a":1}"#), vec![]);
+    assert_eq!(report::<PatTypeless>(r#"{"a":"x"}"#), vec![v("/a")]);
     // Deprecated types of every kind are used without a warning, and a
     // deprecated composition's annotations are not unevaluated keywords
     // (the typeless `allOf` part's `maxLength` is).
     assert_eq!(report::<UsesOld>(r#"{"o":"x","l":"abc","t":{"kind":"ZooCat"},"c":{"k":1}}"#), vec![u("/l")]);
     // A typeless member takes null.
     assert_eq!(report::<NullName>(r#"{"ab":null,"c":null}"#), vec![v("/ab")]);
-    assert_eq!(report::<PatMapAdd>(r#"{"x":1}"#), vec![u("")]);
+    assert_eq!(report::<PatMapAdd>(r#"{"x":1}"#), vec![]);
+    assert_eq!(report::<PatMapAdd>(r#"{"x":"s"}"#), vec![v("/x")]);
     // Integers, raw holders and tagged unions decode inside a catch-all
     // (`ZooOrStr` below); `IntCatch` has an alias, so it proves nothing.
     assert_eq!(report::<IntCatchOrStr>(r#"{"x":1}"#), vec![u("")]);
@@ -1309,7 +1417,8 @@ fn main() {
     assert_eq!(report::<EnumItems>(r#"[{"a":null}]"#), vec![]);
     assert_eq!(report::<EnumItems>(r#"["a"]"#), vec![]);
     // Members a pattern allows are not refused as unknown.
-    assert_eq!(report::<PatOrStr>(r#"{"x":1}"#), vec![u("")]);
+    assert_eq!(report::<PatOrStr>(r#"{"x":1}"#), vec![]);
+    assert_eq!(report::<PatOrStr>(r#"{"x":"s"}"#), vec![v("")]);
     // A member matching no pattern is refused at decode: no branch matches.
     assert_eq!(report::<PatOrStr>(r#"{"y":1}"#), vec![v("")]);
     // A branch that misses for its value is still a miss.
@@ -1573,7 +1682,9 @@ func main() {
 	check(`[1]`, report[api.Items](`[1]`))
 	check(`[5]`, report[api.Items](`[5]`), v(""))
 	check(`["a"]`, report[api.StrItems](`["a"]`))
-	check(`{"a":"x"}`, report[api.PatMap](`{"a":"x"}`), u(""))
+	check(`{"a":"x"}`, report[api.PatMap](`{"a":"x"}`))
+	check(`{"a":1}`, report[api.PatMap](`{"a":1}`))
+	check(`{"a":true}`, report[api.PatMap](`{"a":true}`), v(""))
 	check(`null`, report[api.NullOnly](`null`))
 	check(`{"n":null}`, report[api.HoldsScalar](`{"n":null}`), u("/n"))
 	check(`{"k":[1]}`, report[api.PickK](`{"k":[1]}`))
@@ -1630,10 +1741,54 @@ func main() {
 	}
 	check(`{"a":null}`, report[api.EnumOrObj](`{"a":null}`))
 	check(`[{"a":null}]`, report[api.EnumItems](`[{"a":null}]`))
-	check(`{"x":""}`, report[api.PatAdd](`{"x":""}`), u(""))
+	check(`{"x":""}`, report[api.PatAdd](`{"x":""}`))
+	check(`{"x":5}`, report[api.PatAdd](`{"x":5}`), v("/x"))
+	check(`{"z":"ab"}`, report[api.PatAdd](`{"z":"ab"}`), v("/z"))
+	check(`{"z":"abc","k":"q"}`, report[api.PatAdd](`{"z":"abc","k":"q"}`))
+	check(`{"ab":"xy"}`, report[api.PatBoth](`{"ab":"xy"}`))
+	check(`{"ab":"xyz"}`, report[api.PatBoth](`{"ab":"xyz"}`), v("/ab"))
+	check(`{"ab":"x"}`, report[api.PatBoth](`{"ab":"x"}`), v("/ab"))
+	check(`{"zz":5}`, report[api.PatBoth](`{"zz":5}`))
+	check(`{"id":"1","o1":{"nick":"abcd"}}`, report[api.PatOwners](`{"id":"1","o1":{"nick":"abcd"}}`), v("/o1/nick"))
+	check(`{"o1":{"nick":"ab"},"z":[]}`, report[api.PatOwners](`{"o1":{"nick":"ab"},"z":[]}`))
+	check(`{"x":"s"}`, report[api.PatUntranslated](`{"x":"s"}`), u("/x"))
+	check(`{"ar":"x","ab":"xyz"}`, report[api.PatDecl](`{"ar":"x","ab":"xyz"}`), v("/ab"))
+	check(`{"ar":"xy"}`, report[api.PatDecl](`{"ar":"xy"}`), v("/ar"))
+	check(`{"ar":"x","an":null}`, report[api.PatDecl](`{"ar":"x","an":null}`), v("/an"))
+	check(`{"ar":"x","ab":"y","an":"z","ac":"w"}`, report[api.PatDecl](`{"ar":"x","ab":"y","an":"z","ac":"w"}`))
+	check(`{"ar":"x","an":"zz"}`, report[api.PatDecl](`{"ar":"x","an":"zz"}`), v("/an"))
+	check(`{"ab":"xyz"}`, report[api.PatDeclDenied](`{"ab":"xyz"}`), v("/ab"))
+	check(`{"xb":0.99999999}`, report[api.PatF32](`{"xb":0.99999999}`), u("/xb"))
+	check(`{"xc":0.5}`, report[api.PatF32](`{"xc":0.5}`))
+	check(`{"xd":"2024-01-01"}`, report[api.PatSub](`{"xd":"2024-01-01"}`), u("/xd"))
+	check(`{"xa":9007199254740993}`, report[api.PatF64Max](`{"xa":9007199254740993}`), u("/xa"))
+	// Go holds an untyped member as its text: decided.
+	check(`{"xv":1.0000000000000000001}`, report[api.PatF64Max](`{"xv":1.0000000000000000001}`), v("/xv"))
+	check(`{"xb":9007199254740993}`, report[api.PatF64Max](`{"xb":9007199254740993}`), v("/xb"))
+	// Go reads no alias: the member is an undeclared one of the inner type.
+	check(`{"xa":{"aa":"long"}}`, report[api.PatAliasRef](`{"xa":{"aa":"long"}}`), v("/xa/aa"))
+	check(`{"id":"a","z":1}`, report[api.PatAnything](`{"id":"a","z":1}`))
+	check(`{"id":"a","z":1}`, report[api.PatRefAnything](`{"id":"a","z":1}`))
+	check(`{"x":1e400}`, report[api.PatAnyTranslated](`{"x":1e400}`))
+	check(`{"x":1,"y":1}`, report[api.PatAnyBeside](`{"x":1,"y":1}`))
+	check(`{"x":5,"y":"s"}`, report[api.PatAnyOthers](`{"x":5,"y":"s"}`))
+	check(`{"y":5}`, report[api.PatAnyOthers](`{"y":5}`), v("/y"))
+	check(`{"zzz":1}`, report[api.PatAnyUntranslatedClosed](`{"zzz":1}`), u("/zzz"))
+	check(`{"zzz":1}`, report[api.PatAnyUntranslatedTyped](`{"zzz":1}`), u("/zzz"))
+	check(`{"xInner":{"ab":"xy"}}`, report[api.PatHoldsPatterned](`{"xInner":{"ab":"xy"}}`), v("/xInner"))
+	check(`{"xInner":{}}`, report[api.PatHoldsPatterned](`{"xInner":{}}`))
+	check(`{"x-a":1}`, report[api.PatClosedFalse](`{"x-a":1}`), v("/x-a"))
+	check(`{"id":"q"}`, report[api.PatFalse](`{"id":"q"}`))
+	check(`{"x-a":1}`, report[api.PatFalse](`{"x-a":1}`), v("/x-a"))
+	check(`{"x-id":"a"}`, report[api.PatFalse](`{"x-id":"a"}`), v("/x-id"))
+	check(`{"n1":1}`, report[api.PatFalse](`{"n1":1}`), u("/n1"))
+	check(`5`, report[api.PatTypeless](`5`))
+	check(`{"a":1}`, report[api.PatTypeless](`{"a":1}`))
+	check(`{"a":"x"}`, report[api.PatTypeless](`{"a":"x"}`), v("/a"))
 	check(`{"o":"x","l":"abc","t":{"kind":"ZooCat"},"c":{"k":1}}`, report[api.UsesOld](`{"o":"x","l":"abc","t":{"kind":"ZooCat"},"c":{"k":1}}`), u("/l"))
 	check(`{"ab":null,"c":null}`, report[api.NullName](`{"ab":null,"c":null}`), v("/ab"))
-	check(`{"x":1}`, report[api.PatMapAdd](`{"x":1}`), u(""))
+	check(`{"x":1}`, report[api.PatMapAdd](`{"x":1}`))
+	check(`{"x":"s"}`, report[api.PatMapAdd](`{"x":"s"}`), v("/x"))
 	check(`{"x":1}`, report[api.IntCatchOrStr](`{"x":1}`))
 	// Go has no cfg gates or aliases: these decode and match (beside a
 	// substitution, a failed decode is undecided in Go too).
@@ -1660,7 +1815,8 @@ func main() {
 	check(`["a","bc","d"]`, report[api.InlineItems](`["a","bc","d"]`), v("/0"), v("/2"))
 	padded := strings.Repeat(`{"next":`, 30) + `{"pad":"` + strings.Repeat("x", 1<<20) + `"}` + strings.Repeat("}", 30)
 	_ = report[api.PadNode](padded)
-	check(`{"x":1}`, report[api.PatOrStr](`{"x":1}`), u(""))
+	check(`{"x":1}`, report[api.PatOrStr](`{"x":1}`))
+	check(`{"x":"s"}`, report[api.PatOrStr](`{"x":"s"}`), v(""))
 	check(`{"y":1}`, report[api.PatOrStr](`{"y":1}`), v(""))
 	twice := strings.Repeat(`{"h":`, 40) + `{}` + strings.Repeat("}", 40)
 	if got := report[api.Twice](twice); len(got) == 0 {
