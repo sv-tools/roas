@@ -1123,6 +1123,9 @@ impl<'d> Run<'d> {
         id: RequestId,
         response: HttpResponse,
     ) -> Result<(), ExecutionError> {
+        if self.frames.last().is_none() {
+            return Err(ExecutionError::NotWaiting);
+        }
         let Some(pending) = self
             .pending
             .iter_mut()
@@ -1135,9 +1138,6 @@ impl<'d> Run<'d> {
         // running out of time ends the run, it does not fail the step.
         if self.out_of_time() {
             return Err(self.timed_out());
-        }
-        if self.frames.last().is_none() {
-            return Err(ExecutionError::NotWaiting);
         }
         // Judged in the order the steps are listed: a step listed before
         // this one may yet end the workflow, and then this one would not
@@ -2175,7 +2175,9 @@ impl<'d> Run<'d> {
                 Ok(())
             }
             Action::End(outcome) => {
-                // What is still in flight is abandoned: nothing will judge it.
+                // What is still in flight is abandoned: nothing will judge
+                // it, and it never counted as a step taken.
+                self.taken = self.taken.saturating_sub(self.pending.len());
                 self.pending.clear();
                 frame.outcome = outcome;
                 frame.at = frame.order.len();

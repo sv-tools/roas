@@ -550,3 +550,34 @@ fn responses_are_judged_in_the_order_the_steps_are_listed() {
     ));
     assert_eq!(judged(&run), ["a"]);
 }
+
+#[test]
+fn abandoned_requests_do_not_count_as_steps_taken() {
+    let description: Description = serde_json::from_value(json!({
+        "arazzo": "1.1.0",
+        "info": { "title": "T", "version": "1.0.0" },
+        "sourceDescriptions": [
+            { "name": "api", "url": "https://api.example.com/openapi.json", "type": "openapi" }
+        ],
+        "workflows": [
+            { "workflowId": "w", "steps": [
+                { "stepId": "call", "workflowId": "inner",
+                  "onFailure": [{ "name": "on", "type": "goto", "stepId": "c" }] },
+                step("c")
+            ] },
+            { "workflowId": "inner", "steps": [step("a"), step("b")] }
+        ],
+    }))
+    .unwrap();
+    for parallel in [1, 2] {
+        let options = options().parallel(parallel).max_steps(3);
+        let mut run = Run::start(&description, &options).unwrap();
+        let a = send(&mut run);
+        if parallel > 1 {
+            send(&mut run);
+        }
+        run.supply_to(a.id, HttpResponse::json(500, &json!({})))
+            .unwrap();
+        assert_eq!(path(&send(&mut run)), "c", "parallel {parallel}");
+    }
+}
