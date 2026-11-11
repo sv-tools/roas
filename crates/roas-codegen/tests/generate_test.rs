@@ -1070,3 +1070,208 @@ fn items_beside_prefix_items_is_reported_not_applied() {
         "{text}"
     );
 }
+
+#[test]
+fn branch_and_projection_warnings_point_where_they_are_written() {
+    let g = generate(
+        &document(serde_json::json!({
+            "BStr": {"oneOf": [{"type": "integer"}, {"type": "string", "pattern": "(?=a)"}]},
+            "BAll": {"allOf": [{"type": "string"}, {"type": "string", "pattern": "(?=b)"}]},
+            "X": {"properties": {"x": {"type": "string", "pattern": "(?=e)"}}, "propertyNames": {"pattern": "(?=f)"}},
+            "Y": {"type": ["object", "string"], "pattern": "(?=g)"},
+            "A": {"title": "T", "description": "D", "deprecated": true, "readOnly": true, "default": "x",
+                "anyOf": [{"type": "string"}, {"type": "boolean"}]}
+        })),
+        &rust_config("validation = true"),
+    )
+    .unwrap();
+    let pointers: Vec<&str> = g
+        .diagnostics
+        .iter()
+        .filter(
+            |d| matches!(&d.kind, DiagnosticKind::Unvalidated { keyword } if keyword == "pattern"),
+        )
+        .map(|d| d.pointer.as_str())
+        .collect();
+    for want in [
+        "/components/schemas/BStr/oneOf/1/pattern",
+        "/components/schemas/BAll/allOf/1/pattern",
+        "/components/schemas/X/properties/x/pattern",
+        "/components/schemas/X/propertyNames/pattern",
+        "/components/schemas/Y/pattern",
+    ] {
+        assert!(pointers.contains(&want), "{want} in {pointers:?}");
+    }
+    // A composition's annotations are read, not reported.
+    assert!(
+        !g.diagnostics
+            .iter()
+            .any(|d| d.pointer == "/components/schemas/A"),
+        "{:?}",
+        g.diagnostics
+    );
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    assert!(
+        text.contains("/// D\n") && text.contains("#[deprecated]\npub struct A"),
+        "{text}"
+    );
+}
+
+#[test]
+fn malformed_composition_annotations_and_projection_extensions_are_reported_in_place() {
+    let g = generate(
+        &document(serde_json::json!({
+            "A": {"deprecated": "yes", "title": 5, "anyOf": [{"type": "string"}, {"type": "boolean"}]},
+            "Loose": {"properties": {"x": {"type": "string", "x-rust-attrs": "#[doc = \"x\"]"}}},
+            "Tilde": {"type": "object", "properties": {"~x": {"type": "string", "x-rust-attrs": "#[doc = \"x\"]"}, "a/b": {"type": "string", "x-rust-attrs": "#[doc = \"x\"]"}}}
+        })),
+        &rust_config(""),
+    )
+    .unwrap();
+    for keyword in ["deprecated", "title"] {
+        assert!(
+            g.diagnostics.iter().any(|d| matches!(&d.kind, DiagnosticKind::UnsupportedKeyword { keyword: k } if k == keyword)
+                && d.pointer == "/components/schemas/A"),
+            "{keyword}: {:?}",
+            g.diagnostics
+        );
+    }
+    let ignored: Vec<&str> = g
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(&d.kind, DiagnosticKind::IgnoredExtension { .. }))
+        .map(|d| d.pointer.as_str())
+        .collect();
+    assert_eq!(
+        ignored,
+        [
+            "/components/schemas/Loose/properties/x/x-rust-attrs",
+            "/components/schemas/Tilde/properties/a~1b/x-rust-attrs",
+            "/components/schemas/Tilde/properties/~0x/x-rust-attrs",
+        ]
+    );
+}
+
+#[test]
+fn a_component_keeps_its_name_beside_a_titled_inline_schema() {
+    let components = serde_json::json!({
+        "Shape": {"type": "string"},
+        "H": {"type": "object", "properties": {
+            "p": {"title": "Shape", "oneOf": [{"type": "integer"}, {"type": "boolean"}]},
+            "o": {"title": "Shape", "type": "object", "properties": {"z": {"type": "string"}}}
+        }}
+    });
+    for (language, want) in [
+        (Target::Rust, "pub struct Shape(pub String);"),
+        (Target::Go, "type Shape string"),
+    ] {
+        let config = ConfigFile::from_toml("", Path::new("/"))
+            .unwrap()
+            .merge(target(language))
+            .build()
+            .unwrap();
+        let generation = generate(&document(components.clone()), &config).unwrap();
+        let text = generation
+            .files
+            .iter()
+            .map(|f| f.contents.as_str())
+            .collect::<String>();
+        assert!(text.contains(want), "{text}");
+    }
+}
+
+fn raw_document(raw: serde_json::Value) -> roas_codegen::ValidatedSourceDocument {
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let doc = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap())
+        .expect("parses");
+    validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid")
+}
+
+#[test]
+fn composition_annotations_are_read_from_every_version() {
+    let schemas = serde_json::json!({
+        "H": {"type": "object", "properties": {"u": {"title": "Thing", "description": "a thing",
+            "deprecated": true, "oneOf": [{"type": "string"}, {"type": "boolean"}]}}},
+        "V": {"anyOf": [{"type": "string"}, {"type": "integer"}], "xml": {"name": "v"}}
+    });
+    for openapi in ["3.0.3", "3.1.0"] {
+        let doc = raw_document(serde_json::json!({
+            "openapi": openapi, "info": {"title": "t", "version": "1"}, "paths": {},
+            "components": {"schemas": schemas.clone()}
+        }));
+        let g = generate(&doc, &rust_config("validation = true")).unwrap();
+        let text = g
+            .files
+            .iter()
+            .map(|f| f.contents.as_str())
+            .collect::<String>();
+        assert!(
+            text.contains("#[deprecated]\npub struct Thing") && text.contains("/// a thing"),
+            "{openapi}: {text}"
+        );
+        assert!(
+            !g.diagnostics
+                .iter()
+                .any(|d| d.pointer == "/components/schemas/V"),
+            "{openapi}: {:?}",
+            g.diagnostics
+        );
+    }
+    let doc = raw_document(serde_json::json!({
+        "swagger": "2.0", "info": {"title": "t", "version": "1"}, "paths": {},
+        "definitions": {
+            "Base": {"type": "object", "properties": {"a": {"type": "string"}}},
+            "H": {"type": "object", "properties": {"u": {"title": "Merged", "allOf": [
+                {"$ref": "#/definitions/Base"},
+                {"type": "object", "properties": {"b": {"type": "integer", "minimum": 1}, "c": {"type": "string", "pattern": "(?=x)"}}}
+            ]}}}
+        }
+    }));
+    let g = generate(&doc, &rust_config("validation = true")).unwrap();
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    assert!(text.contains("pub struct Merged"), "{text}");
+}
+
+#[test]
+fn merged_all_of_fields_are_reported_where_they_are_written() {
+    let g = generate(
+        &document(serde_json::json!({
+            "B": {"type": "object", "properties": {"y": {"type": "string", "pattern": "(?=b)"}}},
+            "A": {"allOf": [
+                {"type": "object", "properties": {"x": {"type": "string", "pattern": "(?=a)",
+                    "x-rust-attrs": ["#[doc = \"x\"]"]}}},
+                {"$ref": "#/components/schemas/B"}
+            ]}
+        })),
+        &rust_config("validation = true"),
+    )
+    .unwrap();
+    let mut pointers: Vec<&str> = g
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            matches!(
+                &d.kind,
+                DiagnosticKind::Unvalidated { .. } | DiagnosticKind::IgnoredExtension { .. }
+            )
+        })
+        .map(|d| d.pointer.as_str())
+        .collect();
+    pointers.sort();
+    assert_eq!(
+        pointers,
+        [
+            "/components/schemas/A/allOf/0/properties/x/pattern",
+            "/components/schemas/A/allOf/0/properties/x/x-rust-attrs",
+            "/components/schemas/B/properties/y/pattern",
+        ]
+    );
+}

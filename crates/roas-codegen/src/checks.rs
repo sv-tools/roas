@@ -7,7 +7,7 @@
 //! exactly on the mapped type is never turned into a guessed verdict: it
 //! becomes [`Check::Unevaluated`], reported as such at run time.
 
-use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, push_token, source_of};
+use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, source_of};
 use crate::front::{Constraints, FloatWidth, IntWidth};
 use crate::ir::{Ir, TypeKind, TypeRef};
 use serde_json::Number;
@@ -852,10 +852,7 @@ pub(crate) fn diagnostics(
         match &def.kind {
             TypeKind::Struct(s) => {
                 for field in &s.fields {
-                    let mut pointer = def.id.pointer.clone();
-                    push_token(&mut pointer, "properties");
-                    push_token(&mut pointer, &field.raw_name);
-                    positions.push((pointer, &field.ty, &field.constraints));
+                    positions.push((field.pointer.clone(), &field.ty, &field.constraints));
                 }
                 // The catch-all's values are the other members.
                 if let (crate::ir::Additional::CatchAll(ty), Some(items)) =
@@ -878,7 +875,11 @@ pub(crate) fn diagnostics(
             TypeKind::UnionOpen(crate::ir::OpenUnion { branches, .. })
             | TypeKind::ComposedOpen(branches) => {
                 for branch in branches {
-                    positions.push((def.id.pointer.clone(), &branch.ty, &branch.constraints));
+                    let pointer = branch
+                        .pointer
+                        .clone()
+                        .unwrap_or_else(|| def.id.pointer.clone());
+                    positions.push((pointer, &branch.ty, &branch.constraints));
                 }
             }
             _ => {}

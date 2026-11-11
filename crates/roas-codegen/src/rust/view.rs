@@ -364,7 +364,18 @@ impl Builder<'_> {
                 allocator.reserve(reserved);
             }
         }
-        for id in &self.ir.order {
+        // Components first: a component keeps its name whatever an inline
+        // schema is titled or positioned to be called.
+        let ir = self.ir;
+        let order = ir
+            .order
+            .iter()
+            .filter(|id| ir.types[*id].component.is_some());
+        let rest = ir
+            .order
+            .iter()
+            .filter(|id| ir.types[*id].component.is_none());
+        for id in order.chain(rest) {
             let def = &self.ir.types[id];
             if matches!(def.kind, TypeKind::Extern) {
                 continue;
@@ -490,7 +501,7 @@ impl Builder<'_> {
                 severity: Severity::Warning,
                 kind: DiagnosticKind::IgnoredExtension { keyword: "x-rust-attrs".into() },
                 schema_id: at.clone(),
-                pointer: format!("{}/x-rust-attrs", at.pointer),
+                pointer: crate::diagnostic::source_of(&format!("{}/x-rust-attrs", at.pointer)),
                 message: "`x-rust-attrs` is code from the description and is not applied unless `allow_codegen_extensions` is set".into(),
             });
             return Vec::new();
@@ -511,9 +522,9 @@ impl Builder<'_> {
         for attr in attrs {
             let one = std::slice::from_ref(&attr);
             let checked = if field {
-                check_field_attrs(one, &at.pointer)
+                check_field_attrs(one, &crate::diagnostic::source_of(&at.pointer))
             } else {
-                check_container_attrs(one, &at.pointer)
+                check_container_attrs(one, &crate::diagnostic::source_of(&at.pointer))
             };
             match checked {
                 Ok(()) => kept.push(attr),
@@ -523,7 +534,7 @@ impl Builder<'_> {
                         keyword: "x-rust-attrs".into(),
                     },
                     schema_id: at.clone(),
-                    pointer: format!("{}/x-rust-attrs", at.pointer),
+                    pointer: crate::diagnostic::source_of(&format!("{}/x-rust-attrs", at.pointer)),
                     message: format!("`x-rust-attrs` entry not applied: {error}"),
                 }),
             }
@@ -695,7 +706,7 @@ impl Builder<'_> {
                     )?;
                     attrs.extend(user_attrs);
                     let mut at = def.id.clone();
-                    at.pointer = format!("{}/properties/{}", def.id.pointer, field.raw_name);
+                    at.pointer = field.pointer.clone();
                     attrs.extend(self.codegen_attrs(&field.extensions, &at, true));
                     let cfg = cfg_gates(&attrs, &format!("{}.{}", view.raw_name, field.raw_name))?;
                     if matches!(s.additional, Additional::CatchAll(_)) {
