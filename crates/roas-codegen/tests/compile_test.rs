@@ -715,6 +715,8 @@ fn validated_description() -> serde_json::Value {
                 "s": {"$ref": "#/components/schemas/Strict"}
             }},
             "HoldsPoint": {"type": "object", "properties": {"s": {"$ref": "#/components/schemas/Point"}}},
+            "Bag": {"type": "object", "maxProperties": 1},
+            "HoldsBag": {"type": "object", "properties": {"b": {"$ref": "#/components/schemas/Bag"}, "l": {"type": "array", "items": {"$ref": "#/components/schemas/Bag"}}}},
             "GatedU": {"anyOf": [{"type": "string", "maxLength": 1}, {"type": "integer"}]},
             "Gated2": {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string"}}},
             "GatedField": {"type": "object", "minProperties": 1, "properties": {
@@ -819,6 +821,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
             "AliasSub": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Currency": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Point": {"rust": {"name": "serde_json::Value"}, "go": {"name": "any"}},
+            "Bag": {"rust": {"name": "std::collections::BTreeMap<String, serde_json::Value>"}, "go": {"name": "map[string]any"}},
             "Sub2": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}},
             "ipv4": {"rust": {"name": "std::net::Ipv4Addr"}, "go": {"name": "netip.Addr", "import": "net/netip"}},
             "Sub3": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}},
@@ -1131,6 +1134,7 @@ fn main() {
     assert_eq!(report::<NullType>("null"), vec![u("")]);
     // A substituted object is not checked against what its members declare.
     assert_eq!(report::<HoldsPoint>(r#"{"s":{"n":-1}}"#), vec![u("/s")]);
+    assert_eq!(report::<HoldsBag>(r#"{"b":{"a":[1]},"l":[{"x":{}}]}"#), vec![u("/b"), u("/l")]);
     assert_eq!(report::<HoldsSub2>(r#"{"s2":{"x":1}}"#), vec![u("/s2")]);
     assert_eq!(report::<HoldsSub3>(r#"{"s3":{"p":1}}"#), vec![u("/s3")]);
     // A field compiled out is neither read nor counted.
@@ -1529,6 +1533,9 @@ func main() {
 	if got := report[api.Twice](twice); len(got) == 0 {
 		panic("doubling branches passed unchecked")
 	}
+	// A substitution spelled as an interface or a map decodes by its own rules.
+	check(`{"s":{"n":-1}}`, report[api.HoldsPoint](`{"s":{"n":-1}}`), u("/s"))
+	check(`{"b":{"a":[1]},"l":[{"x":{}}]}`, report[api.HoldsBag](`{"b":{"a":[1]},"l":[{"x":{}}]}`), u("/b"), u("/l"))
 	check(`{"s2":{"x":1}}`, report[api.HoldsSub2](`{"s2":{"x":1}}`), u("/s2"))
 	check(`{"s3":{"p":1}}`, report[api.HoldsSub3](`{"s3":{"p":1}}`), u("/s3"))
 	check(`{"m":"zzz","s":{"b":1}}`, report[api.HoldsMixed](`{"m":"zzz","s":{"b":1}}`), u("/m"), u("/s"), u("/s"))
