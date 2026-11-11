@@ -1063,6 +1063,7 @@ fn walk_generic_object(
             // `links` is a map of named Link Objects.
             "links" => walk(v, body_param_names, form_param_names, Pos::LinkMap),
             "components" => walk_components(v, body_param_names, form_param_names),
+            "paths" => walk_paths(v, body_param_names, form_param_names),
             // A media-type map, keyed by whatever `consumes` / `produces`
             // listed.
             "content" => walk(v, body_param_names, form_param_names, Pos::NamedMap),
@@ -1071,6 +1072,23 @@ fn walk_generic_object(
             // Skip recursion entirely — none of these hold schemas.
             "example" | "examples" | "value" => continue,
             _ => walk(v, body_param_names, form_param_names, Pos::Generic),
+        }
+    }
+}
+
+/// Walker for the Paths Object: keyed by path templates, with `x-*`
+/// the only keys that are opaque.
+fn walk_paths(
+    value: &mut Value,
+    body_param_names: &HashSet<String>,
+    form_param_names: &HashSet<String>,
+) {
+    let Value::Object(paths) = value else {
+        return;
+    };
+    for (path, item) in paths.iter_mut() {
+        if !is_extension_key(path) {
+            walk(item, body_param_names, form_param_names, Pos::Generic);
         }
     }
 }
@@ -2137,6 +2155,40 @@ mod tests {
                 "{mime}: {value}"
             );
         }
+    }
+
+    /// A key under `paths` is a path template even when it spells a
+    /// keyword; such a document does not validate, but it converts.
+    #[test]
+    fn schemas_under_keyword_like_path_keys_are_still_rewritten() {
+        for path in ["value", "example", "examples"] {
+            let raw = serde_json::json!({
+                "swagger": "2.0",
+                "info": {"title": "t", "version": "1"},
+                "paths": {path: {"get": {"responses": {"200": {
+                    "description": "d",
+                    "schema": {"type": "object", "discriminator": "kind"}
+                }}}}},
+            });
+            let v3: V3Spec = serde_json::from_value::<V2Spec>(raw).unwrap().into();
+            let value = serde_json::to_value(&v3).unwrap();
+            let content = &value["paths"][path]["get"]["responses"]["200"]["content"];
+            assert_eq!(
+                content["application/json"]["schema"]["discriminator"],
+                serde_json::json!({"propertyName": "kind"}),
+                "{path}: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn paths_extensions_stay_opaque() {
+        let mut value = serde_json::json!({"paths": {
+            "x-trap": {"schema": {"discriminator": "kind"}}
+        }});
+        let (body, form) = (HashSet::new(), HashSet::new());
+        super::walk(&mut value, &body, &form, super::Pos::Generic);
+        assert_eq!(value["paths"]["x-trap"]["schema"]["discriminator"], "kind");
     }
 
     /// `x-*` directly under `components` is an extension of the

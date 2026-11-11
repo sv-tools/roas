@@ -1745,6 +1745,13 @@ impl MergeWithContext for Discriminator {
                 }
             }
         }
+        merge_extensions(
+            &mut self.extensions,
+            other.extensions,
+            ctx,
+            path,
+            ".extensions",
+        );
     }
 }
 
@@ -2858,5 +2865,24 @@ mod tests {
             2,
             "both mapping entries survive"
         );
+    }
+
+    #[test]
+    fn discriminator_extensions_merge() {
+        let extensions = |key: &str| Some(BTreeMap::from([(key.to_owned(), serde_json::json!(1))]));
+        let mut base = Discriminator {
+            property_name: "kind".into(),
+            extensions: extensions("x-a"),
+            ..Default::default()
+        };
+        let incoming = Discriminator {
+            property_name: "kind".into(),
+            extensions: extensions("x-b"),
+            ..Default::default()
+        };
+        let conflicts = report(&mut base, incoming, MergeOptions::new());
+        assert!(conflicts.is_empty(), "{conflicts:?}");
+        let merged = base.extensions.unwrap();
+        assert!(merged.contains_key("x-a") && merged.contains_key("x-b"));
     }
 }
