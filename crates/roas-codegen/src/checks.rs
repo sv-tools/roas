@@ -1309,6 +1309,12 @@ pub(crate) fn f64_holds(n: &Number) -> bool {
 /// and the other one around it too when `f` is exactly halfway between
 /// them, where reading through an `f64` may round either way.
 pub(crate) fn f32_candidates(f: f64) -> Vec<f32> {
+    // Past the largest float32 but below the halfway point to the next
+    // power of two, a literal decodes to the largest float32; at or past
+    // it, it does not decode at all.
+    if f.is_finite() && (f as f32).is_infinite() {
+        return vec![f32::MAX.copysign(f as f32)];
+    }
     let (below, above) = f32_neighbours(f);
     if below != above && f - f64::from(below) == f64::from(above) - f {
         vec![below, above]

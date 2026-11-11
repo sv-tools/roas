@@ -649,6 +649,8 @@ fn validated_description() -> serde_json::Value {
             "BigEnum": {"type": "number", "enum": [9007199254740993u64]},
             "MixedEnum": {"type": "number", "enum": [9007199254740992u64, 9007199254740993u64]},
             "FloatTenth": {"type": "number", "format": "float", "enum": [0.1]},
+            "FloatEdge": {"type": "number", "format": "float", "enum": [3.4028235677973366e38]},
+            "FloatHalf": {"type": "number", "format": "float", "enum": [1.0000000596046448]},
             "IntOrNull": {"type": "object", "properties": {"n": {"type": ["integer", "null"], "enum": [1, null]}}},
             "Narrow": {"type": "integer", "format": "int32", "enum": [-5, 3000000000i64, 5]},
             "NumConst": {"type": "object", "properties": {"c": {"type": "number", "const": 1.5}}},
@@ -1164,6 +1166,12 @@ fn main() {
     // Only the float32 nearest a listed value is undecided.
     assert_eq!(report::<FloatTenth>("0.1"), vec![u("")]);
     assert_eq!(report::<FloatTenth>("0.099999994"), vec![v("")]);
+    // Past the largest float32, a listed value decodes to it.
+    assert_eq!(report::<FloatEdge>("3.4028235e38"), vec![u("")]);
+    // Exactly halfway, a listed value may decode to either neighbour.
+    assert_eq!(report::<FloatHalf>("1"), vec![u("")]);
+    assert_eq!(report::<FloatHalf>("1.0000001"), vec![u("")]);
+    assert_eq!(report::<FloatHalf>("1.0000002"), vec![v("")]);
     assert_eq!(report::<IntOrNull>(r#"{"n":null}"#), vec![]);
     assert_eq!(report::<IntOrNull>(r#"{"n":1}"#), vec![]);
     assert_eq!(report::<IntOrNull>(r#"{"n":2}"#), vec![v("/n")]);
@@ -1715,6 +1723,10 @@ func main() {
 	check(`9007199254740992`, report[api.MixedEnum](`9007199254740992`))
 	check(`0.1`, report[api.FloatTenth](`0.1`), u(""))
 	check(`0.099999994`, report[api.FloatTenth](`0.099999994`), v(""))
+	check(`3.4028235e38`, report[api.FloatEdge](`3.4028235e38`), u(""))
+	check(`1`, report[api.FloatHalf](`1`), u(""))
+	check(`1.0000001`, report[api.FloatHalf](`1.0000001`), u(""))
+	check(`1.0000002`, report[api.FloatHalf](`1.0000002`), v(""))
 	check(`{"n":null}`, report[api.IntOrNull](`{"n":null}`))
 	check(`{"n":1}`, report[api.IntOrNull](`{"n":1}`))
 	check(`{"n":2}`, report[api.IntOrNull](`{"n":2}`), v("/n"))
