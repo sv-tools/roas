@@ -168,6 +168,13 @@ impl Printer<'_> {
             Term::BoundaryAssertion(b) => match b.kind {
                 BoundaryAssertionKind::Start => self.out.push('^'),
                 BoundaryAssertionKind::End => self.out.push('$'),
+                // The buffer boundaries (`u` mode only): both targets spell
+                // these two as ECMAScript does. Neither has `\Z`.
+                BoundaryAssertionKind::StartBuffer => self.out.push_str("\\A"),
+                BoundaryAssertionKind::EndBuffer => self.out.push_str("\\z"),
+                BoundaryAssertionKind::EndBufferOptionalNewline => {
+                    return Err("the `\\Z` boundary is not supported".into());
+                }
                 BoundaryAssertionKind::Boundary | BoundaryAssertionKind::NegativeBoundary => {
                     return Err("word boundaries (`\\b`, `\\B`) are not supported".into());
                 }
@@ -285,8 +292,9 @@ impl Printer<'_> {
         ) {
             return Err("legacy octal escapes are not supported".into());
         }
-        // oxc reads `[\c1]` in Unicode mode as `\`, `c`, `1`, where
-        // ECMAScript refuses it: a backslash must be written escaped.
+        // The legacy grammar reads a `\c` that starts no control escape
+        // (`[\c]`, `\c1`) as a literal backslash, which the Unicode one
+        // refuses: a backslash must be written escaped.
         if c.value == u32::from(b'\\')
             && self
                 .source
@@ -554,18 +562,23 @@ mod tests {
         assert_eq!(ok("(?:a{1000}){0}"), "(?:a{1000}){0}");
         assert_eq!(ok(r"[\\]"), r"\\");
         assert_eq!(ok(r"\cJ"), r"\x{A}");
+        assert_eq!(ok(r"[\cA]"), r"\x{1}");
         assert_eq!(ok(r"\0"), r"\x{0}");
         assert!(ok(r"^https?://\S+$").starts_with("^https?://["));
         assert_eq!(ok("😀+"), r"\x{1F600}+");
         assert_eq!(ok(r"\u{1F600}"), r"\x{1F600}");
         assert_eq!(ok(r"a\.b\$"), r"a\.b\$");
         assert_eq!(ok("é"), r"\x{E9}");
+        assert_eq!(ok(r"\A[a-z]+\z"), r"\A[a-z]+\z");
     }
 
     #[test]
     fn legacy_grammar_is_read_when_it_means_the_same() {
         // `\-` outside a class is legacy-only syntax.
         assert_eq!(ok(r"^\d{3}\-\d{4}$"), "^[0-9]{3}-[0-9]{4}$");
+        // So is a control escape spelled with a digit or `_`, in a class.
+        assert_eq!(ok(r"[\c1]"), r"\x{11}");
+        assert_eq!(ok(r"[\c_]"), r"\x{1F}");
         // A legacy `.` could match half of an astral character.
         assert!(translate(r"\-.").is_err());
         assert!(translate(r"\-[^a]").is_err());
@@ -594,6 +607,7 @@ mod tests {
     fn what_differs_is_refused() {
         for pattern in [
             r"\bword\b",
+            r"a\Z",
             "a(?=b)",
             "(?<!a)b",
             r"(a)\1",
@@ -605,8 +619,6 @@ mod tests {
             "a{0,1001}",
             r"(?:a{2}){600}",
             r"^(?:[a-z0-9]{1,63}\.){1,127}$",
-            r"[\c1]",
-            r"[\c_]",
             r"[\c]",
             r"[\c-x]",
             "(?<n>a|(?<n>b))",
@@ -616,7 +628,6 @@ mod tests {
             &format!("(?:(?:{}){{1000}}){{0}}", "x".repeat(3400)),
             &format!("(?:{}){{1000}}", "^".repeat(1700)),
             "(?:(?:a{1000}){2}){0}",
-            r"[\cA]",
             r"\-(?<n>a|(?<n>b))",
             "a\\",
             r"^\d+$\",
