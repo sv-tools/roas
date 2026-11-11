@@ -286,7 +286,7 @@ pub(crate) fn evaluate_parsed(
                     missing(
                         expression,
                         format!(
-                            "workflow `{}` of source `{}`, which the source has not got",
+                            "workflow `{}` of source `{}`, which no supplied document of that source declares",
                             rest[1], rest[0]
                         ),
                     )

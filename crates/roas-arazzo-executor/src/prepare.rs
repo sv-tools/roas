@@ -713,6 +713,18 @@ impl<'d> Compiler<'d> {
     }
 
     fn target(&mut self, id: &str, site: &Site<'d>) {
+        match self.resolve_target(id) {
+            Ok(Some(target)) => {
+                self.pending.insert(target);
+            }
+            Ok(None) => {}
+            Err(error) => self.error(site, error),
+        }
+    }
+
+    /// Resolve a workflow reference, listing the source it needs.
+    /// `None`: a source the caller supplies before full preparation.
+    fn resolve_target(&mut self, id: &str) -> Result<Option<(Doc, usize)>, ExecutionError> {
         let unsupplied = self.unsupplied_external(id);
         if self.current == Doc::ENTRY
             && let Some(alias) = Documents::alias(id)
@@ -723,12 +735,10 @@ impl<'d> Compiler<'d> {
             self.required_sources.insert(alias.into());
         }
         match self.documents.resolve(self.current, id) {
-            Ok((doc, index)) => {
-                self.pending.insert((doc, index));
-            }
+            Ok(target) => Ok(Some(target)),
             // Listed above; the caller supplies it before full preparation.
-            Err(_) if unsupplied.is_some() && !self.resolve_operations => {}
-            Err(error) => self.error(site, error),
+            Err(_) if unsupplied.is_some() && !self.resolve_operations => Ok(None),
+            Err(error) => Err(error),
         }
     }
 
@@ -1508,20 +1518,24 @@ impl<'d> Compiler<'d> {
                     if parsed.source_workflow().is_some_and(|(alias, _)| {
                         self.description().source_descriptions.iter().any(|source| {
                             source.name == alias
-                                && source.type_.is_none_or(|kind| kind == SourceType::Arazzo)
+                                && (source.type_ == Some(SourceType::Arazzo)
+                                    // Untyped: judged by its document, once there is one.
+                                    || (source.type_.is_none()
+                                        && (!self.resolve_operations
+                                            || self
+                                                .documents
+                                                .linked(self.current, alias)
+                                                .is_some())))
                         })
                     }) =>
                 {
-                    // Reading a workflow's outputs needs its document as
-                    // running one does; a run reports it if it did not run.
-                    self.target(
-                        &format!(
-                            "$sourceDescriptions.{}.{}",
-                            parsed.parts[0], parsed.parts[1]
-                        ),
-                        site,
-                    );
-                    None
+                    // A read needs the workflow's document, but runs nothing:
+                    // whatever does run it is what compiles it.
+                    self.resolve_target(&format!(
+                        "$sourceDescriptions.{}.{}",
+                        parsed.parts[0], parsed.parts[1]
+                    ))
+                    .err()
                 }
                 Root::Sources
                     if !self

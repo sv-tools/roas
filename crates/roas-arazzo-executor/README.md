@@ -215,7 +215,7 @@ with a `#/pointer` as `$workflows.<id>` takes one. The spec defines no form for 
 read; its grammar allows it, and a workflow of the source comes before a field of
 the Source Description, as the spec orders them. It reads a workflow that finished
 in this run, however it ran; one that has not is a runtime error, as for any workflow
-that has not run, and one the source does not declare is a preparation error.
+that has not run, and one an Arazzo source does not declare is a preparation error.
 `$workflows.<id>` stays the document's own: a same-named local workflow is a
 different workflow.
 

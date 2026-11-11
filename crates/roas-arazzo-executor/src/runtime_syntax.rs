@@ -226,8 +226,12 @@ impl<'a> Parser<'a> {
     /// other reference — an operationId has no character restrictions.
     fn source_reference(&mut self) -> Result<bool, ExpressionError> {
         let (at, parts) = (self.at, self.parts.len());
+        // `[`: a condition operand's navigation, which its caller owns.
         if self.workflow_field().is_ok()
-            && (self.rest().is_empty() || self.rest().starts_with("#/"))
+            && (self.rest().is_empty()
+                || self.rest() == "#"
+                || self.rest().starts_with("#/")
+                || self.rest().starts_with('['))
         {
             return Ok(true);
         }
@@ -418,6 +422,9 @@ mod tests {
         let (base, at) = prefix("$response.body.pets[0].name").unwrap();
         assert_eq!(base.text, "$response.body");
         assert_eq!(at, "$response.body".len());
+        let (base, at) = prefix("$sourceDescriptions.a.w.outputs.list[0]").unwrap();
+        assert_eq!(base.source_workflow(), Some(("a", "w")));
+        assert_eq!(at, "$sourceDescriptions.a.w.outputs.list".len());
         let (base, at) = prefix("$response.body#/pets[0].name").unwrap();
         assert_eq!(base.pointer, Some("/pets[0].name"));
         assert_eq!(at, "$response.body#/pets[0].name".len());

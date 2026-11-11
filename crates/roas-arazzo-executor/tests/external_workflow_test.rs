@@ -1918,7 +1918,10 @@ fn an_api_source_has_no_workflows_to_read() {
         &mut Fake::new(),
     )
     .unwrap_err();
-    assert!(error.to_string().contains("has not got"), "got: {error}");
+    assert!(
+        error.to_string().contains("no supplied document"),
+        "got: {error}"
+    );
 }
 
 #[test]
@@ -1943,4 +1946,136 @@ fn a_dependency_that_reads_an_external_one_waits_for_it_under_parallel() {
     };
     assert!(together("plain"));
     assert!(!together("$sourceDescriptions.shared.child.outputs.value"));
+}
+
+#[test]
+fn a_condition_reads_an_external_workflow_with_navigation() {
+    let mut documents = standard();
+    let mut dependent = reading(
+        "dependent",
+        json!(["$sourceDescriptions.shared.child"]),
+        "plain",
+    );
+    dependent["steps"][0]["successCriteria"] =
+        json!([{ "condition": "$sourceDescriptions.shared.child.outputs.value[0] == 7" }]);
+    documents[0].1 = with_workflow(documents[0].1.clone(), dependent);
+    let graph = Graph::new(&documents);
+    let replies = |first| {
+        Fake::new()
+            .reply(200, &json!({ "value": [first] }))
+            .reply(200, &ok("root"))
+    };
+    let options = graph.options("dependent");
+    prepare(&graph.description, &options).unwrap();
+    let passed = execute(&graph.description, &options, &mut replies(7)).unwrap();
+    assert!(passed.is_success(), "{passed}");
+    let failed = execute(&graph.description, &options, &mut replies(8)).unwrap();
+    assert!(!failed.is_success(), "{failed}");
+}
+
+#[test]
+fn an_empty_pointer_reads_the_whole_field() {
+    let mut documents = standard();
+    let mut dependent = reading(
+        "dependent",
+        json!(["$sourceDescriptions.shared.child"]),
+        "plain",
+    );
+    dependent["outputs"] = json!({ "all": "$sourceDescriptions.shared.child.outputs#" });
+    documents[0].1 = with_workflow(documents[0].1.clone(), dependent);
+    let graph = Graph::new(&documents);
+    let report = execute(
+        &graph.description,
+        &graph.options("dependent"),
+        &mut Fake::new().reply(200, &ok("v")).reply(200, &ok("root")),
+    )
+    .unwrap();
+    assert_eq!(report.outputs["all"]["value"], "v");
+}
+
+#[test]
+fn a_workflow_that_is_only_read_is_not_compiled() {
+    let mut documents = standard();
+    documents[2].1 = with_workflow(
+        documents[2].1.clone(),
+        json!({ "workflowId": "broken", "steps": [{ "stepId": "get",
+            "operationId": "$sourceDescriptions.api.getThing",
+            "parameters": [{ "name": "id", "in": "query", "value": "$nonsense.x" }] }] }),
+    );
+    let mut dependent = reading("dependent", json!([]), "plain");
+    dependent["steps"][0]["successCriteria"] = json!([{
+        "condition": "$statusCode == 200 || $sourceDescriptions.shared.broken.outputs.x == 1"
+    }]);
+    documents[0].1 = with_workflow(documents[0].1.clone(), dependent);
+    let graph = Graph::new(&documents);
+    let options = graph.options("dependent");
+    let plan = prepare(&graph.description, &options).unwrap();
+    let report = plan
+        .execute(&mut Fake::new().reply(200, &ok("root")))
+        .unwrap();
+    assert!(report.is_success(), "{report}");
+}
+
+#[test]
+fn an_untyped_api_source_is_no_preparation_error() {
+    let mut documents = standard();
+    let sources = documents[0].1["sourceDescriptions"].as_array_mut().unwrap();
+    for source in sources.iter_mut() {
+        if source["name"] == "api" {
+            source.as_object_mut().unwrap().remove("type");
+        }
+    }
+    let mut dependent = reading("dependent", json!([]), "plain");
+    dependent["steps"][0]["successCriteria"] = json!([{
+        "condition": "$statusCode == 200 || $sourceDescriptions.api.w.outputs.x == 1"
+    }]);
+    documents[0].1 = with_workflow(documents[0].1.clone(), dependent);
+    let graph = Graph::new(&documents);
+    prepare(&graph.description, &graph.options("dependent")).unwrap();
+}
+
+#[test]
+fn a_bad_read_is_located_by_its_offset() {
+    let mut documents = standard();
+    documents[0].1 = with_workflow(
+        documents[0].1.clone(),
+        reading(
+            "dependent",
+            json!([]),
+            "aaaa {$sourceDescriptions.shared.nope.outputs.x}",
+        ),
+    );
+    let graph = Graph::new(&documents);
+    let error = prepare(&graph.description, &graph.options("dependent")).unwrap_err();
+    assert_eq!(error.diagnostics[0].offset, Some(6), "{error}");
+}
+
+#[test]
+fn a_read_names_the_document_it_is_written_in() {
+    // `shared` reads the entry's `child` through its link back; the
+    // entry has its own, same-named one to tell apart from `shared`'s.
+    let mut documents = standard();
+    documents[2].1["sourceDescriptions"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "name": "back", "url": ROOT, "type": "arazzo" }));
+    let mut reader = reading("reader", json!(["$sourceDescriptions.back.child"]), "plain");
+    reader["outputs"] = json!({ "value": "$sourceDescriptions.back.child.outputs.value" });
+    documents[2].1 = with_workflow(documents[2].1.clone(), reader);
+    documents[0].1 = with_workflow(
+        documents[0].1.clone(),
+        json!({ "workflowId": "entry",
+            "steps": [{ "stepId": "call", "workflowId": "$sourceDescriptions.shared.reader" }],
+            "outputs": { "value": "$steps.call.outputs.value" } }),
+    );
+    let graph = Graph::new(&documents);
+    let report = execute(
+        &graph.description,
+        &graph.options("entry"),
+        &mut Fake::new()
+            .reply(200, &ok("from the entry"))
+            .reply(200, &ok("reader")),
+    )
+    .unwrap();
+    assert_eq!(report.outputs["value"], "from the entry");
 }
