@@ -767,6 +767,13 @@ fn validated_description() -> serde_json::Value {
             "OneAliased": {"oneOf": [{"$ref": "#/components/schemas/IntCatch"}, {"$ref": "#/components/schemas/AliasB"}]},
             "IntA": {"type": "object", "properties": {"a": {"type": "integer"}}},
             "OneGated": {"oneOf": [{"$ref": "#/components/schemas/GatedInt"}, {"$ref": "#/components/schemas/IntA"}]},
+            "SubAliased": {"type": "object", "properties": {"a": {"type": "string"}, "d": {"$ref": "#/components/schemas/Money"}}, "additionalProperties": {"type": "integer"}},
+            "OneSubAliased": {"oneOf": [{"$ref": "#/components/schemas/SubAliased"}, {"$ref": "#/components/schemas/AliasB"}]},
+            "AllSubAliased": {"allOf": [{"$ref": "#/components/schemas/SubAliased"}, {"type": "object", "properties": {"q": {"type": "integer"}}}]},
+            "ShortAliased": {"type": "object", "properties": {"a": {"type": "string", "maxLength": 2}}},
+            "OneShortAliased": {"oneOf": [{"$ref": "#/components/schemas/ShortAliased"}, {"type": "integer"}]},
+            "HoldsShortAliased": {"type": "object", "properties": {"inner": {"$ref": "#/components/schemas/ShortAliased"}}},
+            "OneHoldsShortAliased": {"oneOf": [{"$ref": "#/components/schemas/HoldsShortAliased"}, {"type": "integer"}]},
             "Ip": {"oneOf": [{"type": "string", "format": "ipv4"}, {"type": "string", "maxLength": 3}]},
             "StringOnly": {"type": "string", "enum": ["a", "b"]},
             "ObjectOnly": {"type": "object", "additionalProperties": false, "properties": {"s": {"$ref": "#/components/schemas/StringOnly"}}},
@@ -824,7 +831,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
-        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedInt": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedClosed": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "IntCatch": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
+        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedInt": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedClosed": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "SubAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "ShortAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "IntCatch": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
@@ -1209,6 +1216,11 @@ fn main() {
     assert_eq!(report::<OneAliased>(r#"{"aa":"x"}"#), vec![u("")]);
     assert_eq!(report::<OneGated>(r#"{"a":5}"#), vec![u("")]);
     assert_eq!(report::<GatedIntAll>(r#"{"a":5}"#), vec![u("")]);
+    // ...also beside a substitution, and its checks prove nothing either.
+    assert_eq!(report::<OneSubAliased>(r#"{"aa":"x"}"#), vec![u("")]);
+    assert_eq!(report::<AllSubAliased>(r#"{"aa":"x"}"#), vec![u("")]);
+    assert_eq!(report::<OneShortAliased>(r#"{"aa":"xyz"}"#), vec![u("")]);
+    assert_eq!(report::<OneHoldsShortAliased>(r#"{"inner":{"aa":"xyz"}}"#), vec![u("")]);
     let caught: IntCatch = serde_json::from_str(r#"{"aa":"x","b":7,"c":1.0}"#).unwrap();
     assert_eq!(caught.a.as_deref(), Some("x"));
     assert_eq!(serde_json::to_string(&caught).unwrap(), r#"{"a":"x","b":7,"c":1}"#);
@@ -1555,7 +1567,8 @@ func main() {
 	check(`{"x":""}`, report[api.PatAdd](`{"x":""}`), u(""))
 	check(`{"x":1}`, report[api.PatMapAdd](`{"x":1}`), u(""))
 	check(`{"x":1}`, report[api.IntCatchOrStr](`{"x":1}`))
-	// Go has no cfg gates or aliases: these decode and match.
+	// Go has no cfg gates or aliases: these decode and match (beside a
+	// substitution, a failed decode is undecided in Go too).
 	check(`{"aa":5}`, report[api.AliasU](`{"aa":5}`))
 	check(`{"a":"xyz"}`, report[api.GatedIntU](`{"a":"xyz"}`))
 	check(`{"a":"xyz"}`, report[api.GatedIntAll](`{"a":"xyz"}`))
@@ -1565,6 +1578,10 @@ func main() {
 	check(`{"aa":"x"}`, report[api.OneAliased](`{"aa":"x"}`))
 	check(`{"a":5}`, report[api.OneGated](`{"a":5}`))
 	check(`{"a":5}`, report[api.GatedIntAll](`{"a":5}`), v(""))
+	check(`{"aa":"x"}`, report[api.OneSubAliased](`{"aa":"x"}`), u(""))
+	check(`{"aa":"x"}`, report[api.AllSubAliased](`{"aa":"x"}`), u(""))
+	check(`{"aa":"xyz"}`, report[api.OneShortAliased](`{"aa":"xyz"}`))
+	check(`{"inner":{"aa":"xyz"}}`, report[api.OneHoldsShortAliased](`{"inner":{"aa":"xyz"}}`))
 	check(`{"a":{"kind":"ZooCat"}}`, report[api.ZooOrStr](`{"a":{"kind":"ZooCat"}}`))
 	check(`"x"`, report[api.Ip](`"x"`), u(""))
 	check(`[]`, report[api.InlineItems](`[]`))

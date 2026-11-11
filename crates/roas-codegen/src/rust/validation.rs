@@ -785,13 +785,17 @@ pub(crate) fn body(
             let wide = rust_wide(ir, u.branches.iter().map(|b| &b.ty));
             for (b, branch_view) in u.branches.iter().zip(&view.branches) {
                 let accessor = &branch_view.accessor;
-                let (body, reads) = branch(ir, b, &progressing, ("branch", "&mut branch"));
+                // Read by other names than the schema, a decoded branch is
+                // no proof either way, and neither is what its checks find:
+                // an alias's member is checked as the field it is read into.
+                let renamed = checks::reaches_reshaped(ir, &b.ty, reshaped);
+                let (body, reads) = if renamed {
+                    (Vec::new(), false)
+                } else {
+                    branch(ir, b, &progressing, ("branch", "&mut branch"))
+                };
                 // Decoding proves a match only when nothing the branch says
                 // goes unchecked.
-                // Read by other names than the schema, a decoded branch is
-                // no proof either way.
-                let renamed = !checks::reaches_extern(ir, &b.ty)
-                    && checks::reaches_decoder_rules(ir, &b.ty, reshaped);
                 let sure =
                     !checks::unsure(b) && !renamed && (!generated(&b.ty) || progressing(&b.ty));
                 let counter = if sure { "certain" } else { "uncertain" };
@@ -845,9 +849,14 @@ pub(crate) fn body(
                     "does not satisfy the allOf part read by {}",
                     accessor.trim_start_matches("as_")
                 );
-                let (mut body, reads) = branch(ir, b, &progressing, ("report", "report"));
-                let renamed = !checks::reaches_extern(ir, &b.ty)
-                    && checks::reaches_decoder_rules(ir, &b.ty, reshaped);
+                // Read by other names than the schema, neither a decoded part
+                // nor what its checks find is proof: it is not walked.
+                let renamed = checks::reaches_reshaped(ir, &b.ty, reshaped);
+                let (mut body, reads) = if renamed {
+                    (Vec::new(), false)
+                } else {
+                    branch(ir, b, &progressing, ("report", "report"))
+                };
                 if renamed {
                     body.push(format!(
                         "report.unevaluated(pointer, {:?});",
