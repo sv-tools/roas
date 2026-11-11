@@ -198,34 +198,45 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                     ValueKind::Integer(_) => {
                         // Exactly, as integers; a fraction is no integer's value.
                         // One written as a float past 2^53, read as one,
-                        // stands for any integer near it: equal to it is
-                        // undecided.
-                        let ints = |held: bool| {
-                            let mut set: Vec<i128> = values
-                                .iter()
-                                .filter(|n| checks::integer_held(n) == held)
-                                .filter_map(checks::exact_integer)
-                                .collect();
-                            set.sort_unstable();
-                            set.dedup();
-                            set.iter().map(i128::to_string).collect::<Vec<_>>().join(", ")
-                        };
-                        let (held, unheld) = (ints(true), ints(false));
+                        // stands for every integer that rounds to it: equal
+                        // to it once rounded is undecided.
+                        let mut held: Vec<i128> = values
+                            .iter()
+                            .filter(|n| checks::integer_held(n))
+                            .filter_map(checks::exact_integer)
+                            .collect();
+                        held.sort_unstable();
+                        held.dedup();
+                        let mut unheld: Vec<f64> = values
+                            .iter()
+                            .filter(|n| !checks::integer_held(n))
+                            .filter_map(serde_json::Number::as_f64)
+                            .filter(|f| f.is_finite() && f.fract() == 0.0)
+                            .collect();
+                        unheld.sort_by(f64::total_cmp);
+                        unheld.dedup();
                         let violation = format!(
                             "{r}.violation({p}, format!(\"{{}} is not {what}\", {v}.0));"
                         );
                         let missed = if unheld.is_empty() {
                             violation
                         } else {
+                            let list = unheld
+                                .iter()
+                                .map(|f| format!("{f:?}"))
+                                .collect::<Vec<_>>()
+                                .join(", ");
                             format!(
-                                "if [{unheld}].contains(&{int}) {{ {r}.unevaluated({p}, {:?}); }} else {{ {violation} }}",
+                                "if [{list}].contains(&({v}.0 as f64)) {{ {r}.unevaluated({p}, {:?}); }} else {{ {violation} }}",
                                 format!("{keyword} {literal}: a listed value was read as a float, which does not tell the integers near it apart")
                             )
                         };
                         out.push(if held.is_empty() {
                             missed
                         } else {
-                            format!("if ![{held}].contains(&{int}) {{ {missed} }}")
+                            let list =
+                                held.iter().map(i128::to_string).collect::<Vec<_>>().join(", ");
+                            format!("if ![{list}].contains(&{int}) {{ {missed} }}")
                         });
                     }
                     ValueKind::Number(FloatWidth::Float) => {

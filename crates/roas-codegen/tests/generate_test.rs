@@ -1677,3 +1677,34 @@ fn a_struct_whose_patterns_decide_nothing_compiles_alone() {
         }
     }
 }
+
+#[cfg(not(feature = "exact-numbers"))]
+#[test]
+fn an_integer_const_read_as_a_float_past_2_53_is_compared_rounded() {
+    // Read as an f64, `9007199254740993.0` stands for every integer that
+    // rounds to its float: those are undecided, not violations.
+    for language in [Target::Rust, Target::Go] {
+        let config = ConfigFile::from_toml("validation = true", Path::new("/"))
+            .unwrap()
+            .merge(target(language))
+            .build()
+            .unwrap();
+        let g = generate(
+            &document(serde_json::json!({
+                "C": {"type": "integer", "const": 9007199254740992.0}
+            })),
+            &config,
+        )
+        .unwrap();
+        let code = g
+            .files
+            .iter()
+            .map(|f| f.contents.as_str())
+            .collect::<String>();
+        let rounded = match language {
+            Target::Rust => "as f64)",
+            Target::Go => "float64(int64(",
+        };
+        assert!(code.contains(rounded), "{code}");
+    }
+}
