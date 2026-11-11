@@ -1126,7 +1126,8 @@ fn malformed_composition_annotations_and_projection_extensions_are_reported_in_p
     let g = generate(
         &document(serde_json::json!({
             "A": {"deprecated": "yes", "title": 5, "anyOf": [{"type": "string"}, {"type": "boolean"}]},
-            "Loose": {"properties": {"x": {"type": "string", "x-rust-attrs": "#[doc = \"x\"]"}}}
+            "Loose": {"properties": {"x": {"type": "string", "x-rust-attrs": "#[doc = \"x\"]"}}},
+            "Tilde": {"type": "object", "properties": {"~x": {"type": "string", "x-rust-attrs": "#[doc = \"x\"]"}, "a/b": {"type": "string", "x-rust-attrs": "#[doc = \"x\"]"}}}
         })),
         &rust_config(""),
     )
@@ -1147,6 +1148,38 @@ fn malformed_composition_annotations_and_projection_extensions_are_reported_in_p
         .collect();
     assert_eq!(
         ignored,
-        ["/components/schemas/Loose/properties/x/x-rust-attrs"]
+        [
+            "/components/schemas/Loose/properties/x/x-rust-attrs",
+            "/components/schemas/Tilde/properties/a~1b/x-rust-attrs",
+            "/components/schemas/Tilde/properties/~0x/x-rust-attrs",
+        ]
     );
+}
+
+#[test]
+fn a_component_keeps_its_name_beside_a_titled_inline_schema() {
+    let components = serde_json::json!({
+        "Shape": {"type": "string"},
+        "H": {"type": "object", "properties": {
+            "p": {"title": "Shape", "oneOf": [{"type": "integer"}, {"type": "boolean"}]},
+            "o": {"title": "Shape", "type": "object", "properties": {"z": {"type": "string"}}}
+        }}
+    });
+    for (language, want) in [
+        (Target::Rust, "pub struct Shape(pub String);"),
+        (Target::Go, "type Shape string"),
+    ] {
+        let config = ConfigFile::from_toml("", Path::new("/"))
+            .unwrap()
+            .merge(target(language))
+            .build()
+            .unwrap();
+        let generation = generate(&document(components.clone()), &config).unwrap();
+        let text = generation
+            .files
+            .iter()
+            .map(|f| f.contents.as_str())
+            .collect::<String>();
+        assert!(text.contains(want), "{text}");
+    }
 }

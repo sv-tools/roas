@@ -389,7 +389,18 @@ impl Builder<'_> {
                 self.package_names.reserve(reserved);
             }
         }
-        for id in &self.ir.order {
+        // Components first: a component keeps its name whatever an inline
+        // schema is titled or positioned to be called.
+        let ir = self.ir;
+        let order = ir
+            .order
+            .iter()
+            .filter(|id| ir.types[*id].component.is_some());
+        let rest = ir
+            .order
+            .iter()
+            .filter(|id| ir.types[*id].component.is_none());
+        for id in order.chain(rest) {
             let def = &self.ir.types[id];
             if matches!(def.kind, TypeKind::Extern) || self.suppressed.contains(id) {
                 continue;
