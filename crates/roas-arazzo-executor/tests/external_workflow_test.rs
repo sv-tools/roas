@@ -2079,3 +2079,37 @@ fn a_read_names_the_document_it_is_written_in() {
     .unwrap();
     assert_eq!(report.outputs["value"], "from the entry");
 }
+
+#[test]
+fn a_step_depending_on_a_step_of_an_external_workflow_runs_it_first() {
+    let mut documents = standard();
+    let mut dependent = reading("dependent", json!([]), "plain");
+    dependent["steps"][0]["dependsOn"] = json!(["$sourceDescriptions.shared.child.steps.get"]);
+    documents[0].1 = with_workflow(documents[0].1.clone(), dependent);
+    let graph = Graph::new(&documents);
+    let options = graph.options("dependent");
+    assert!(
+        required_sources(&graph.description, &Options::new().workflow("dependent"))
+            .unwrap()
+            .contains("shared")
+    );
+    let plan = prepare(&graph.description, &options).unwrap();
+    for report in [
+        plan.execute(&mut Fake::new().reply(200, &ok("child")).reply(200, &ok("root")))
+            .unwrap(),
+        execute(
+            &graph.description,
+            &options,
+            &mut Fake::new().reply(200, &ok("child")).reply(200, &ok("root")),
+        )
+        .unwrap(),
+    ] {
+        assert!(report.is_success(), "{report}");
+        let order: Vec<_> = report
+            .steps
+            .iter()
+            .map(|step| (step.document.is_some(), step.workflow_id.as_str()))
+            .collect();
+        assert_eq!(order, [(true, "child"), (false, "dependent")]);
+    }
+}

@@ -724,6 +724,10 @@ fn run_arazzo_list(args: ArazzoListArgs) -> Result<()> {
         if !workflow.depends_on.is_empty() {
             println!("  depends on: {}", workflow.depends_on.join(", "));
         }
+        let step_dependencies = other_steps_of(workflow);
+        if !step_dependencies.is_empty() {
+            println!("  depends on steps: {}", step_dependencies.join(", "));
+        }
         let inputs = inputs_of(workflow);
         if !inputs.is_empty() {
             println!("  inputs: {}", inputs.join(", "));
@@ -740,6 +744,28 @@ fn run_arazzo_list(args: ArazzoListArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The steps of other workflows a workflow's steps depend on.
+fn other_steps_of(workflow: &v1_1::Workflow) -> Vec<&str> {
+    let own = format!("$workflows.{}.steps.", workflow.workflow_id);
+    let mut entries: Vec<&str> = workflow
+        .steps
+        .iter()
+        .flat_map(|step| &step.depends_on)
+        .map(String::as_str)
+        .filter(|entry| {
+            entry.contains(".steps.")
+                && !entry.starts_with(&own)
+                && (entry.starts_with("$sourceDescriptions.")
+                    || entry
+                        .strip_prefix("$workflows.")
+                        .is_some_and(|rest| !rest.starts_with('$')))
+        })
+        .collect();
+    entries.sort_unstable();
+    entries.dedup();
+    entries
 }
 
 /// The inputs a workflow takes, read off the JSON Schema it describes
@@ -4040,7 +4066,17 @@ workflows:
                             "note": {}
                         }
                     },
-                    "steps": [{ "stepId": "findPet", "operationId": "getPetById" }]
+                    "steps": [{ "stepId": "findPet", "operationId": "getPetById" }, {
+                        "stepId": "orderPet",
+                        "operationId": "order",
+                        "dependsOn": [
+                            "findPet",
+                            "$workflows.buyPet.steps.findPet",
+                            "$workflows.authenticate.steps.login",
+                            "$workflows.authenticate.steps.login",
+                            "$workflows.$x.steps.login"
+                        ]
+                    }]
                 }, {
                     "workflowId": "authenticate",
                     "steps": [{ "stepId": "login", "operationId": "login" }]
@@ -4064,6 +4100,15 @@ workflows:
         assert!(
             inputs_of(&description.workflows[1]).is_empty(),
             "a workflow that takes nothing lists nothing"
+        );
+        assert_eq!(
+            other_steps_of(&description.workflows[0]),
+            ["$workflows.authenticate.steps.login"],
+            "only another workflow's steps are listed, once each"
+        );
+        assert!(
+            other_steps_of(&description.workflows[1]).is_empty(),
+            "a workflow whose steps depend on nothing else lists nothing"
         );
     }
 

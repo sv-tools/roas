@@ -575,8 +575,10 @@ pub struct Run<'d> {
     /// for.
     queue: Vec<(Doc, &'d Workflow)>,
     /// Workflows that finished as a dependency — of the root, or of a
-    /// call, `goto` or `retry` target — each of which runs once in a run.
-    dependencies_done: BTreeSet<(Doc, String)>,
+    /// call, `goto` or `retry` target — each of which runs once in a run —
+    /// with the steps that ran in it, for a step of another workflow that
+    /// depends on one of them.
+    dependencies_done: BTreeMap<(Doc, String), BTreeSet<String>>,
     /// Entries waiting for their dependencies, innermost last.
     deferred: Vec<Deferred<'d>>,
     /// Finished workflows, per document: `$workflows.<id>` names a workflow
@@ -730,7 +732,7 @@ impl<'d> Run<'d> {
             documents,
             frames: Vec::new(),
             queue,
-            dependencies_done: BTreeSet::new(),
+            dependencies_done: BTreeMap::new(),
             deferred: Vec::new(),
             pending: Vec::new(),
             requests: 0,
@@ -1045,7 +1047,7 @@ impl<'d> Run<'d> {
                 let description = self.documents.get(frame.doc).description;
                 let mut needs = steps_named_by(step, frame.workflow, description)
                     .map_err(|error| locate(&self.documents, frame.doc, error))?;
-                needs.extend(step.depends_on.iter().cloned());
+                needs.extend(own_steps(frame.workflow, step));
                 if self
                     .pending
                     .iter()
@@ -1060,7 +1062,7 @@ impl<'d> Run<'d> {
                 let description = self.documents.get(frame.doc).description;
                 let mut needs = steps_named_by(step, frame.workflow, description)
                     .map_err(|error| locate(&self.documents, frame.doc, error))?;
-                needs.extend(step.depends_on.iter().cloned());
+                needs.extend(own_steps(frame.workflow, step));
                 // The workflow's own actions are judged after this step.
                 needs.extend(
                     workflow_action_reads(frame.workflow, description)
@@ -1077,6 +1079,16 @@ impl<'d> Run<'d> {
                     }
                     return Ok(self.join(listening.subscription));
                 }
+            }
+
+            // A step of another workflow this one depends on ran when
+            // that workflow did, first. A step that cannot start waits
+            // for what is in flight, as below.
+            if let Err(error) = self.other_steps_ran(frame, index) {
+                if !self.pending.is_empty() {
+                    return Ok(Progress::Await(None));
+                }
+                return Err(locate(&self.documents, frame.doc, error));
             }
 
             // A step that cannot start while others are in flight waits
@@ -1757,7 +1769,7 @@ impl<'d> Run<'d> {
         remaining.retain(|(doc, dependency)| {
             !self
                 .dependencies_done
-                .contains(&(*doc, dependency.workflow_id.clone()))
+                .contains_key(&(*doc, dependency.workflow_id.clone()))
         });
         if remaining.is_empty() {
             return self.enter(doc, workflow, inputs, Some(caller));
@@ -1814,7 +1826,7 @@ impl<'d> Run<'d> {
             let (doc, dependency) = deferred.remaining.remove(0);
             if self
                 .dependencies_done
-                .contains(&(doc, dependency.workflow_id.clone()))
+                .contains_key(&(doc, dependency.workflow_id.clone()))
             {
                 continue;
             }
@@ -1822,6 +1834,41 @@ impl<'d> Run<'d> {
             let inputs = Value::Object(self.root_inputs.clone());
             return self.enter(doc, dependency, inputs, Some((step_id, Then::Dependency)));
         }
+    }
+
+    /// Whether every step of another workflow that step `index` depends
+    /// on ran — passed or not — in the run of its workflow that served as
+    /// the dependency.
+    fn other_steps_ran(&self, frame: &Frame<'d>, index: usize) -> Result<(), ExecutionError> {
+        for entry in &frame.workflow.steps[index].depends_on {
+            let Some((reference, step_id)) = other_step(frame.workflow, entry) else {
+                continue;
+            };
+            let (doc, at) = self.documents.resolve(frame.doc, reference)?;
+            let workflow = self.documents.workflow(doc, at);
+            if !workflow.steps.iter().any(|step| step.step_id == step_id) {
+                return Err(ExecutionError::UnknownStep {
+                    workflow: workflow.workflow_id.clone(),
+                    step: step_id.to_owned(),
+                });
+            }
+            // The run that served as the dependency, not a later call.
+            let ran = self
+                .dependencies_done
+                .get(&(doc, workflow.workflow_id.clone()))
+                .is_some_and(|steps| steps.contains(step_id));
+            if !ran {
+                return Err(ExpressionError::NotRun {
+                    expression: entry.clone(),
+                    what: format!(
+                        "step `{step_id}` of workflow `{}` when it ran as a dependency",
+                        workflow.workflow_id
+                    ),
+                }
+                .into());
+            }
+        }
+        Ok(())
     }
 
     /// Finish the top frame: name its outputs and give them to whoever
@@ -1857,8 +1904,10 @@ impl<'d> Run<'d> {
         self.fresh
             .insert((frame.doc, frame.workflow.workflow_id.clone()));
         if is_dependency(&frame) {
-            self.dependencies_done
-                .insert((frame.doc, frame.workflow.workflow_id.clone()));
+            self.dependencies_done.insert(
+                (frame.doc, frame.workflow.workflow_id.clone()),
+                frame.steps.keys().cloned().collect(),
+            );
         }
 
         let Some((step_id, then)) = frame.caller else {
@@ -1880,7 +1929,7 @@ impl<'d> Run<'d> {
                 while self.queue.len() > 1
                     && self
                         .dependencies_done
-                        .contains(&(self.queue[0].0, self.queue[0].1.workflow_id.clone()))
+                        .contains_key(&(self.queue[0].0, self.queue[0].1.workflow_id.clone()))
                 {
                     self.queue.remove(0);
                 }
@@ -2843,6 +2892,62 @@ fn encode(text: &str) -> String {
     encoded
 }
 
+/// A step's `dependsOn` entry naming a step of another workflow —
+/// `$workflows.<workflowId>.steps.<stepId>`, or
+/// `$sourceDescriptions.<name>.<workflowId>.steps.<stepId>` in another
+/// document: the workflow, as a workflow's `dependsOn` names one, and
+/// the step. `None` for a step of `workflow` itself. A
+/// `$sourceDescriptions` entry always names another workflow: one that
+/// leads back to `workflow` is a dependency cycle.
+pub(crate) fn other_step<'s>(workflow: &Workflow, entry: &'s str) -> Option<(&'s str, &'s str)> {
+    let (reference, step) = entry.rsplit_once(".steps.")?;
+    match reference.strip_prefix("$workflows.") {
+        Some(id) if id == workflow.workflow_id || id.starts_with('$') => None,
+        Some(id) => Some((id, step)),
+        None => reference
+            .starts_with("$sourceDescriptions.")
+            .then_some((reference, step)),
+    }
+}
+
+/// The step of `workflow` itself a `dependsOn` entry names: a bare id, or
+/// `$workflows.<its id>.steps.<stepId>`.
+fn own_step<'s>(workflow: &Workflow, entry: &'s str) -> Option<&'s str> {
+    if other_step(workflow, entry).is_some() {
+        return None;
+    }
+    Some(
+        entry
+            .strip_prefix("$workflows.")
+            .and_then(|rest| rest.rsplit_once(".steps."))
+            .filter(|(id, _)| *id == workflow.workflow_id)
+            .map_or(entry, |(_, step)| step),
+    )
+}
+
+/// The steps of its own workflow `step` depends on.
+fn own_steps(workflow: &Workflow, step: &Step) -> Vec<String> {
+    step.depends_on
+        .iter()
+        .filter_map(|entry| own_step(workflow, entry))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Every workflow that runs before `workflow`: its `dependsOn`, and the
+/// workflows whose steps one of its steps depends on.
+pub(crate) fn workflow_dependencies(workflow: &Workflow) -> impl Iterator<Item = &str> {
+    workflow
+        .depends_on
+        .iter()
+        .map(String::as_str)
+        .chain(workflow.steps.iter().flat_map(move |step| {
+            step.depends_on.iter().filter_map(move |entry| {
+                other_step(workflow, entry).map(|(reference, _)| reference)
+            })
+        }))
+}
+
 /// The workflows to run, in an order that respects `dependsOn`, ending
 /// with the one that was asked for.
 pub(crate) fn ordered_workflows<'d>(
@@ -2889,7 +2994,7 @@ fn visit<'d>(
             ExecutionError::Circular(workflow.workflow_id.clone()),
         ));
     }
-    for reference in &workflow.depends_on {
+    for reference in workflow_dependencies(workflow) {
         let (target, at) = documents
             .resolve(doc, reference)
             .map_err(|error| locate(documents, doc, error))?;
@@ -3185,12 +3290,14 @@ fn visit_step(
         return Err(ExecutionError::Circular(step.step_id.clone()));
     }
     for id in &step.depends_on {
-        let at = index
-            .get(id.as_str())
-            .ok_or_else(|| ExecutionError::UnknownStep {
-                workflow: workflow.workflow_id.clone(),
-                step: id.clone(),
-            })?;
+        // A step of another workflow is that workflow's to run, first.
+        let Some(id) = own_step(workflow, id) else {
+            continue;
+        };
+        let at = index.get(id).ok_or_else(|| ExecutionError::UnknownStep {
+            workflow: workflow.workflow_id.clone(),
+            step: id.to_owned(),
+        })?;
         visit_step(
             workflow,
             reads,

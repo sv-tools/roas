@@ -408,10 +408,14 @@ fn compile<'d>(
             &description.workflows[index],
         ) {
             Ok(ordered) => queue = ordered,
-            Err(error) => compiler.dependency_error(
-                &Site::workflow(index, &description.workflows[index]).field("dependsOn"),
-                error,
-            ),
+            Err(error) => {
+                let workflow = &description.workflows[index];
+                if let Some(at) =
+                    compiler.dependency_site(&Site::workflow(index, workflow), workflow, &error)
+                {
+                    compiler.dependency_error(&at, error);
+                }
+            }
         }
     } else {
         compiler.error(
@@ -624,6 +628,47 @@ impl<'d> Compiler<'d> {
         .then_some(source.name.as_str())
     }
 
+    /// Where a `dependsOn` ordering error of `workflow` is reported: its own
+    /// `dependsOn` when an entry there leads to it, else the first step
+    /// entry naming another workflow's step that does. `None` for an
+    /// unknown workflow a step entry names: that entry reports it itself.
+    fn dependency_site(
+        &self,
+        site: &Site<'d>,
+        workflow: &'d Workflow,
+        error: &ExecutionError,
+    ) -> Option<Site<'d>> {
+        let leads = |reference: &str| match self.documents.resolve(self.current, reference) {
+            Ok((doc, index)) => {
+                run::ordered_workflows(&self.documents, doc, self.documents.workflow(doc, index))
+                    .is_err()
+            }
+            Err(_) => true,
+        };
+        if workflow.depends_on.iter().any(|id| leads(id)) {
+            return Some(site.field("dependsOn"));
+        }
+        let entry = workflow.steps.iter().enumerate().find_map(|(at, step)| {
+            step.depends_on
+                .iter()
+                .position(|entry| {
+                    run::other_step(workflow, entry).is_some_and(|(reference, _)| leads(reference))
+                })
+                .map(|index| (at, step, index))
+        });
+        match entry {
+            Some(_) if matches!(error, ExecutionError::UnknownWorkflow(_)) => None,
+            Some((at, step, index)) => Some(
+                Site {
+                    step: Some(step),
+                    ..site.item("steps", at)
+                }
+                .item("dependsOn", index),
+            ),
+            None => Some(site.field("dependsOn")),
+        }
+    }
+
     /// `dependsOn` ordering errors. Before sources are supplied, an external
     /// dependency cannot be ordered yet; [`Self::target`] lists its source.
     fn dependency_error(&mut self, site: &Site<'d>, error: ExecutionError) {
@@ -764,10 +809,43 @@ impl<'d> Compiler<'d> {
         for (index, id) in workflow.depends_on.iter().enumerate() {
             self.target(id, &site.item("dependsOn", index));
         }
+        // A step of another workflow: that workflow runs first.
+        for (at, step) in workflow.steps.iter().enumerate() {
+            for (index, entry) in step.depends_on.iter().enumerate() {
+                let Some((reference, step_id)) = run::other_step(workflow, entry) else {
+                    continue;
+                };
+                let site = Site {
+                    step: Some(step),
+                    ..site.item("steps", at)
+                }
+                .item("dependsOn", index);
+                match self.resolve_target(reference) {
+                    Ok(Some((doc, found))) => {
+                        let target = self.documents.workflow(doc, found);
+                        if target.steps.iter().any(|step| step.step_id == step_id) {
+                            self.pending.insert((doc, found));
+                        } else {
+                            self.error(
+                                &site,
+                                ExecutionError::UnknownStep {
+                                    workflow: target.workflow_id.clone(),
+                                    step: step_id.to_owned(),
+                                },
+                            );
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => self.error(&site, error),
+                }
+            }
+        }
         // Dependency cycles in a called/recovery workflow are invalid too,
         // including cycles that pass through another document.
-        if let Err(error) = run::ordered_workflows(&self.documents, self.current, workflow) {
-            self.dependency_error(&site.field("dependsOn"), error);
+        if let Err(error) = run::ordered_workflows(&self.documents, self.current, workflow)
+            && let Some(at) = self.dependency_site(&site, workflow, &error)
+        {
+            self.dependency_error(&at, error);
         }
         self.success_actions(&workflow.success_actions, &site.after(), "successActions");
         self.failure_actions(&workflow.failure_actions, &site.after(), "failureActions");

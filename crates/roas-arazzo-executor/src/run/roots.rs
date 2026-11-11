@@ -137,7 +137,7 @@ fn reach(
             continue;
         }
         let description = documents.get(doc).description;
-        let mut targets: Vec<&str> = workflow.depends_on.iter().map(String::as_str).collect();
+        let mut targets: Vec<&str> = super::workflow_dependencies(workflow).collect();
         let mut read = |parsed: crate::runtime_syntax::Expression<'_>| {
             if parsed.root == Root::Workflows {
                 reach.reads.insert((doc, parsed.parts[0].to_owned()));
@@ -448,7 +448,7 @@ impl<'d> Run<'d> {
         // A workflow an entry before it ran on its way is not run again.
         if self
             .dependencies_done
-            .contains(&(doc, workflow.workflow_id.clone()))
+            .contains_key(&(doc, workflow.workflow_id.clone()))
         {
             self.roots.as_mut().expect("the roots").entries[at].state = State::Done(Vec::new());
             return Ok(true);
