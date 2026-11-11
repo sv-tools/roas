@@ -293,7 +293,9 @@ impl Options {
     /// depends on (`dependsOn`) or reads (`$steps.<id>`) is still in
     /// flight. Every other step — one with actions, one that calls a
     /// workflow, an AsyncAPI step — starts alone, once everything before
-    /// it is done, and nothing after it starts until it is done. When a
+    /// it is done, and nothing after it starts until it is done. Steps are
+    /// judged in the order they are listed, whichever response comes back
+    /// first, so a run ends or stops where it would one at a time. When a
     /// step fails and its workflow ends, requests still in flight in that
     /// workflow are abandoned: they are not recorded.
     ///
@@ -478,21 +480,15 @@ struct Completion {
     elapsed: Duration,
 }
 
-/// An error held back until the steps listed before its step are answered.
-struct Held {
-    /// Where its step is in the frame's order.
-    position: usize,
-    /// The record its step left, if it got that far.
-    record: Option<usize>,
-    error: ExecutionError,
-}
-
 /// A step waiting for a response.
 struct Pending {
     id: RequestId,
     /// It started while others were in flight; its completion does not
     /// move the frame on, which already moved past it.
     alongside: bool,
+    /// Its response, kept until every step listed before it is judged:
+    /// steps are judged in the order they are listed, as one at a time.
+    answer: Option<(HttpResponse, Duration)>,
     step: usize,
     attempt: u32,
     exchange: Exchange,
@@ -568,10 +564,6 @@ pub struct Run<'d> {
     pending: Vec<Pending>,
     /// Requests handed out so far, for their ids.
     requests: u64,
-    /// An error from a step that finished while steps listed before it
-    /// were still in flight. Raised once they are answered — unless one
-    /// of them ends the workflow first, as it would have one at a time.
-    held: Option<Held>,
     wait: Option<Duration>,
     records: Vec<StepRecord>,
     taken: usize,
@@ -707,7 +699,6 @@ impl<'d> Run<'d> {
             deferred: Vec::new(),
             pending: Vec::new(),
             requests: 0,
-            held: None,
             wait: None,
             records: Vec::new(),
             taken: 0,
@@ -886,16 +877,6 @@ impl<'d> Run<'d> {
                 url: pending.exchange.request.url.clone(),
             });
         }
-        // Nothing more starts once an error is held; it is raised when
-        // what is in flight is answered.
-        if self.held.is_some() {
-            if !self.pending.is_empty() {
-                return Ok(Progress::Await);
-            }
-            if let Some(held) = self.held.take() {
-                return Err(held.error);
-            }
-        }
         if let Some(subscription) = self.joining {
             return Err(ExecutionError::Awaiting {
                 method: "receive".to_owned(),
@@ -964,7 +945,7 @@ impl<'d> Run<'d> {
             // run alongside them and does not need what they produce.
             let alongside = self.options.limits.parallel > 1 && alongside(frame, index);
             if !self.pending.is_empty() {
-                if !alongside || self.pending.len() >= self.options.limits.parallel {
+                if !alongside || self.flying() >= self.options.limits.parallel {
                     return Ok(Progress::Await);
                 }
                 let step = &frame.workflow.steps[index];
@@ -1054,6 +1035,7 @@ impl<'d> Run<'d> {
             self.pending.push(Pending {
                 id,
                 alongside,
+                answer: None,
                 step: index,
                 attempt,
                 exchange,
@@ -1075,15 +1057,10 @@ impl<'d> Run<'d> {
         if self.halted {
             return Err(ExecutionError::Stopped);
         }
-        match self.pending.as_slice() {
+        match self.in_flight().as_slice() {
             [] => Err(ExecutionError::NotWaiting),
-            [pending] => {
-                let id = pending.id;
-                self.supply_to(id, response)
-            }
-            [_, _, ..] => Err(ExecutionError::InFlight {
-                count: self.pending.len(),
-            }),
+            [id] => self.supply_to(*id, response),
+            many => Err(ExecutionError::InFlight { count: many.len() }),
         }
     }
 
@@ -1114,7 +1091,15 @@ impl<'d> Run<'d> {
     /// Whether another request may be in flight beside those already
     /// there.
     pub(crate) fn takes_more(&self) -> bool {
-        self.pending.len() < self.options.limits.parallel
+        self.flying() < self.options.limits.parallel
+    }
+
+    /// Requests not yet answered.
+    fn flying(&self) -> usize {
+        self.pending
+            .iter()
+            .filter(|pending| pending.answer.is_none())
+            .count()
     }
 
     /// The requests in flight, oldest first. A request that was handed out
@@ -1126,7 +1111,11 @@ impl<'d> Run<'d> {
         if self.halted {
             return Vec::new();
         }
-        self.pending.iter().map(|pending| pending.id).collect()
+        self.pending
+            .iter()
+            .filter(|pending| pending.answer.is_none())
+            .map(|pending| pending.id)
+            .collect()
     }
 
     fn supply_inner(
@@ -1134,99 +1123,56 @@ impl<'d> Run<'d> {
         id: RequestId,
         response: HttpResponse,
     ) -> Result<(), ExecutionError> {
-        let Some(at) = self.pending.iter().position(|pending| pending.id == id) else {
+        let Some(pending) = self
+            .pending
+            .iter_mut()
+            .find(|pending| pending.id == id && pending.answer.is_none())
+        else {
             return Err(ExecutionError::NotWaiting);
         };
-        let mut pending = self.pending.remove(at);
+        pending.answer = Some((response, pending.started.elapsed()));
         // A response that came back after the run's time is not judged:
         // running out of time ends the run, it does not fail the step.
         if self.out_of_time() {
             return Err(self.timed_out());
         }
-        let elapsed = pending.started.elapsed();
-        let status = response.status;
-        pending.exchange.response_body = response.body_value();
-        pending.exchange.response = Some(response);
-
         if self.frames.last().is_none() {
             return Err(ExecutionError::NotWaiting);
         }
-        let performed = Performed::Request {
-            method: pending.exchange.request.method.clone(),
-            url: pending.exchange.request.url.clone(),
-            status,
-        };
-        let alongside = pending.alongside;
-        let step = pending.step;
-        // With an error held, a step listed after it would not have run:
-        // its response is not judged.
-        let position = self.position(step);
-        if self
-            .held
-            .as_ref()
-            .is_some_and(|held| position > held.position)
+        // Judged in the order the steps are listed: a step listed before
+        // this one may yet end the workflow, and then this one would not
+        // have run. One that ends it abandons the rest.
+        while self
+            .pending
+            .first()
+            .is_some_and(|pending| pending.answer.is_some())
         {
-            return Ok(());
+            let mut pending = self.pending.remove(0);
+            let (response, elapsed) = pending.answer.take().expect("an answer");
+            let status = response.status;
+            pending.exchange.response_body = response.body_value();
+            pending.exchange.response = Some(response);
+            let performed = Performed::Request {
+                method: pending.exchange.request.method.clone(),
+                url: pending.exchange.request.url.clone(),
+                status,
+            };
+            // No criteria means the status is the whole judgement.
+            self.complete(
+                pending.step,
+                Completion {
+                    exchange: Some(pending.exchange),
+                    given: BTreeMap::new(),
+                    default_pass: (200..400).contains(&status),
+                    failed: false,
+                    alongside: pending.alongside,
+                    attempt: pending.attempt,
+                    performed,
+                    elapsed,
+                },
+            )?;
         }
-        let before = self.records.len();
-        // No criteria means the status is the whole judgement.
-        let result = self.complete(
-            step,
-            Completion {
-                exchange: Some(pending.exchange),
-                given: BTreeMap::new(),
-                default_pass: (200..400).contains(&status),
-                failed: false,
-                alongside,
-                attempt: pending.attempt,
-                performed,
-                elapsed,
-            },
-        );
-        match result {
-            // A step listed before this one, still in flight, may yet end
-            // the workflow — and then this one would never have run.
-            Err(error) if alongside => {
-                let mut record = (self.records.len() > before).then_some(before);
-                // Listed before the one held, so that one would not have run.
-                let dropped = self.drop_held();
-                if !self
-                    .pending
-                    .iter()
-                    .any(|pending| self.position(pending.step) < position)
-                {
-                    return Err(error);
-                }
-                if let (Some(at), Some(removed)) = (&mut record, dropped)
-                    && *at > removed
-                {
-                    *at -= 1;
-                }
-                self.held = Some(Held {
-                    position,
-                    record,
-                    error,
-                });
-                Ok(())
-            }
-            other => other,
-        }
-    }
-
-    /// Forget the held error, and the record its step left; say where that
-    /// record was.
-    fn drop_held(&mut self) -> Option<usize> {
-        let record = self.held.take()?.record?;
-        self.records.remove(record);
-        Some(record)
-    }
-
-    /// Where step `index` is in the innermost frame's order.
-    fn position(&self, index: usize) -> usize {
-        self.frames
-            .last()
-            .and_then(|frame| frame.order.iter().position(|&at| at == index))
-            .unwrap_or(usize::MAX)
+        Ok(())
     }
 
     /// Hand back what came of the [`Progress::Receive`] [`Run::advance`]
@@ -1437,6 +1383,7 @@ impl<'d> Run<'d> {
             self.sending = Some(Pending {
                 id: RequestId::default(),
                 alongside: false,
+                answer: None,
                 step: index,
                 attempt,
                 exchange,
@@ -1606,19 +1553,8 @@ impl<'d> Run<'d> {
             .decide(index, passed, done.exchange.as_ref(), record)
             .map_err(|error| locate(&self.documents, here, error))?;
         self.records[record].action = describe(&action);
-        if done.alongside {
-            if matches!(action, Action::Advance) {
-                return Ok(());
-            }
-            // Ending the workflow, this step stops a later one whose error
-            // was held: that one would never have run.
-            if self
-                .held
-                .as_ref()
-                .is_some_and(|held| held.position > self.position(index))
-            {
-                self.drop_held();
-            }
+        if done.alongside && matches!(action, Action::Advance) {
+            return Ok(());
         }
         self.apply(action)
     }

@@ -80,7 +80,7 @@ fn independent_steps_are_in_flight_together() {
     assert_ne!(a.id, b.id);
     assert!(matches!(run.advance(), Ok(Progress::Await)));
     assert_eq!(run.in_flight(), [a.id, b.id, c.id]);
-    // Answered in any order.
+    // Answered in any order, judged in the order they are listed.
     run.supply_to(c.id, ok()).unwrap();
     run.supply_to(a.id, ok()).unwrap();
     assert!(matches!(run.advance(), Ok(Progress::Await)));
@@ -90,7 +90,7 @@ fn independent_steps_are_in_flight_together() {
     };
     assert!(report.is_success(), "{report}");
     let done: Vec<_> = report.steps.iter().map(|s| s.step_id.as_str()).collect();
-    assert_eq!(done, ["c", "a", "b"]);
+    assert_eq!(done, ["a", "b", "c"]);
 }
 
 #[test]
@@ -325,7 +325,7 @@ async fn the_async_driver_sends_them_together() {
 #[tokio::test]
 async fn the_async_driver_does_not_wait_for_what_was_abandoned() {
     let description = description(json!([step("a"), step("b"), step("c")]), json!({}));
-    let mut client = Slow::new(Duration::from_secs(5), "/b");
+    let mut client = Slow::new(Duration::from_secs(5), "/a");
     let started = Instant::now();
     let report = execute_async(&description, &options().parallel(3), &mut client)
         .await
@@ -333,7 +333,7 @@ async fn the_async_driver_does_not_wait_for_what_was_abandoned() {
     assert!(started.elapsed() < Duration::from_secs(4));
     assert_eq!(report.outcome, Outcome::Failed);
     let done: Vec<_> = report.steps.iter().map(|s| s.step_id.as_str()).collect();
-    assert_eq!(done, ["b"]);
+    assert_eq!(done, ["a"]);
 }
 
 #[test]
@@ -442,62 +442,6 @@ fn a_stopped_run_wants_nothing_in_flight() {
     assert!(matches!(run.supply(ok()), Err(ExecutionError::Stopped)));
 }
 
-#[test]
-fn an_error_waits_for_the_steps_listed_before_it() {
-    let mut second = step("b");
-    second["outputs"] = json!({ "x": "$steps.nowhere.outputs.x" });
-    let description = description(json!([step("a"), second, step("c")]), json!({}));
-    let options = options().parallel(3);
-    // `a` fails first, as it would one at a time: `b`'s error never was.
-    let mut run = Run::start(&description, &options).unwrap();
-    let a = send(&mut run);
-    let b = send(&mut run);
-    let c = send(&mut run);
-    run.supply_to(b.id, ok()).unwrap();
-    // Nothing more starts while the error is held.
-    assert!(matches!(run.advance(), Ok(Progress::Await)));
-    run.supply_to(a.id, HttpResponse::json(500, &json!({})))
-        .unwrap();
-    assert!(run.in_flight().is_empty());
-    assert!(matches!(
-        run.supply_to(c.id, ok()),
-        Err(ExecutionError::NotWaiting)
-    ));
-    let Ok(Progress::Done(report)) = run.advance() else {
-        panic!("done");
-    };
-    assert_eq!(report.outcome, Outcome::Failed);
-    let done: Vec<_> = report.steps.iter().map(|s| s.step_id.as_str()).collect();
-    assert_eq!(done, ["a"]);
-    // `a` passes: the error is raised once it is answered.
-    let mut run = Run::start(&description, &options).unwrap();
-    let a = send(&mut run);
-    let b = send(&mut run);
-    let c = send(&mut run);
-    run.supply_to(b.id, ok()).unwrap();
-    // `c` comes after `b`, which would have stopped the run first: its
-    // failure is not judged, and `a` is still wanted.
-    run.supply_to(c.id, HttpResponse::json(500, &json!({})))
-        .unwrap();
-    assert_eq!(run.in_flight(), [a.id]);
-    run.supply_to(a.id, ok()).unwrap();
-    assert!(matches!(run.advance(), Err(ExecutionError::Select(_))));
-    assert!(matches!(run.advance(), Err(ExecutionError::Stopped)));
-    let done: Vec<_> = run
-        .partial_report()
-        .steps
-        .iter()
-        .map(|s| s.step_id.clone())
-        .collect();
-    assert_eq!(done, ["b", "a"]);
-    // With nothing before it in flight, the error is raised at once.
-    let mut run = Run::start(&description, &options).unwrap();
-    let a = send(&mut run);
-    let b = send(&mut run);
-    run.supply_to(a.id, ok()).unwrap();
-    assert!(run.supply_to(b.id, ok()).is_err());
-}
-
 #[tokio::test]
 async fn the_async_driver_sends_in_the_order_the_run_asked() {
     let description = description(json!([step("a"), step("b"), step("c")]), json!({}));
@@ -538,43 +482,71 @@ fn requests_in_flight_together_share_the_run_time() {
     assert!(run.in_flight().is_empty());
 }
 
+fn broken(id: &str) -> Value {
+    let mut step = step(id);
+    step["outputs"] = json!({ "x": "$steps.nowhere.outputs.x" });
+    step
+}
+
+fn judged(run: &Run<'_>) -> Vec<String> {
+    run.partial_report()
+        .steps
+        .iter()
+        .map(|step| step.step_id.clone())
+        .collect()
+}
+
 #[test]
-fn an_earlier_error_replaces_the_one_held() {
-    let broken = |id: &str| {
-        let mut step = step(id);
-        step["outputs"] = json!({ "x": "$steps.nowhere.outputs.x" });
-        step
-    };
-    let steps = |first: Value| json!([first, broken("b"), broken("c")]);
+fn responses_are_judged_in_the_order_the_steps_are_listed() {
     let options = options().parallel(3);
-    // `c` is held, then `b`: only `b` would have run, and `a` ends it.
-    let description = description(steps(step("a")), json!({}));
+    let description = description(json!([step("a"), broken("b"), step("c")]), json!({}));
+    // `b` waits for `a`, whose failure ends the workflow: `b` never was.
     let mut run = Run::start(&description, &options).unwrap();
     let a = send(&mut run);
     let b = send(&mut run);
     let c = send(&mut run);
-    run.supply_to(c.id, ok()).unwrap();
     run.supply_to(b.id, ok()).unwrap();
+    assert_eq!(run.in_flight(), [a.id, c.id]);
+    assert!(matches!(
+        run.supply_to(b.id, ok()),
+        Err(ExecutionError::NotWaiting)
+    ));
+    assert!(matches!(run.advance(), Ok(Progress::Await)));
     run.supply_to(a.id, HttpResponse::json(500, &json!({})))
         .unwrap();
+    assert!(run.in_flight().is_empty());
     let Ok(Progress::Done(report)) = run.advance() else {
         panic!("done");
     };
+    assert_eq!(report.outcome, Outcome::Failed);
     let done: Vec<_> = report.steps.iter().map(|s| s.step_id.as_str()).collect();
     assert_eq!(done, ["a"]);
-    // `a`'s own error comes before the one held, and is raised at once.
-    let description = self::description(steps(broken("a")), json!({}));
+    // `a` passes: `b`'s error stops the run before `c`'s failure is judged.
     let mut run = Run::start(&description, &options).unwrap();
     let a = send(&mut run);
     let b = send(&mut run);
-    send(&mut run);
+    let c = send(&mut run);
     run.supply_to(b.id, ok()).unwrap();
-    assert!(run.supply_to(a.id, ok()).is_err());
-    let done: Vec<_> = run
-        .partial_report()
-        .steps
-        .iter()
-        .map(|s| s.step_id.clone())
-        .collect();
-    assert_eq!(done, ["a"]);
+    run.supply_to(c.id, HttpResponse::json(500, &json!({})))
+        .unwrap();
+    assert!(matches!(
+        run.supply_to(a.id, ok()),
+        Err(ExecutionError::Select(_))
+    ));
+    assert_eq!(judged(&run), ["a", "b"]);
+    assert!(run.in_flight().is_empty());
+    assert!(matches!(run.advance(), Err(ExecutionError::Stopped)));
+    // A later failure waits for an earlier error, as one at a time.
+    let description = self::description(json!([broken("a"), step("b")]), json!({}));
+    let options = self::options().parallel(2);
+    let mut run = Run::start(&description, &options).unwrap();
+    let a = send(&mut run);
+    let b = send(&mut run);
+    run.supply_to(b.id, HttpResponse::json(500, &json!({})))
+        .unwrap();
+    assert!(matches!(
+        run.supply_to(a.id, ok()),
+        Err(ExecutionError::Select(_))
+    ));
+    assert_eq!(judged(&run), ["a"]);
 }
