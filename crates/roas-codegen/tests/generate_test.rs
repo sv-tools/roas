@@ -1701,9 +1701,10 @@ fn an_integer_const_read_as_a_float_past_2_53_is_compared_rounded() {
             .iter()
             .map(|f| f.contents.as_str())
             .collect::<String>();
-        let rounded = match language {
-            Target::Rust => "as f64)",
-            Target::Go => "float64(int64(",
+        let rounded = if language == Target::Rust {
+            "as f64)"
+        } else {
+            "float64(int64("
         };
         assert!(code.contains(rounded), "{code}");
     }
