@@ -136,6 +136,24 @@ impl<T> ReusableOr<T> {
             .ok_or_else(|| ResolveError::NotFound(reference.to_owned()))
     }
 
+    /// The reference the item was found at: `None` for an inline object,
+    /// otherwise the [`Reusable`]'s reference.
+    ///
+    /// Complements [`get_item`](Self::get_item), which returns only the
+    /// item. A component is never itself a reference, so there is no
+    /// chain to follow and the reference is the one written here; `spec`
+    /// is taken so the call reads the same as in the other roas crates.
+    #[must_use]
+    pub fn resolved_ref<'a, S>(&'a self, _spec: &'a S) -> Option<&'a str>
+    where
+        S: ResolveReusable<T>,
+    {
+        match self {
+            ReusableOr::Reusable(reusable) => Some(&reusable.reference),
+            ReusableOr::Item(_) => None,
+        }
+    }
+
     /// The `value` a [`Reusable`] sets for the object it references,
     /// e.g. a parameter value. `None` for an inline object.
     #[must_use]
@@ -240,6 +258,18 @@ mod tests {
         let entry = ReusableOr::Item(Demo { name: "X".into() });
         assert_eq!(entry.get_item(&demos()).unwrap().name, "X");
         assert_eq!(entry.value_override(), None);
+    }
+
+    #[test]
+    fn resolved_ref_is_none_inline_and_the_reference_otherwise() {
+        let spec = demos();
+        let inline = ReusableOr::Item(Demo { name: "X".into() });
+        assert_eq!(inline.resolved_ref(&spec), None);
+        let entry = reusable("$components.demos.a.b");
+        assert_eq!(entry.resolved_ref(&spec), Some("$components.demos.a.b"));
+        // Reported whether or not the reference resolves.
+        let missing = reusable("$components.demos.nope");
+        assert_eq!(missing.resolved_ref(&spec), Some("$components.demos.nope"));
     }
 
     #[test]

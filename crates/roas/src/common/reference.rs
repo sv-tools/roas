@@ -22,6 +22,16 @@ use crate::validation::{Context, Options, PushError, ValidateWithContext};
 /// ResolveReference is a trait for resolving references.
 pub trait ResolveReference<D> {
     fn resolve_reference(&self, reference: &str) -> Option<&D>;
+
+    /// The last `$ref` the chain starting at `reference` follows.
+    ///
+    /// `reference` itself when it names an object directly, or when the
+    /// chain cannot be followed any further (a dangling pointer, a cycle,
+    /// a reference into another document). The default suits resolvers
+    /// whose targets are never references themselves.
+    fn resolved_reference<'a>(&'a self, reference: &'a str) -> &'a str {
+        reference
+    }
 }
 
 /// ResolveError is an error type for resolving references.
@@ -473,6 +483,31 @@ impl<D, R: ReferenceObject> RefOr<D, R> {
         }
     }
 
+    /// The reference the item was found at: `None` for an inline item,
+    /// otherwise the last `$ref` the chain followed.
+    ///
+    /// Complements [`get_item`](Self::get_item), which returns only the
+    /// item. An alias `#/components/schemas/Pet` that is itself a `$ref`
+    /// to `#/components/schemas/Animal` reports the latter. A reference
+    /// into another document is returned as written; a chain that dangles
+    /// or loops reports the last reference it reached.
+    pub fn resolved_ref<'a, T>(&'a self, spec: &'a T) -> Option<&'a str>
+    where
+        T: ResolveReference<D>,
+    {
+        match self {
+            RefOr::Item(_) => None,
+            RefOr::Ref(r) => {
+                let reference = r.reference();
+                if reference.starts_with("#/") {
+                    Some(spec.resolved_reference(reference))
+                } else {
+                    Some(reference)
+                }
+            }
+        }
+    }
+
     /// Resolve the reference using the spec for internal `#/` pointers and
     /// the provided `Loader` for external ones.
     ///
@@ -680,24 +715,77 @@ where
     T: ResolveReference<D>,
     R: ReferenceObject,
 {
-    let map = map.as_ref()?;
+    match walk_map(reference, prefix, map.as_ref()?) {
+        MapWalk::Item(d, _) => Some(d),
+        // Cross-map ref: hand off to spec-wide resolver.
+        MapWalk::LeftMap(entry, _) => entry.get_item(spec).ok(),
+        MapWalk::Stopped(_) => None,
+    }
+}
+
+/// The last `$ref` [`resolve_in_map`] follows from `reference`.
+///
+/// Mirrors its walk: aliases inside the map are followed with cycle
+/// detection, and a `$ref` that leaves the map is handed to the spec's
+/// [`ResolveReference::resolved_reference`]. Where the walk stops — a
+/// missing key, a cycle, a reference into another document — the last
+/// reference reached is the answer.
+pub fn resolved_in_map<'a, T, D, R>(
+    spec: &'a T,
+    reference: &'a str,
+    prefix: &str,
+    map: &'a Option<BTreeMap<String, RefOr<D, R>>>,
+) -> &'a str
+where
+    T: ResolveReference<D>,
+    R: ReferenceObject,
+{
+    let Some(map) = map.as_ref() else {
+        return reference;
+    };
+    match walk_map(reference, prefix, map) {
+        MapWalk::Item(_, at) | MapWalk::Stopped(at) => at,
+        MapWalk::LeftMap(_, next) if next.starts_with("#/") => spec.resolved_reference(next),
+        MapWalk::LeftMap(_, next) => next,
+    }
+}
+
+/// Where [`walk_map`] stopped, as the outcome of one walk.
+enum MapWalk<'a, 'r, D, R> {
+    /// An object in the map, and the reference that named it.
+    Item(&'a D, &'r str),
+    /// An entry whose `$ref` (the `&str`) leaves the map.
+    LeftMap(&'a RefOr<D, R>, &'a str),
+    /// A missing key or a cycle; the last reference reached.
+    Stopped(&'r str),
+}
+
+/// Follow `reference` through aliases inside `map` — the one walk both
+/// [`resolve_in_map`] and [`resolved_in_map`] are built on.
+fn walk_map<'a, 'r, D, R>(
+    reference: &'r str,
+    prefix: &str,
+    map: &'a BTreeMap<String, RefOr<D, R>>,
+) -> MapWalk<'a, 'r, D, R>
+where
+    'a: 'r,
+    R: ReferenceObject,
+{
     let mut current = reference;
     let mut visited: BTreeSet<&str> = BTreeSet::new();
-
     loop {
-        let key = current.strip_prefix(prefix)?;
-        let item = map.get(key)?;
-
-        match item {
-            RefOr::Item(d) => return Some(d),
+        let Some(entry) = current.strip_prefix(prefix).and_then(|key| map.get(key)) else {
+            return MapWalk::Stopped(current);
+        };
+        match entry {
+            RefOr::Item(d) => return MapWalk::Item(d, current),
             RefOr::Ref(r) => {
                 let next = r.reference();
                 if !next.starts_with(prefix) {
-                    // Cross-map ref: hand off to spec-wide resolver.
-                    return item.get_item(spec).ok();
+                    return MapWalk::LeftMap(entry, next);
                 }
                 if !visited.insert(next) {
-                    return None;
+                    return MapWalk::Stopped(current);
                 }
                 current = next;
             }
@@ -1173,6 +1261,105 @@ mod tests {
             &map_opt,
         );
         assert!(result.is_none(), "cycle detection must return None");
+    }
+
+    /// A spec whose only map is `#/things/`, resolved through
+    /// `resolved_in_map`, so `resolved_ref` sees real chains.
+    struct ThingsSpec(Option<BTreeMap<String, RefOr<Foo>>>);
+
+    impl ResolveReference<Foo> for ThingsSpec {
+        fn resolve_reference(&self, reference: &str) -> Option<&Foo> {
+            resolve_in_map(self, reference, "#/things/", &self.0)
+        }
+
+        fn resolved_reference<'a>(&'a self, reference: &'a str) -> &'a str {
+            resolved_in_map(self, reference, "#/things/", &self.0)
+        }
+    }
+
+    fn things(entries: &[(&str, RefOr<Foo>)]) -> ThingsSpec {
+        ThingsSpec(Some(
+            entries
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), v.clone()))
+                .collect(),
+        ))
+    }
+
+    fn foo(name: &str) -> RefOr<Foo> {
+        RefOr::new_item(Foo { foo: name.into() })
+    }
+
+    #[test]
+    fn resolved_ref_of_an_inline_item_is_none() {
+        assert_eq!(foo("x").resolved_ref(&things(&[])), None);
+    }
+
+    #[test]
+    fn resolved_ref_follows_an_alias_to_its_target() {
+        let spec = things(&[
+            ("Pet", RefOr::new_ref("#/things/Animal")),
+            ("Animal", RefOr::new_ref("#/things/Real")),
+            ("Real", foo("real")),
+        ]);
+        let entry = RefOr::<Foo>::new_ref("#/things/Pet");
+        assert_eq!(entry.get_item(&spec).unwrap().foo, "real");
+        assert_eq!(entry.resolved_ref(&spec), Some("#/things/Real"));
+        let direct = RefOr::<Foo>::new_ref("#/things/Real");
+        assert_eq!(direct.resolved_ref(&spec), Some("#/things/Real"));
+    }
+
+    #[test]
+    fn resolved_ref_stops_where_the_chain_stops() {
+        let spec = things(&[
+            ("Dangling", RefOr::new_ref("#/things/Missing")),
+            ("A", RefOr::new_ref("#/things/B")),
+            ("B", RefOr::new_ref("#/things/A")),
+            ("Away", RefOr::new_ref("other.yaml#/Foo")),
+        ]);
+        let resolved = |r: &str| {
+            RefOr::<Foo>::new_ref(r)
+                .resolved_ref(&spec)
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            resolved("#/things/Dangling").as_deref(),
+            Some("#/things/Missing")
+        );
+        assert_eq!(resolved("#/things/A").as_deref(), Some("#/things/A"));
+        assert_eq!(
+            resolved("#/things/Away").as_deref(),
+            Some("other.yaml#/Foo")
+        );
+        assert_eq!(
+            resolved("other.yaml#/Bar").as_deref(),
+            Some("other.yaml#/Bar")
+        );
+        // A pointer outside the map is reported as written.
+        assert_eq!(resolved("#/elsewhere/X").as_deref(), Some("#/elsewhere/X"));
+        // So is any reference when the map is absent.
+        let empty = ThingsSpec(None);
+        assert_eq!(
+            RefOr::<Foo>::new_ref("#/things/A").resolved_ref(&empty),
+            Some("#/things/A")
+        );
+    }
+
+    #[test]
+    fn resolved_ref_hands_a_cross_map_alias_to_the_spec() {
+        let spec = things(&[("Alias", RefOr::new_ref("#/components/schemas/Concrete"))]);
+        assert_eq!(
+            RefOr::<Foo>::new_ref("#/things/Alias").resolved_ref(&spec),
+            Some("#/components/schemas/Concrete")
+        );
+    }
+
+    #[test]
+    fn resolved_reference_defaults_to_the_reference_itself() {
+        assert_eq!(
+            RefOr::<Foo>::new_ref("#/components/schemas/Foo").resolved_ref(&PetSpec),
+            Some("#/components/schemas/Foo")
+        );
     }
 
     #[test]

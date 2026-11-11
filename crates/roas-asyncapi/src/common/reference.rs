@@ -193,6 +193,48 @@ impl<T> RefOr<T> {
     {
         doc.resolve_reference(self)
     }
+
+    /// The reference the item was found at: `None` for an inline item,
+    /// otherwise the last `$ref` the chain followed.
+    ///
+    /// Complements [`get_item`](Self::get_item), which says only what
+    /// was found. Whatever the [`Resolution`], this is the reference
+    /// the chain stopped at: the alias's target for an alias, the
+    /// reference into another document when the chain leaves it, and
+    /// the last reference reached when the chain dangles, loops, or
+    /// lands on something the resolver does not model. `doc` accepts the same
+    /// documents and kinds as [`get_item`](Self::get_item).
+    ///
+    /// ```
+    /// # #[cfg(feature = "v3_1")] {
+    /// use roas_asyncapi::v3_1::Document;
+    ///
+    /// let doc: Document = serde_json::from_str(r##"{
+    ///     "asyncapi": "3.1.0",
+    ///     "info": { "title": "Signups", "version": "1.0.0" },
+    ///     "servers": {
+    ///         "production": { "$ref": "#/components/servers/primary" }
+    ///     },
+    ///     "components": {
+    ///         "servers": {
+    ///             "primary": { "$ref": "#/components/servers/kafka" },
+    ///             "kafka": { "host": "broker:9092", "protocol": "kafka" }
+    ///         }
+    ///     }
+    /// }"##).unwrap();
+    ///
+    /// let entry = &doc.servers["production"];
+    /// assert_eq!(entry.get_item(&doc).found().unwrap().host, "broker:9092");
+    /// assert_eq!(entry.resolved_ref(&doc), Some("#/components/servers/kafka"));
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn resolved_ref<'a, D>(&'a self, doc: &'a D) -> Option<&'a str>
+    where
+        D: ResolveReference<T> + ?Sized,
+    {
+        doc.resolved_reference(self)
+    }
 }
 
 /// A document that can follow a `RefOr<T>` to the `T` it names.
@@ -205,6 +247,19 @@ pub trait ResolveReference<T> {
     /// Resolve `entry` inside this document. An inline item must
     /// resolve to itself.
     fn resolve_reference<'a>(&'a self, entry: &'a RefOr<T>) -> Resolution<'a, T>;
+
+    /// The last `$ref` the chain starting at `entry` follows: `None`
+    /// for an inline item. [`RefOr::resolved_ref`] is the usual way to
+    /// call it.
+    ///
+    /// The default reports `entry`'s own reference, which is right for
+    /// a resolver whose targets are never references themselves.
+    fn resolved_reference<'a>(&'a self, entry: &'a RefOr<T>) -> Option<&'a str> {
+        match entry {
+            RefOr::Item(_) => None,
+            RefOr::Reference(reference) => Some(&reference.reference),
+        }
+    }
 }
 
 impl<'de, T> Deserialize<'de> for RefOr<T>

@@ -2,7 +2,7 @@
 
 use crate::common::helpers::{validate_not_visited, validate_required_string};
 use crate::common::reference::ResolveReference;
-use crate::common::reference::{RefOr, resolve_in_map};
+use crate::common::reference::{RefOr, resolve_in_map, resolved_in_map};
 use crate::loader::Loader;
 use crate::v3_0::callback::Callback;
 use crate::v3_0::components::Components;
@@ -669,12 +669,24 @@ impl ResolveReference<Response> for Spec {
             .as_ref()
             .and_then(|x| resolve_in_map(self, reference, "#/components/responses/", &x.responses))
     }
+
+    fn resolved_reference<'a>(&'a self, reference: &'a str) -> &'a str {
+        self.components.as_ref().map_or(reference, |x| {
+            resolved_in_map(self, reference, "#/components/responses/", &x.responses)
+        })
+    }
 }
 
 impl ResolveReference<Parameter> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Parameter> {
         self.components.as_ref().and_then(|x| {
             resolve_in_map(self, reference, "#/components/parameters/", &x.parameters)
+        })
+    }
+
+    fn resolved_reference<'a>(&'a self, reference: &'a str) -> &'a str {
+        self.components.as_ref().map_or(reference, |x| {
+            resolved_in_map(self, reference, "#/components/parameters/", &x.parameters)
         })
     }
 }
@@ -690,6 +702,17 @@ impl ResolveReference<RequestBody> for Spec {
             )
         })
     }
+
+    fn resolved_reference<'a>(&'a self, reference: &'a str) -> &'a str {
+        self.components.as_ref().map_or(reference, |x| {
+            resolved_in_map(
+                self,
+                reference,
+                "#/components/requestBodies/",
+                &x.request_bodies,
+            )
+        })
+    }
 }
 
 impl ResolveReference<Header> for Spec {
@@ -697,6 +720,12 @@ impl ResolveReference<Header> for Spec {
         self.components
             .as_ref()
             .and_then(|x| resolve_in_map(self, reference, "#/components/headers/", &x.headers))
+    }
+
+    fn resolved_reference<'a>(&'a self, reference: &'a str) -> &'a str {
+        self.components.as_ref().map_or(reference, |x| {
+            resolved_in_map(self, reference, "#/components/headers/", &x.headers)
+        })
     }
 }
 
@@ -706,6 +735,12 @@ impl ResolveReference<Schema> for Spec {
             .as_ref()
             .and_then(|x| resolve_in_map(self, reference, "#/components/schemas/", &x.schemas))
     }
+
+    fn resolved_reference<'a>(&'a self, reference: &'a str) -> &'a str {
+        self.components.as_ref().map_or(reference, |x| {
+            resolved_in_map(self, reference, "#/components/schemas/", &x.schemas)
+        })
+    }
 }
 
 impl ResolveReference<Example> for Spec {
@@ -713,6 +748,12 @@ impl ResolveReference<Example> for Spec {
         self.components
             .as_ref()
             .and_then(|x| resolve_in_map(self, reference, "#/components/examples/", &x.examples))
+    }
+
+    fn resolved_reference<'a>(&'a self, reference: &'a str) -> &'a str {
+        self.components.as_ref().map_or(reference, |x| {
+            resolved_in_map(self, reference, "#/components/examples/", &x.examples)
+        })
     }
 }
 
@@ -722,6 +763,12 @@ impl ResolveReference<Callback> for Spec {
             .as_ref()
             .and_then(|x| resolve_in_map(self, reference, "#/components/callbacks/", &x.callbacks))
     }
+
+    fn resolved_reference<'a>(&'a self, reference: &'a str) -> &'a str {
+        self.components.as_ref().map_or(reference, |x| {
+            resolved_in_map(self, reference, "#/components/callbacks/", &x.callbacks)
+        })
+    }
 }
 
 impl ResolveReference<Link> for Spec {
@@ -730,12 +777,29 @@ impl ResolveReference<Link> for Spec {
             .as_ref()
             .and_then(|x| resolve_in_map(self, reference, "#/components/links/", &x.links))
     }
+
+    fn resolved_reference<'a>(&'a self, reference: &'a str) -> &'a str {
+        self.components.as_ref().map_or(reference, |x| {
+            resolved_in_map(self, reference, "#/components/links/", &x.links)
+        })
+    }
 }
 
 impl ResolveReference<SecurityScheme> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&SecurityScheme> {
         self.components.as_ref().and_then(|x| {
             resolve_in_map(
+                self,
+                reference,
+                "#/components/securitySchemes/",
+                &x.security_schemes,
+            )
+        })
+    }
+
+    fn resolved_reference<'a>(&'a self, reference: &'a str) -> &'a str {
+        self.components.as_ref().map_or(reference, |x| {
+            resolved_in_map(
                 self,
                 reference,
                 "#/components/securitySchemes/",
@@ -867,6 +931,110 @@ mod tests {
     use super::*;
     use crate::validation::IGNORE_UNUSED;
     use crate::validation::ValidationErrorsExt;
+
+    #[test]
+    fn resolved_ref_follows_component_aliases_of_every_kind() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": { "title": "T", "version": "1" },
+            "paths": {},
+            "components": {
+                "responses": {
+                    "A": { "$ref": "#/components/responses/B" },
+                    "B": { "$ref": "#/components/responses/C" }
+                },
+                "parameters": {
+                    "A": { "$ref": "#/components/parameters/B" },
+                    "B": { "$ref": "#/components/parameters/C" }
+                },
+                "requestBodies": {
+                    "A": { "$ref": "#/components/requestBodies/B" },
+                    "B": { "$ref": "#/components/requestBodies/C" }
+                },
+                "headers": {
+                    "A": { "$ref": "#/components/headers/B" },
+                    "B": { "$ref": "#/components/headers/C" }
+                },
+                "schemas": {
+                    "A": { "$ref": "#/components/schemas/B" },
+                    "B": { "$ref": "#/components/schemas/C" }
+                },
+                "examples": {
+                    "A": { "$ref": "#/components/examples/B" },
+                    "B": { "$ref": "#/components/examples/C" }
+                },
+                "callbacks": {
+                    "A": { "$ref": "#/components/callbacks/B" },
+                    "B": { "$ref": "#/components/callbacks/C" }
+                },
+                "links": {
+                    "A": { "$ref": "#/components/links/B" },
+                    "B": { "$ref": "#/components/links/C" }
+                },
+                "securitySchemes": {
+                    "A": { "$ref": "#/components/securitySchemes/B" },
+                    "B": { "$ref": "#/components/securitySchemes/C" }
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            RefOr::<Response>::new_ref("#/components/responses/A").resolved_ref(&spec),
+            Some("#/components/responses/C"),
+            "responses"
+        );
+        assert_eq!(
+            RefOr::<Parameter>::new_ref("#/components/parameters/A").resolved_ref(&spec),
+            Some("#/components/parameters/C"),
+            "parameters"
+        );
+        assert_eq!(
+            RefOr::<RequestBody>::new_ref("#/components/requestBodies/A").resolved_ref(&spec),
+            Some("#/components/requestBodies/C"),
+            "requestBodies"
+        );
+        assert_eq!(
+            RefOr::<Header>::new_ref("#/components/headers/A").resolved_ref(&spec),
+            Some("#/components/headers/C"),
+            "headers"
+        );
+        assert_eq!(
+            RefOr::<Schema>::new_ref("#/components/schemas/A").resolved_ref(&spec),
+            Some("#/components/schemas/C"),
+            "schemas"
+        );
+        assert_eq!(
+            RefOr::<Example>::new_ref("#/components/examples/A").resolved_ref(&spec),
+            Some("#/components/examples/C"),
+            "examples"
+        );
+        assert_eq!(
+            RefOr::<Callback>::new_ref("#/components/callbacks/A").resolved_ref(&spec),
+            Some("#/components/callbacks/C"),
+            "callbacks"
+        );
+        assert_eq!(
+            RefOr::<Link>::new_ref("#/components/links/A").resolved_ref(&spec),
+            Some("#/components/links/C"),
+            "links"
+        );
+        assert_eq!(
+            RefOr::<SecurityScheme>::new_ref("#/components/securitySchemes/A").resolved_ref(&spec),
+            Some("#/components/securitySchemes/C"),
+            "securitySchemes"
+        );
+        // Without components, a reference is reported as written.
+        let bare: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": { "title": "T", "version": "1" },
+            "paths": {}
+        }))
+        .unwrap();
+        assert_eq!(
+            RefOr::<Response>::new_ref("#/components/responses/A").resolved_ref(&bare),
+            Some("#/components/responses/A")
+        );
+    }
 
     #[test]
     fn validate_with_loader_resolves_external_schema_ref() {

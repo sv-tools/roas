@@ -26,6 +26,10 @@ fn the_common_paths_are_public() {
         reference: "#/anything".to_owned(),
     });
     let via_trait_object: &dyn ResolveReference<u8> = &doc;
+    // The default `resolved_reference` reports the entry's own reference.
+    assert_eq!(entry.resolved_ref(&doc), Some("#/anything"));
+    assert_eq!(entry.resolved_ref(via_trait_object), Some("#/anything"));
+    assert_eq!(RefOr::Item(1u8).resolved_ref(&doc), None);
     for resolution in [
         entry.get_item(&doc),
         entry.get_item(via_trait_object),
