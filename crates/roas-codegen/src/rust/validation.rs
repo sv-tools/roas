@@ -370,8 +370,6 @@ fn branch(
 /// valid.
 const NULL_IS_VALID: &str = "if self.raw.get().trim() == \"null\" { return; }";
 
-/// Whether a holder's raw value has a number its branches' types may fail
-/// to decode for their range: such a failure proves no mismatch.
 /// When decoding `ty` may fail for the decoder rather than the value, the
 /// Rust condition on the holder's raw value under which a failure proves
 /// nothing: always for a substitution, which may take any value; for a
@@ -407,6 +405,8 @@ fn decoder_rules(
     })
 }
 
+/// Whether a holder's raw value has a number its branches' types may fail
+/// to decode for their range: such a failure proves no mismatch.
 fn rust_wide<'a>(ir: &crate::ir::Ir, tys: impl Iterator<Item = &'a TypeRef>) -> String {
     let tys: Vec<&TypeRef> = tys.collect();
     let (limit, float32) = checks::number_range(ir, &tys);
@@ -788,7 +788,12 @@ pub(crate) fn body(
                 let (body, reads) = branch(ir, b, &progressing, ("branch", "&mut branch"));
                 // Decoding proves a match only when nothing the branch says
                 // goes unchecked.
-                let sure = !checks::unsure(b) && (!generated(&b.ty) || progressing(&b.ty));
+                // Read by other names than the schema, a decoded branch is
+                // no proof either way.
+                let renamed = !checks::reaches_extern(ir, &b.ty)
+                    && checks::reaches_decoder_rules(ir, &b.ty, reshaped);
+                let sure =
+                    !checks::unsure(b) && !renamed && (!generated(&b.ty) || progressing(&b.ty));
                 let counter = if sure { "certain" } else { "uncertain" };
                 counts_certain |= sure;
                 // A number past what the branch's type holds fails to decode
@@ -841,7 +846,17 @@ pub(crate) fn body(
                     accessor.trim_start_matches("as_")
                 );
                 let (mut body, reads) = branch(ir, b, &progressing, ("report", "report"));
-                if checks::part_unsure(b) || (generated(&b.ty) && !progressing(&b.ty)) {
+                let renamed = !checks::reaches_extern(ir, &b.ty)
+                    && checks::reaches_decoder_rules(ir, &b.ty, reshaped);
+                if renamed {
+                    body.push(format!(
+                        "report.unevaluated(pointer, {:?});",
+                        format!(
+                            "allOf part read by {}: its Rust type reads members by other names than the schema",
+                            accessor.trim_start_matches("as_")
+                        )
+                    ));
+                } else if checks::part_unsure(b) || (generated(&b.ty) && !progressing(&b.ty)) {
                     body.push(format!(
                         "report.unevaluated(pointer, {:?});",
                         format!(

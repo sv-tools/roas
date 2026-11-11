@@ -763,6 +763,10 @@ fn validated_description() -> serde_json::Value {
             "GatedIntAll": {"allOf": [{"$ref": "#/components/schemas/GatedInt"}, {"type": "object", "properties": {"q": {"type": "integer"}}}]},
             "GatedClosed": {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string"}, "b": {"type": "string"}}},
             "GatedClosedU": {"oneOf": [{"$ref": "#/components/schemas/GatedClosed"}, {"type": "integer"}]},
+            "AliasB": {"type": "object", "required": ["aa"], "properties": {"aa": {"type": "string"}}},
+            "OneAliased": {"oneOf": [{"$ref": "#/components/schemas/IntCatch"}, {"$ref": "#/components/schemas/AliasB"}]},
+            "IntA": {"type": "object", "properties": {"a": {"type": "integer"}}},
+            "OneGated": {"oneOf": [{"$ref": "#/components/schemas/GatedInt"}, {"$ref": "#/components/schemas/IntA"}]},
             "Ip": {"oneOf": [{"type": "string", "format": "ipv4"}, {"type": "string", "maxLength": 3}]},
             "StringOnly": {"type": "string", "enum": ["a", "b"]},
             "ObjectOnly": {"type": "object", "additionalProperties": false, "properties": {"s": {"$ref": "#/components/schemas/StringOnly"}}},
@@ -1188,8 +1192,9 @@ fn main() {
     // Pattern members are not judged by `additionalProperties`.
     assert_eq!(report::<PatAdd>(r#"{"x":""}"#), vec![u("")]);
     assert_eq!(report::<PatMapAdd>(r#"{"x":1}"#), vec![u("")]);
-    // Integers, raw holders and tagged unions decode inside a catch-all.
-    assert_eq!(report::<IntCatchOrStr>(r#"{"x":1}"#), vec![]);
+    // Integers, raw holders and tagged unions decode inside a catch-all
+    // (`ZooOrStr` below); `IntCatch` has an alias, so it proves nothing.
+    assert_eq!(report::<IntCatchOrStr>(r#"{"x":1}"#), vec![u("")]);
     // A member Rust reads under another name than the schema (a field
     // compiled out, an alias) may fail to decode though valid: undecided.
     assert_eq!(report::<AliasU>(r#"{"aa":5}"#), vec![u("")]);
@@ -1200,6 +1205,10 @@ fn main() {
     assert_eq!(report::<GatedIntU>("5"), vec![v("")]);
     assert_eq!(report::<GatedClosedU>(r#""s""#), vec![v("")]);
     assert!(report::<GatedIntAll>("5").contains(&v("")));
+    // Decoded under other names, a branch is no proof of a match either.
+    assert_eq!(report::<OneAliased>(r#"{"aa":"x"}"#), vec![u("")]);
+    assert_eq!(report::<OneGated>(r#"{"a":5}"#), vec![u("")]);
+    assert_eq!(report::<GatedIntAll>(r#"{"a":5}"#), vec![u("")]);
     let caught: IntCatch = serde_json::from_str(r#"{"aa":"x","b":7,"c":1.0}"#).unwrap();
     assert_eq!(caught.a.as_deref(), Some("x"));
     assert_eq!(serde_json::to_string(&caught).unwrap(), r#"{"a":"x","b":7,"c":1}"#);
@@ -1553,6 +1562,9 @@ func main() {
 	check(`{"a":"x"}`, report[api.GatedClosedU](`{"a":"x"}`))
 	check(`5`, report[api.GatedIntU](`5`), v(""))
 	check(`"s"`, report[api.GatedClosedU](`"s"`), v(""))
+	check(`{"aa":"x"}`, report[api.OneAliased](`{"aa":"x"}`))
+	check(`{"a":5}`, report[api.OneGated](`{"a":5}`))
+	check(`{"a":5}`, report[api.GatedIntAll](`{"a":5}`), v(""))
 	check(`{"a":{"kind":"ZooCat"}}`, report[api.ZooOrStr](`{"a":{"kind":"ZooCat"}}`))
 	check(`"x"`, report[api.Ip](`"x"`), u(""))
 	check(`[]`, report[api.InlineItems](`[]`))
