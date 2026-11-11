@@ -1343,10 +1343,14 @@ fn a_two_oh_warning_points_into_the_source_as_written() {
         "/definitions/P/pattern",
         "/definitions/L",
         "/definitions/H/properties/x/x-rust-attrs",
-        "/definitions/Base/discriminator",
     ] {
         assert!(pointers.contains(&want), "{want} in {pointers:?}");
     }
+    // A plain object's discriminator survives the conversion: no loss.
+    assert!(
+        !pointers.contains(&"/definitions/Base/discriminator"),
+        "{pointers:?}"
+    );
     let ignored = g
         .diagnostics
         .iter()
