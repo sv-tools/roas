@@ -22,7 +22,7 @@ pub mod success_action;
 pub mod version;
 pub mod workflow;
 
-pub use crate::common::reusable::{Reusable, ReusableOr};
+pub use crate::common::reusable::{ResolveError, ResolveReusable, Reusable, ReusableOr};
 pub use components::Components;
 pub use criterion::{Criterion, CriterionType};
 pub use description::Description;

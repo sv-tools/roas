@@ -48,6 +48,130 @@ pub enum ReusableOr<T> {
     Item(T),
 }
 
+/// Where a [`Reusable`] finds objects of type `T`.
+///
+/// A reference is the runtime expression `$components.<kind>.<name>`;
+/// an implementation says how its kind is spelled and looks a name up.
+/// Each version's `Components` and `Description` implement it for the
+/// three kinds a `Reusable` may name: parameters, success actions and
+/// failure actions.
+pub trait ResolveReusable<T> {
+    /// The kind as a reference spells it, e.g. `parameters`.
+    const KIND: &'static str;
+
+    /// The component of this kind called `name`.
+    fn component(&self, name: &str) -> Option<&T>;
+}
+
+/// Why a [`Reusable`] did not lead to an object.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResolveError {
+    /// The reference is not `$components.<expected>.<name>`: it names
+    /// another kind of component, or is not a component reference.
+    WrongKind {
+        reference: String,
+        expected: &'static str,
+    },
+    /// The reference is well-formed but the components hold nothing
+    /// under that name.
+    NotFound(String),
+}
+
+impl ResolveError {
+    /// The reference that did not resolve, as the document spells it.
+    #[must_use]
+    pub fn reference(&self) -> &str {
+        match self {
+            ResolveError::WrongKind { reference, .. } | ResolveError::NotFound(reference) => {
+                reference
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolveError::WrongKind {
+                reference,
+                expected,
+            } => write!(
+                f,
+                "reference `{reference}` must be of the form `$components.{expected}.<name>`"
+            ),
+            ResolveError::NotFound(reference) => write!(f, "reference `{reference}` not found"),
+        }
+    }
+}
+
+impl std::error::Error for ResolveError {}
+
+impl<T> ReusableOr<T> {
+    /// The object itself, or the component a [`Reusable`] names in
+    /// `spec` — a version's `Components` or `Description`.
+    ///
+    /// A `Reusable`'s `value` is not applied; read it with
+    /// [`value_override`](Self::value_override).
+    pub fn get_item<'a, S>(&'a self, spec: &'a S) -> Result<&'a T, ResolveError>
+    where
+        S: ResolveReusable<T>,
+    {
+        let reusable = match self {
+            ReusableOr::Item(item) => return Ok(item),
+            ReusableOr::Reusable(reusable) => reusable,
+        };
+        let reference = reusable.reference.as_str();
+        // A component name may itself contain dots, so everything after
+        // the kind is the name.
+        let name = reference
+            .strip_prefix("$components.")
+            .and_then(|rest| rest.strip_prefix(S::KIND))
+            .and_then(|rest| rest.strip_prefix('.'))
+            .ok_or_else(|| ResolveError::WrongKind {
+                reference: reference.to_owned(),
+                expected: S::KIND,
+            })?;
+        spec.component(name)
+            .ok_or_else(|| ResolveError::NotFound(reference.to_owned()))
+    }
+
+    /// The `value` a [`Reusable`] sets for the object it references,
+    /// e.g. a parameter value. `None` for an inline object.
+    #[must_use]
+    pub fn value_override(&self) -> Option<&serde_json::Value> {
+        match self {
+            ReusableOr::Reusable(reusable) => reusable.value.as_ref(),
+            ReusableOr::Item(_) => None,
+        }
+    }
+}
+
+/// Implement [`ResolveReusable`] for a version's `Components` and
+/// `Description`, one kind per `Type => "kind", field;` entry.
+#[cfg(any(feature = "v1_0", feature = "v1_1"))]
+macro_rules! impl_resolve_reusable {
+    ($components:ty, $description:ty; $($item:ty => $kind:literal, $field:ident;)+) => {$(
+        impl $crate::common::reusable::ResolveReusable<$item> for $components {
+            const KIND: &'static str = $kind;
+
+            fn component(&self, name: &str) -> Option<&$item> {
+                self.$field.get(name)
+            }
+        }
+
+        impl $crate::common::reusable::ResolveReusable<$item> for $description {
+            const KIND: &'static str = $kind;
+
+            fn component(&self, name: &str) -> Option<&$item> {
+                self.components.as_ref()?.$field.get(name)
+            }
+        }
+    )+};
+}
+#[cfg(any(feature = "v1_0", feature = "v1_1"))]
+pub(crate) use impl_resolve_reusable;
+
 impl<'de, T> Deserialize<'de> for ReusableOr<T>
 where
     T: DeserializeOwned,
@@ -83,12 +207,79 @@ mod tests {
     use super::*;
     use enumset::EnumSet;
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     /// Minimal stand-in for a concrete component (keeps these tests
     /// independent of any version feature).
     #[derive(Debug, Deserialize, Default)]
     struct Demo {
         name: String,
+    }
+
+    impl ResolveReusable<Demo> for BTreeMap<String, Demo> {
+        const KIND: &'static str = "demos";
+
+        fn component(&self, name: &str) -> Option<&Demo> {
+            self.get(name)
+        }
+    }
+
+    fn demos() -> BTreeMap<String, Demo> {
+        BTreeMap::from([("a.b".to_owned(), Demo { name: "A".into() })])
+    }
+
+    fn reusable(reference: &str) -> ReusableOr<Demo> {
+        ReusableOr::Reusable(Reusable {
+            reference: reference.to_owned(),
+            value: Some(json!(1)),
+        })
+    }
+
+    #[test]
+    fn get_item_returns_an_inline_item_as_is() {
+        let entry = ReusableOr::Item(Demo { name: "X".into() });
+        assert_eq!(entry.get_item(&demos()).unwrap().name, "X");
+        assert_eq!(entry.value_override(), None);
+    }
+
+    #[test]
+    fn get_item_follows_a_reference_whose_name_has_dots() {
+        let entry = reusable("$components.demos.a.b");
+        assert_eq!(entry.get_item(&demos()).unwrap().name, "A");
+        assert_eq!(entry.value_override(), Some(&json!(1)));
+    }
+
+    #[test]
+    fn get_item_tells_a_missing_name_from_another_kind() {
+        let err = reusable("$components.demos.nope")
+            .get_item(&demos())
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ResolveError::NotFound("$components.demos.nope".to_owned())
+        );
+        assert_eq!(err.reference(), "$components.demos.nope");
+        assert_eq!(
+            err.to_string(),
+            "reference `$components.demos.nope` not found"
+        );
+
+        // A kind that merely starts the same way is still another kind.
+        for reference in ["$components.parameters.a.b", "$components.demosX.a", "a.b"] {
+            let err = reusable(reference).get_item(&demos()).unwrap_err();
+            assert_eq!(
+                err,
+                ResolveError::WrongKind {
+                    reference: reference.to_owned(),
+                    expected: "demos",
+                }
+            );
+            assert_eq!(err.reference(), reference);
+            assert_eq!(
+                err.to_string(),
+                format!("reference `{reference}` must be of the form `$components.demos.<name>`")
+            );
+        }
     }
 
     impl ValidateWithContext for Demo {
