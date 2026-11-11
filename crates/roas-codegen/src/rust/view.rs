@@ -490,7 +490,7 @@ impl Builder<'_> {
                 severity: Severity::Warning,
                 kind: DiagnosticKind::IgnoredExtension { keyword: "x-rust-attrs".into() },
                 schema_id: at.clone(),
-                pointer: format!("{}/x-rust-attrs", at.pointer),
+                pointer: crate::diagnostic::source_of(&format!("{}/x-rust-attrs", at.pointer)),
                 message: "`x-rust-attrs` is code from the description and is not applied unless `allow_codegen_extensions` is set".into(),
             });
             return Vec::new();
@@ -523,7 +523,7 @@ impl Builder<'_> {
                         keyword: "x-rust-attrs".into(),
                     },
                     schema_id: at.clone(),
-                    pointer: format!("{}/x-rust-attrs", at.pointer),
+                    pointer: crate::diagnostic::source_of(&format!("{}/x-rust-attrs", at.pointer)),
                     message: format!("`x-rust-attrs` entry not applied: {error}"),
                 }),
             }

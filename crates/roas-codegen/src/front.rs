@@ -1170,7 +1170,7 @@ fn composition_annotations(front: &mut FrontSchema, extensions: &Option<BTreeMap
         let Some(value) = extensions.get(key) else {
             continue;
         };
-        front.unsupported.retain(|k| k != key);
+        // A value of the wrong type is not read, and stays reported.
         match (key, value) {
             ("title", Value::String(text)) => front.title = Some(text.clone()),
             ("description", Value::String(text)) => front.description = Some(text.clone()),
@@ -1178,8 +1178,9 @@ fn composition_annotations(front: &mut FrontSchema, extensions: &Option<BTreeMap
             ("readOnly", Value::Bool(flag)) => front.read_only = *flag,
             ("writeOnly", Value::Bool(flag)) => front.write_only = *flag,
             ("default", value) => front.default = Some(value.clone()),
-            _ => {}
+            _ => continue,
         }
+        front.unsupported.retain(|k| k != key);
     }
 }
 

@@ -1120,3 +1120,33 @@ fn branch_and_projection_warnings_point_where_they_are_written() {
         "{text}"
     );
 }
+
+#[test]
+fn malformed_composition_annotations_and_projection_extensions_are_reported_in_place() {
+    let g = generate(
+        &document(serde_json::json!({
+            "A": {"deprecated": "yes", "title": 5, "anyOf": [{"type": "string"}, {"type": "boolean"}]},
+            "Loose": {"properties": {"x": {"type": "string", "x-rust-attrs": "#[doc = \"x\"]"}}}
+        })),
+        &rust_config(""),
+    )
+    .unwrap();
+    for keyword in ["deprecated", "title"] {
+        assert!(
+            g.diagnostics.iter().any(|d| matches!(&d.kind, DiagnosticKind::UnsupportedKeyword { keyword: k } if k == keyword)
+                && d.pointer == "/components/schemas/A"),
+            "{keyword}: {:?}",
+            g.diagnostics
+        );
+    }
+    let ignored: Vec<&str> = g
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(&d.kind, DiagnosticKind::IgnoredExtension { .. }))
+        .map(|d| d.pointer.as_str())
+        .collect();
+    assert_eq!(
+        ignored,
+        ["/components/schemas/Loose/properties/x/x-rust-attrs"]
+    );
+}
