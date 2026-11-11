@@ -775,6 +775,10 @@ fn validated_description() -> serde_json::Value {
             "HoldsShortAliased": {"type": "object", "properties": {"inner": {"$ref": "#/components/schemas/ShortAliased"}}},
             "OneHoldsShortAliased": {"oneOf": [{"$ref": "#/components/schemas/HoldsShortAliased"}, {"type": "integer"}]},
             "ManyShortAliased": {"oneOf": [{"type": "array", "items": {"$ref": "#/components/schemas/ShortAliased"}}, {"type": "string"}]},
+            "FreeAliased": {"type": "object", "required": ["r"], "properties": {"a": {"type": "string"}, "r": {"type": "string"}}},
+            "ClosedAliased": {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string"}}},
+            "RequiredAliased": {"type": "object", "required": ["a"], "properties": {"a": {"type": "string", "maxLength": 2}}},
+            "NamesAliased": {"type": "object", "propertyNames": {"maxLength": 1}, "properties": {"ab": {"type": "string"}}},
             "Ip": {"oneOf": [{"type": "string", "format": "ipv4"}, {"type": "string", "maxLength": 3}]},
             "StringOnly": {"type": "string", "enum": ["a", "b"]},
             "ObjectOnly": {"type": "object", "additionalProperties": false, "properties": {"s": {"$ref": "#/components/schemas/StringOnly"}}},
@@ -846,7 +850,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
-        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedInt": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedClosed": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "SubAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "ShortAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "IntCatch": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
+        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedInt": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedClosed": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "SubAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "ShortAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "FreeAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "ClosedAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "RequiredAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesAliased": {"fields": {"ab": {"attrs": ["#[serde(alias = \"b\")]"]}}}, "IntCatch": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
@@ -1244,6 +1248,16 @@ fn main() {
     assert_eq!(report::<OneHoldsShortAliased>(r#"{"inner":{"aa":"xyz"}}"#), vec![u("")]);
     assert_eq!(report::<ManyShortAliased>(r#"[{"aa":"xyz"}]"#), vec![u("")]);
     assert_eq!(report::<ManyShortAliased>(r#"{"aa":"xyz"}"#), vec![v("")]);
+    // On its own, an aliased field does not say which name it was read by.
+    assert_eq!(report::<ShortAliased>(r#"{"aa":"xyz"}"#), vec![u("/a")]);
+    assert_eq!(report::<ShortAliased>(r#"{"a":"xyz"}"#), vec![u("/a")]);
+    assert_eq!(report::<ShortAliased>("{}"), vec![]);
+    assert_eq!(report::<RequiredAliased>(r#"{"aa":"xyz"}"#), vec![u("/a")]);
+    assert_eq!(report::<ClosedAliased>(r#"{"aa":"x"}"#), vec![u("/a")]);
+    assert_eq!(report::<NamesAliased>(r#"{"b":"x"}"#), vec![u("/ab")]);
+    assert_eq!(report::<IntCatch>(r#"{"aa":"x","b":1}"#), vec![u("/a")]);
+    // Nothing would be decided differently: nothing to report.
+    assert_eq!(report::<FreeAliased>(r#"{"aa":"x","r":"y"}"#), vec![]);
     let caught: IntCatch = serde_json::from_str(r#"{"aa":"x","b":7,"c":1.0}"#).unwrap();
     assert_eq!(caught.a.as_deref(), Some("x"));
     assert_eq!(serde_json::to_string(&caught).unwrap(), r#"{"a":"x","b":7,"c":1}"#);
@@ -1607,6 +1621,8 @@ func main() {
 	check(`{"aa":"x"}`, report[api.AllSubAliased](`{"aa":"x"}`), u(""))
 	check(`{"aa":"xyz"}`, report[api.OneShortAliased](`{"aa":"xyz"}`))
 	check(`{"inner":{"aa":"xyz"}}`, report[api.OneHoldsShortAliased](`{"inner":{"aa":"xyz"}}`))
+	check(`{"aa":"xyz"}`, report[api.ShortAliased](`{"aa":"xyz"}`))
+	check(`{"a":"xyz"}`, report[api.ShortAliased](`{"a":"xyz"}`), v("/a"))
 	check(`[{"aa":"xyz"}]`, report[api.ManyShortAliased](`[{"aa":"xyz"}]`))
 	check(`{"aa":"xyz"}`, report[api.ManyShortAliased](`{"aa":"xyz"}`), v(""))
 	check(`{"a":{"kind":"ZooCat"}}`, report[api.ZooOrStr](`{"a":{"kind":"ZooCat"}}`))

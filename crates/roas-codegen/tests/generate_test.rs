@@ -1312,3 +1312,69 @@ fn only_applied_aliases_make_a_branch_undecided() {
     );
     assert!(impl_of("ExtOkU").contains(guard), "{}", impl_of("ExtOkU"));
 }
+
+#[test]
+fn a_two_oh_warning_points_into_the_source_as_written() {
+    let doc = raw_document(serde_json::json!({
+        "swagger": "2.0", "info": {"title": "t", "version": "1"}, "paths": {},
+        "definitions": {
+            "P": {"type": "string", "pattern": "(?=a)"},
+            "H": {"type": "object", "properties": {
+                "x": {"type": "string", "x-rust-attrs": "#[serde(rename = \"z\")]"}}},
+            "Base": {"type": "object", "discriminator": "kind", "required": ["kind"],
+                "properties": {"kind": {"type": "string"}}}
+        }
+    }));
+    let g = generate(
+        &doc,
+        &rust_config("validation = true\nallow_codegen_extensions = true"),
+    )
+    .unwrap();
+    assert!(
+        g.diagnostics
+            .iter()
+            .all(|d| !d.pointer.starts_with("/components/")),
+        "{:?}",
+        g.diagnostics
+    );
+    let pointers: Vec<&str> = g.diagnostics.iter().map(|d| d.pointer.as_str()).collect();
+    for want in [
+        "/definitions/P/pattern",
+        "/definitions/H/properties/x/x-rust-attrs",
+        "/definitions/Base/discriminator",
+    ] {
+        assert!(pointers.contains(&want), "{want} in {pointers:?}");
+    }
+    let ignored = g
+        .diagnostics
+        .iter()
+        .find(|d| matches!(&d.kind, DiagnosticKind::IgnoredExtension { .. }))
+        .expect("the attribute is refused");
+    assert!(
+        ignored.message.contains("`/definitions/H/properties/x`"),
+        "{}",
+        ignored.message
+    );
+}
+
+#[test]
+fn a_badly_typed_annotation_on_a_composition_is_reported_in_every_version() {
+    for openapi in ["3.0.3", "3.1.0"] {
+        let doc = raw_document(serde_json::json!({
+            "openapi": openapi, "info": {"title": "t", "version": "1"}, "paths": {},
+            "components": {"schemas": {
+                "A": {"deprecated": "yes", "title": 5,
+                    "anyOf": [{"type": "string"}, {"type": "boolean"}]}
+            }}
+        }));
+        let g = generate(&doc, &rust_config("")).unwrap();
+        for keyword in ["deprecated", "title"] {
+            assert!(
+                g.diagnostics.iter().any(|d| d.pointer == "/components/schemas/A"
+                    && matches!(&d.kind, DiagnosticKind::UnsupportedKeyword { keyword: k } if k == keyword)),
+                "{openapi} {keyword}: {:?}",
+                g.diagnostics
+            );
+        }
+    }
+}

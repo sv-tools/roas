@@ -443,7 +443,7 @@ pub fn generate(
             ),
         });
     }
-    sort_diagnostics(&mut diagnostics);
+    sort_diagnostics(&mut diagnostics, document.version());
     Ok(Generation {
         target: config.target,
         files,
@@ -479,14 +479,38 @@ pub fn template_context(
     };
     let mut diagnostics = prepared.diagnostics;
     diagnostics.extend(more);
-    sort_diagnostics(&mut diagnostics);
+    sort_diagnostics(&mut diagnostics, document.version());
     Ok(TemplateContext {
         context,
         diagnostics,
     })
 }
 
-fn sort_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
+/// Point a diagnostic into a 2.0 source as written: its schemas are read
+/// at their 3.2 home, `/components/schemas`, and sit under `/definitions`.
+fn point_into_v2_source(diagnostic: &mut Diagnostic) {
+    let Some(rest) = diagnostic.pointer.strip_prefix("/components/schemas/") else {
+        return;
+    };
+    let pointer = format!("/definitions/{rest}");
+    // An attribute that was not applied names its position in the message.
+    if matches!(diagnostic.kind, DiagnosticKind::IgnoredExtension { .. })
+        && let (Some(old), Some(new)) = (
+            diagnostic.pointer.strip_suffix("/x-rust-attrs"),
+            pointer.strip_suffix("/x-rust-attrs"),
+        )
+    {
+        diagnostic.message = diagnostic
+            .message
+            .replace(&format!("`{old}`"), &format!("`{new}`"));
+    }
+    diagnostic.pointer = pointer;
+}
+
+fn sort_diagnostics(diagnostics: &mut Vec<Diagnostic>, version: SourceVersion) {
+    if matches!(version, SourceVersion::V2) {
+        diagnostics.iter_mut().for_each(point_into_v2_source);
+    }
     diagnostics.sort_by(|a, b| {
         a.pointer
             .cmp(&b.pointer)
