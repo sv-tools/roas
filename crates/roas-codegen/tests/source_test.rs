@@ -91,19 +91,13 @@ fn the_2_0_conversion_reports_what_it_drops() {
             other => panic!("unexpected {other:?}"),
         })
         .collect();
+    assert_eq!(keywords, ["collectionFormat"], "{losses:?}");
     assert_eq!(
-        keywords,
-        ["discriminator", "collectionFormat"],
-        "{losses:?}"
-    );
-    assert_eq!(losses[0].schema_id.pointer, "/definitions/Pet");
-    assert_eq!(losses[0].pointer, "/definitions/Pet/discriminator");
-    assert_eq!(
-        losses[1].pointer,
+        losses[0].pointer,
         "/paths/~1pets/get/parameters/0/collectionFormat"
     );
     assert!(losses.iter().all(|d| d.severity == Severity::Warning));
-    // The converted model really has lost it.
+    // A plain object's discriminator is kept, in its 3.x form.
     let pet = &document
         .spec()
         .components
@@ -113,10 +107,14 @@ fn the_2_0_conversion_reports_what_it_drops() {
         .as_ref()
         .unwrap()["Pet"];
     let json = serde_json::to_value(pet).unwrap();
-    assert!(json.get("discriminator").is_none(), "{json}");
+    assert_eq!(
+        json["discriminator"],
+        serde_json::json!({"propertyName": "petType"}),
+        "{json}"
+    );
     // And the same document, validated, still carries the report.
     let validated = validate(document, lenient()).expect("valid");
-    assert_eq!(validated.diagnostics().len(), 2);
+    assert_eq!(validated.diagnostics().len(), 1);
 }
 
 #[test]

@@ -883,6 +883,13 @@ pub struct ObjectSchema {
     #[serde(rename = "x-additionalPropertiesName")]
     pub x_additional_properties_name: Option<String>,
 
+    /// Adds support for polymorphism.
+    /// The discriminator is an object name that is used to differentiate between other schemas
+    /// which may satisfy the payload description.
+    /// See Composition and Inheritance for more details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discriminator: Option<Discriminator>,
+
     /// A list of required properties.
     /// If the object is defined at the root of the document,
     /// the `required` property MUST be omitted.
@@ -1148,6 +1155,9 @@ impl ValidateWithContext<Spec> for ObjectSchema {
         }
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
+        }
+        if let Some(discriminator) = &self.discriminator {
+            discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
         }
 
         if let Some(properties) = &self.properties {
@@ -2019,5 +2029,98 @@ mod multiple_of_validation_tests {
             ..Default::default()
         };
         assert!(errors_for(&integer).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod object_discriminator_tests {
+    use super::*;
+    use crate::validation::ValidationErrorsExt;
+
+    /// The specification's "Models with Polymorphism Support" example:
+    /// the discriminator sits on `Pet`, a plain object schema, and
+    /// `Cat` / `Dog` extend it through `allOf`.
+    fn polymorphism_example() -> serde_json::Value {
+        serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "t", "version": "1"},
+            "paths": {"/pets": {"get": {"responses": {"200": {
+                "description": "ok",
+                "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Pet"}
+                }}
+            }}}}},
+            "components": {"schemas": {
+                "Pet": {
+                    "type": "object",
+                    "discriminator": {
+                        "propertyName": "petType",
+                        "mapping": {"cat": "Cat", "dog": "#/components/schemas/Dog"}
+                    },
+                    "properties": {
+                        "name": {"type": "string"},
+                        "petType": {"type": "string"}
+                    },
+                    "required": ["name", "petType"]
+                },
+                "Cat": {"allOf": [
+                    {"$ref": "#/components/schemas/Pet"},
+                    {"type": "object", "properties": {"huntingSkill": {"type": "string"}}}
+                ]},
+                "Dog": {"allOf": [
+                    {"$ref": "#/components/schemas/Pet"},
+                    {"type": "object", "properties": {"packSize": {"type": "integer"}}}
+                ]}
+            }}
+        })
+    }
+
+    #[test]
+    fn polymorphism_example_round_trips_and_validates() {
+        use crate::validation::{Options, Validate};
+        let raw = polymorphism_example();
+        let spec: Spec = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&spec).unwrap(), raw);
+
+        let schemas = spec.components.as_ref().unwrap().schemas.as_ref().unwrap();
+        let RefOr::Item(Schema::Single(pet)) = &schemas["Pet"] else {
+            panic!("Pet must be a single schema");
+        };
+        let SingleSchema::Object(pet) = &**pet else {
+            panic!("Pet must be an object schema");
+        };
+        let discriminator = pet.discriminator.as_ref().expect("typed discriminator");
+        assert_eq!(discriminator.property_name, "petType");
+        assert_eq!(discriminator.mapping.as_ref().unwrap().len(), 2);
+
+        // `Cat` and `Dog` are reachable only through the mapping, so a
+        // clean run also proves the mapping is walked.
+        spec.validate(Options::new(), None).unwrap();
+    }
+
+    #[test]
+    fn object_schema_bad_discriminator_is_reported() {
+        use crate::validation::Options;
+        let schema = ObjectSchema {
+            discriminator: Some(Discriminator {
+                property_name: String::new(),
+                mapping: Some(BTreeMap::from([("dog".to_owned(), "Missing".to_owned())])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Schema::from(SingleSchema::from(schema)).validate_with_context(&mut ctx, "s".to_owned());
+        assert!(
+            ctx.errors.mentions("s.discriminator.propertyName"),
+            "errors: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors.mentions("s.discriminator.mapping[dog]"),
+            "errors: {:?}",
+            ctx.errors
+        );
     }
 }

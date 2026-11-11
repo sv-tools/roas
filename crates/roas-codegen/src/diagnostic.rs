@@ -216,15 +216,15 @@ mod tests {
         let d = Diagnostic {
             severity: Severity::Warning,
             kind: DiagnosticKind::NormalizationLoss {
-                keyword: "discriminator".into(),
+                keyword: "collectionFormat".into(),
             },
-            schema_id: SchemaId::new(Url::parse("file:///a.json").unwrap(), "/definitions/Pet"),
-            pointer: "/definitions/Pet/discriminator".into(),
+            schema_id: SchemaId::new(Url::parse("file:///a.json").unwrap(), "/parameters/0"),
+            pointer: "/parameters/0/collectionFormat".into(),
             message: "dropped".into(),
         };
         assert_eq!(
             d.to_string(),
-            "warning: file:///a.json#/definitions/Pet/discriminator: dropped"
+            "warning: file:///a.json#/parameters/0/collectionFormat: dropped"
         );
         assert!(Severity::Warning < Severity::Error);
     }

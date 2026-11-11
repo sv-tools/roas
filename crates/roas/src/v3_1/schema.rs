@@ -1324,6 +1324,13 @@ pub struct ObjectSchema {
     #[serde(rename = "x-discriminator-value")]
     pub x_discriminator_value: Option<String>,
 
+    /// Adds support for polymorphism.
+    /// The discriminator is an object name that is used to differentiate between other schemas
+    /// which may satisfy the payload description.
+    /// See Composition and Inheritance for more details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discriminator: Option<Discriminator>,
+
     /// A list of required properties.
     /// If the object is defined at the root of the document,
     /// the `required` property MUST be omitted.
@@ -1504,6 +1511,13 @@ pub struct MultiSchema {
     /// of usage. Default value is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deprecated: Option<bool>,
+
+    /// Adds support for polymorphism.
+    /// The discriminator is an object name that is used to differentiate between other schemas
+    /// which may satisfy the payload description.
+    /// See Composition and Inheritance for more details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discriminator: Option<Discriminator>,
 
     /// Additional external documentation for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1748,6 +1762,9 @@ impl ValidateWithContext<Spec> for ObjectSchema {
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
+        if let Some(discriminator) = &self.discriminator {
+            discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
+        }
 
         // Spec: minProperties MUST be ≤ maxProperties when both are present.
         if let (Some(min), Some(max)) = (self.min_properties, self.max_properties)
@@ -1837,6 +1854,9 @@ impl ValidateWithContext<Spec> for MultiSchema {
         });
         if let Some(docs) = &self.external_docs {
             docs.validate_with_context(ctx, format!("{path}.externalDocs"));
+        }
+        if let Some(discriminator) = &self.discriminator {
+            discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
         }
     }
 }
@@ -3998,5 +4018,136 @@ mod tests {
         let bare = schema_slot(serde_json::json!({"$ref": "#/components/schemas/Tags"}));
         let RefOr::Ref(r) = &bare else { unreachable!() };
         assert!(r.siblings_schemas_for(None).unwrap().is_empty());
+    }
+
+    /// The specification's "Models with Polymorphism Support" example:
+    /// the discriminator sits on `Pet`, a plain object schema, and
+    /// `Cat` / `Dog` extend it through `allOf`.
+    fn polymorphism_example() -> serde_json::Value {
+        serde_json::json!({
+            "openapi": "3.1.2",
+            "info": {"title": "t", "version": "1"},
+            "paths": {"/pets": {"get": {"responses": {"200": {
+                "description": "ok",
+                "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Pet"}
+                }}
+            }}}}},
+            "components": {"schemas": {
+                "Pet": {
+                    "type": "object",
+                    "discriminator": {
+                        "propertyName": "petType",
+                        "mapping": {"cat": "Cat", "dog": "#/components/schemas/Dog"}
+                    },
+                    "properties": {
+                        "name": {"type": "string"},
+                        "petType": {"type": "string"}
+                    },
+                    "required": ["name", "petType"]
+                },
+                "Cat": {"allOf": [
+                    {"$ref": "#/components/schemas/Pet"},
+                    {"type": "object", "properties": {"huntingSkill": {"type": "string"}}}
+                ]},
+                "Dog": {"allOf": [
+                    {"$ref": "#/components/schemas/Pet"},
+                    {"type": "object", "properties": {"packSize": {"type": "integer"}}}
+                ]}
+            }}
+        })
+    }
+
+    #[test]
+    fn polymorphism_example_round_trips_and_validates() {
+        use crate::validation::{Options, Validate};
+        let raw = polymorphism_example();
+        let spec: Spec = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&spec).unwrap(), raw);
+
+        let schemas = spec.components.as_ref().unwrap().schemas.as_ref().unwrap();
+        let RefOr::Item(Schema::Single(pet)) = &schemas["Pet"] else {
+            panic!("Pet must be a single schema");
+        };
+        let SingleSchema::Object(pet) = &**pet else {
+            panic!("Pet must be an object schema");
+        };
+        let discriminator = pet.discriminator.as_ref().expect("typed discriminator");
+        assert_eq!(discriminator.property_name, "petType");
+        assert_eq!(discriminator.mapping.as_ref().unwrap().len(), 2);
+
+        // `Cat` and `Dog` are reachable only through the mapping, so a
+        // clean run also proves the mapping is walked.
+        spec.validate(Options::new(), None).unwrap();
+    }
+
+    #[test]
+    fn object_schema_bad_discriminator_is_reported() {
+        use crate::validation::Options;
+        let schema = ObjectSchema {
+            discriminator: Some(Discriminator {
+                property_name: String::new(),
+                mapping: Some(BTreeMap::from([("dog".to_owned(), "Missing".to_owned())])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Schema::from(SingleSchema::from(schema)).validate_with_context(&mut ctx, "s".to_owned());
+        assert!(
+            ctx.errors.mentions("s.discriminator.propertyName"),
+            "errors: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors.mentions("s.discriminator.mapping[dog]"),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn typeless_schema_carries_a_typed_discriminator() {
+        let raw = serde_json::json!({
+            "properties": {"kind": {"type": "string"}},
+            "discriminator": {"propertyName": "kind"}
+        });
+        let schema: Schema = serde_json::from_value(raw).unwrap();
+        let Schema::Single(single) = &schema else {
+            panic!("expected a single schema, got {schema:?}");
+        };
+        let SingleSchema::Object(object) = &**single else {
+            panic!("expected an object schema, got {single:?}");
+        };
+        assert_eq!(object.discriminator.as_ref().unwrap().property_name, "kind");
+        assert!(object.extensions.is_none(), "{:?}", object.extensions);
+    }
+
+    /// `type: [object, null]` is what a nullable 3.0 parent becomes, so
+    /// the multi-type form has to carry the discriminator as well.
+    #[test]
+    fn multi_schema_carries_and_validates_a_discriminator() {
+        use crate::validation::Options;
+        let raw = serde_json::json!({
+            "type": ["object", "null"],
+            "discriminator": {"propertyName": ""}
+        });
+        let schema: Schema = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&schema).unwrap(), raw);
+        let Schema::Multi(multi) = &schema else {
+            panic!("expected a multi schema, got {schema:?}");
+        };
+        assert!(multi.discriminator.is_some());
+        assert!(multi.extensions.is_none(), "{:?}", multi.extensions);
+
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        schema.validate_with_context(&mut ctx, "s".to_owned());
+        assert!(
+            ctx.errors.mentions("s.discriminator.propertyName"),
+            "errors: {:?}",
+            ctx.errors
+        );
     }
 }

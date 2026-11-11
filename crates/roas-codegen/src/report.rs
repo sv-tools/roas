@@ -9,23 +9,6 @@ use url::Url;
 /// touches something the generator would use.
 pub(crate) fn v2_losses(raw: &Value, uri: &Url, out: &mut Vec<Diagnostic>) {
     walk(raw, String::new(), &mut |object, pointer| {
-        if let Some(Value::String(name)) = object.get("discriminator")
-            && !object.contains_key("allOf")
-        {
-            let mut at = pointer.clone();
-            push_token(&mut at, "discriminator");
-            out.push(Diagnostic {
-                severity: Severity::Warning,
-                kind: DiagnosticKind::NormalizationLoss {
-                    keyword: "discriminator".into(),
-                },
-                schema_id: SchemaId::new(uri.clone(), pointer.clone()),
-                pointer: at,
-                message: format!(
-                    "`discriminator: {name}` on a plain object schema is dropped by the 2.0 → 3.0 conversion, which carries a discriminator only on `allOf` / `oneOf` / `anyOf`; the union will be generated untagged"
-                ),
-            });
-        }
         if let Some(Value::String(format)) = object.get("collectionFormat")
             && format == "tsv"
         {
@@ -142,7 +125,8 @@ mod tests {
     }
 
     #[test]
-    fn plain_object_discriminator_is_a_loss_but_composed_is_not() {
+    fn a_discriminator_is_not_a_loss() {
+        // 3.x keeps it on a plain object schema as on a composition.
         let raw = json!({
             "definitions": {
                 "Pet": {"type": "object", "discriminator": "petType"},
@@ -151,10 +135,7 @@ mod tests {
         });
         let mut out = Vec::new();
         v2_losses(&raw, &uri(), &mut out);
-        assert_eq!(out.len(), 1, "{out:?}");
-        assert_eq!(out[0].pointer, "/definitions/Pet/discriminator");
-        assert_eq!(out[0].schema_id.pointer, "/definitions/Pet");
-        assert_eq!(out[0].severity, Severity::Warning);
+        assert!(out.is_empty(), "{out:?}");
     }
 
     #[test]
