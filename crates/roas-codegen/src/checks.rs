@@ -1286,6 +1286,25 @@ fn number_in(c: &Constraints) -> Vec<Check> {
     out
 }
 
+/// Whether an `f64` holds `n` as written: the float's shortest form reads
+/// back as the same number. Not past the float range, nor underflowing to
+/// zero, nor with more digits than a float keeps.
+pub(crate) fn f64_holds(n: &Number) -> bool {
+    let Some(f) = n.as_f64().filter(|f| f.is_finite()) else {
+        return false;
+    };
+    let Some(back) = Number::from_f64(f) else {
+        return false;
+    };
+    match (parse_decimal(n), parse_decimal(&back)) {
+        (Some(a), Some(b)) => {
+            (a.digits.is_empty() && b.digits.is_empty())
+                || (a.negative == b.negative && a.digits == b.digits && a.exponent == b.exponent)
+        }
+        _ => false,
+    }
+}
+
 /// The integer `n` is, when it is one.
 pub(crate) fn exact_integer(n: &Number) -> Option<i128> {
     let (floor, ceil) = floor_ceil(n);
@@ -1329,6 +1348,29 @@ pub(crate) fn decimal(n: &Number) -> Option<(i128, u32)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn f64_holds_a_number_only_as_written() {
+        for (text, holds) in [
+            ("0.1", true),
+            ("2", true),
+            ("-2.50", true),
+            ("0", true),
+            ("1e2", true),
+        ] {
+            let n: Number = serde_json::from_str(text).unwrap();
+            assert_eq!(super::f64_holds(&n), holds, "{text}");
+        }
+        #[cfg(feature = "exact-numbers")]
+        for text in [
+            "1e-400",
+            "0.10000000000000000000001",
+            "123456789012345678901234567890123456",
+        ] {
+            let n: Number = serde_json::from_str(text).unwrap();
+            assert!(!super::f64_holds(&n), "{text}");
+        }
+    }
+
     use super::*;
 
     fn n(text: &str) -> Number {

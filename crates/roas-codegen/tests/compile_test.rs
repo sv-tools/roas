@@ -645,6 +645,9 @@ fn validated_description() -> serde_json::Value {
             "FloatEnum": {"type": "number", "format": "float", "enum": [0.5, 1.25]},
             "DoubleEnum": {"type": "number", "enum": [0.1, 2]},
             "IntConst": {"type": "integer", "const": 7},
+            "NoInt": {"type": "integer", "enum": []},
+            "IntOrNull": {"type": "object", "properties": {"n": {"type": ["integer", "null"], "enum": [1, null]}}},
+            "Narrow": {"type": "integer", "format": "int32", "enum": [-5, 3000000000i64, 5]},
             "NumConst": {"type": "object", "properties": {"c": {"type": "number", "const": 1.5}}},
             "Pins": {"type": "object", "properties": {
                 "n": {"type": "integer", "enum": [1, 2]},
@@ -1149,6 +1152,12 @@ fn main() {
     assert_eq!(report::<DoubleEnum>("3"), vec![v("")]);
     assert_eq!(report::<IntConst>("7"), vec![]);
     assert_eq!(report::<IntConst>("8"), vec![v("")]);
+    assert_eq!(report::<NoInt>("1"), vec![v("")]);
+    assert_eq!(report::<IntOrNull>(r#"{"n":null}"#), vec![]);
+    assert_eq!(report::<IntOrNull>(r#"{"n":1}"#), vec![]);
+    assert_eq!(report::<IntOrNull>(r#"{"n":2}"#), vec![v("/n")]);
+    assert_eq!(report::<Narrow>("-5"), vec![]);
+    assert_eq!(report::<Narrow>("6"), vec![v("")]);
     assert_eq!(report::<NumConst>(r#"{"c":1.5}"#), vec![]);
     assert_eq!(report::<NumConst>(r#"{"c":2}"#), vec![v("/c")]);
     // A const that is not a number is still not checked.
@@ -1689,6 +1698,12 @@ func main() {
 	check(`3`, report[api.DoubleEnum](`3`), v(""))
 	check(`7`, report[api.IntConst](`7`))
 	check(`8`, report[api.IntConst](`8`), v(""))
+	check(`1`, report[api.NoInt](`1`), v(""))
+	check(`{"n":null}`, report[api.IntOrNull](`{"n":null}`))
+	check(`{"n":1}`, report[api.IntOrNull](`{"n":1}`))
+	check(`{"n":2}`, report[api.IntOrNull](`{"n":2}`), v("/n"))
+	check(`-5`, report[api.Narrow](`-5`))
+	check(`6`, report[api.Narrow](`6`), v(""))
 	check(`{"c":1.5}`, report[api.NumConst](`{"c":1.5}`))
 	check(`{"c":2}`, report[api.NumConst](`{"c":2}`), v("/c"))
 	check(`{"k":false}`, report[api.Pins](`{"k":false}`), u("/k"))

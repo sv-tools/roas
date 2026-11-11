@@ -248,26 +248,43 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                         });
                     }
                     _ => {
-                        // Decided as far as an `f64` holds the value.
-                        let mut set: Vec<f64> = values
-                            .iter()
-                            .filter_map(serde_json::Number::as_f64)
-                            .filter(|f| f.is_finite())
-                            .collect();
-                        set.sort_by(f64::total_cmp);
-                        set.dedup();
-                        let violation = format!(
-                            "{r}.violation({p}, format!(\"{{}} is not {what}\", {v}))"
-                        );
-                        out.push(if set.is_empty() {
-                            format!("{violation};")
-                        } else {
-                            let at = set
+                        // Decided as far as an `f64` holds the value; a listed
+                        // value no float holds as written leaves a value equal
+                        // to its float undecided.
+                        let floats = |exact: bool| {
+                            let mut set: Vec<f64> = values
                                 .iter()
+                                .filter(|n| checks::f64_holds(n) == exact)
+                                .filter_map(serde_json::Number::as_f64)
+                                .filter(|f| f.is_finite())
+                                .collect();
+                            set.sort_by(f64::total_cmp);
+                            set.dedup();
+                            set
+                        };
+                        let any = |set: &[f64]| {
+                            set.iter()
                                 .map(|f| format!("f64::from(*{v}) == {f:?}"))
                                 .collect::<Vec<_>>()
-                                .join(" || ");
-                            format!("if !({at}) {{ {violation}; }}")
+                                .join(" || ")
+                        };
+                        let (exact, inexact) = (floats(true), floats(false));
+                        let violation = format!(
+                            "{r}.violation({p}, format!(\"{{}} is not {what}\", {v}));"
+                        );
+                        let missed = if exact.is_empty() {
+                            violation
+                        } else {
+                            format!("if !({}) {{ {violation} }}", any(&exact))
+                        };
+                        out.push(if inexact.is_empty() {
+                            missed
+                        } else {
+                            format!(
+                                "if {} {{ {r}.unevaluated({p}, {:?}); }} else {{ {missed} }}",
+                                any(&inexact),
+                                format!("{keyword} {literal}: a listed value is not exactly a float, and the value is its float")
+                            )
                         });
                     }
                 }
