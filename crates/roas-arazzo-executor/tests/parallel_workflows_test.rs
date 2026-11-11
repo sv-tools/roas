@@ -569,6 +569,8 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
 /// Answers `b` late, and `a` with a failure the first time — unless told
 /// otherwise.
 struct Late {
+    /// Its sleep returns at once.
+    instant: bool,
     slow: &'static str,
     late: Duration,
     retried: bool,
@@ -580,6 +582,7 @@ struct Late {
 impl Late {
     fn new(late: Duration) -> Self {
         Self {
+            instant: false,
             slow: "b",
             late,
             retried: true,
@@ -630,6 +633,9 @@ impl AsyncHttpClient for Late {
     }
 
     fn sleep(&self, duration: Duration) -> SleepFuture<'_> {
+        if self.instant {
+            return Box::pin(std::future::ready(()));
+        }
         Box::pin(tokio::time::sleep(duration))
     }
 }
@@ -880,4 +886,20 @@ async fn a_retry_waits_by_the_clients_clock() {
         .unwrap();
     assert!(report.is_success(), "{report}");
     assert!(started.elapsed() < Duration::from_millis(500));
+}
+
+#[tokio::test]
+async fn a_retry_waits_by_the_clients_clock_with_requests_in_flight() {
+    // `b` is in flight while `one` waits ten seconds to retry, by a clock
+    // that does not spend them.
+    let description = retrying(10.0);
+    let mut client = Late::new(Duration::from_millis(50));
+    client.instant = true;
+    let started = Instant::now();
+    let report = execute_async(&description, &options().parallel(4), &mut client)
+        .await
+        .unwrap();
+    assert!(report.is_success(), "{report}");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(client.sent(), ["a", "b", "a", "c"]);
 }

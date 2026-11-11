@@ -41,6 +41,9 @@ pub(super) struct Roots<'d> {
     /// until then by its own clock once it advances again, so a branch
     /// due by then goes on, whatever the wall clock says.
     slept: Option<Instant>,
+    /// The wake handed out as [`Progress::Await`]: advancing again with
+    /// nothing handed back means the caller waited until then.
+    awaited: Option<Instant>,
 }
 
 /// One workflow the one asked for depends on.
@@ -261,6 +264,7 @@ impl<'d> Run<'d> {
             entries,
             held: None,
             slept: None,
+            awaited: None,
             routes: Vec::new(),
         };
         roots.entries[0].state = State::Running {
@@ -315,6 +319,9 @@ impl<'d> Run<'d> {
     /// once every one is done, the workflow asked for starts.
     pub(super) fn advance_roots(&mut self) -> Result<Progress, ExecutionError> {
         let roots = self.roots.as_mut().expect("root dependencies to run");
+        if let Some(awaited) = roots.awaited.take() {
+            roots.slept = Some(awaited);
+        }
         if let Some(slept) = roots.slept.take() {
             for entry in &mut roots.entries {
                 if let State::Running {
@@ -417,7 +424,10 @@ impl<'d> Run<'d> {
                     self.roots.as_mut().expect("the roots").slept = wake;
                     Progress::Wait(left)
                 }
-                left => Progress::Await(left),
+                left => {
+                    self.roots.as_mut().expect("the roots").awaited = wake;
+                    Progress::Await(left)
+                }
             });
         }
     }
@@ -477,6 +487,7 @@ impl<'d> Run<'d> {
         error: ExecutionError,
     ) -> Result<(), ExecutionError> {
         let roots = self.roots.as_mut().expect("root dependencies to run");
+        roots.awaited = None;
         let records = match std::mem::replace(&mut roots.entries[at].state, State::Abandoned) {
             State::Running { run, .. } => run.records,
             _ => Vec::new(),
@@ -514,6 +525,8 @@ impl<'d> Run<'d> {
         response: HttpResponse,
     ) -> Result<(), ExecutionError> {
         let roots = self.roots.as_mut().expect("root dependencies to run");
+        // An answer came before the wake: no one waited for it.
+        roots.awaited = None;
         let Some(&(_, at, local)) = roots.routes.iter().find(|(route, _, _)| *route == id) else {
             return Err(ExecutionError::NotWaiting);
         };
