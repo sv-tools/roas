@@ -156,6 +156,8 @@ pub(crate) struct VariantView {
     pub constructor: String,
     /// The value is made up: no tag selects the variant.
     pub synthetic: bool,
+    /// Every wire value selecting the variant, as a `case` list.
+    pub cases: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -890,6 +892,7 @@ impl Builder<'_> {
                         accessor: String::new(),
                         constructor: String::new(),
                         synthetic: false,
+                        cases: String::new(),
                     });
                 }
             }
@@ -920,6 +923,11 @@ impl Builder<'_> {
                         accessor,
                         constructor,
                         synthetic: variant.synthetic,
+                        cases: std::iter::once(&variant.value)
+                            .chain(&variant.aliases)
+                            .map(|tag| quote(tag))
+                            .collect::<Vec<_>>()
+                            .join(", "),
                     });
                 }
             }

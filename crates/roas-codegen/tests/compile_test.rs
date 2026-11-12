@@ -123,6 +123,10 @@ fn main() {
     assert!(matches!(&pets[0], BaseUnion::Doggo(d) if d.bark.as_deref() == Some("woof")));
     assert!(matches!(&pets[1], BaseUnion::Base(b) if b.name.as_deref() == Some("b")));
     assert!(matches!(&pets[2], BaseUnion::Base(b) if b.kind == "other"));
+    // `mapping` overrides a value, not a schema: `Kitty` is still selected
+    // by its name.
+    let shelter: Shelter = serde_json::from_str(r#"{"first":{"kind":"Kitty","lives":3}}"#).unwrap();
+    assert!(matches!(&shelter.first, Some(BaseUnion::Kitty(_))));
     // `mapping` gives the parent's name to `MDog`: the parent is read only
     // as the fallback, its made-up tag selecting nothing.
     let held: MHolder = serde_json::from_str(r#"{"m":{"kind":"MPet","bark":"b"}}"#).unwrap();
@@ -515,6 +519,11 @@ func main() {
 	}
 	if b, ok := pets[2].AsBase(); !ok || b.Kind != "other" {
 		panic(fmt.Sprintf("pets[2]: %+v", pets[2]))
+	}
+	// mapping overrides a value, not a schema: Kitty is still selected by
+	// its name.
+	if _, ok := decode[api.Shelter](`{"first":{"kind":"Kitty","lives":3}}`).First.AsKitty(); !ok {
+		panic("Kitty is selected by its name too")
 	}
 	check(roundTrip[api.Shelter](`{"first":{"kind":"meow","lives":9}}`), `{"first":{"kind":"meow","lives":9}}`)
 	// `mapping` gives the parent's name to MDog: the parent is read only as

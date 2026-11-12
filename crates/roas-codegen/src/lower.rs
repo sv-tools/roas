@@ -208,17 +208,21 @@ impl<'a> Lowerer<'a> {
                     }
                 }
             }
-            // By name, unless `mapping` has the schema already or uses the
-            // name for another one.
+            // By name, unless `mapping` uses the name as a tag: `mapping`
+            // overrides a value, not a schema, so a schema it gives another
+            // tag is still selected by its name too.
+            let mut aliases: BTreeMap<usize, Vec<String>> = BTreeMap::new();
             for name in subtypes
                 .iter()
                 .map(|s| s.as_str())
                 .chain(std::iter::once(parent.as_str()))
             {
-                if !taken.contains(name)
-                    && !variants.iter().any(|(value, n)| n == name || value == name)
-                {
-                    variants.push((name.to_owned(), name.to_owned()));
+                if taken.contains(name) || variants.iter().any(|(value, _)| value == name) {
+                    continue;
+                }
+                match variants.iter().position(|(_, n)| n == name) {
+                    Some(i) => aliases.entry(i).or_default().push(name.to_owned()),
+                    None => variants.push((name.to_owned(), name.to_owned())),
                 }
             }
             // The parent, and what an unknown tag is read as, are always
@@ -230,7 +234,10 @@ impl<'a> Lowerer<'a> {
             for name in [parent.clone(), fallback_name.clone()] {
                 if !variants.iter().any(|(_, n)| *n == name) {
                     let mut value = name.clone();
-                    while taken.contains(&value) || variants.iter().any(|(v, _)| *v == value) {
+                    while taken.contains(&value)
+                        || variants.iter().any(|(v, _)| *v == value)
+                        || aliases.values().flatten().any(|a| *a == value)
+                    {
                         value.push('~');
                     }
                     if value != name {
@@ -273,11 +280,13 @@ impl<'a> Lowerer<'a> {
                     tag: discriminator.property_name.clone(),
                     variants: variants
                         .iter()
-                        .map(|(value, name)| Variant {
+                        .enumerate()
+                        .map(|(i, (value, name))| Variant {
                             value: value.clone(),
                             ty: TypeRef::Named(self.component_ids[name].clone()),
                             suggested_name: vec![name.clone()],
                             synthetic: synthetic.contains(value),
+                            aliases: aliases.remove(&i).unwrap_or_default(),
                         })
                         .collect(),
                     fallback,
@@ -1558,6 +1567,7 @@ impl<'a> Lowerer<'a> {
                     ty: lowered.ty,
                     suggested_name,
                     synthetic: false,
+                    aliases: Vec::new(),
                 });
             }
             return TypeKind::UnionTagged(TaggedUnion {

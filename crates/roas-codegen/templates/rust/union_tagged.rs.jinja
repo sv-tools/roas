@@ -28,7 +28,7 @@ impl<'de> Deserialize<'de> for {{ t.name }} {
 {% if t.fallback is not none %}{% set fallback = t.variants[t.fallback] %}        // An unknown or missing tag is read as `{{ fallback.name }}`.
         match tag.tag.as_deref() {
 {% for v in t.variants %}{% if not v.synthetic %}{% for a in v.cfg %}            {{ a }}
-{% endfor %}            Some({{ v.literal }}) => serde_json::from_str(raw.get()).map(Self::{{ v.name }}).map_err(serde::de::Error::custom),
+{% endfor %}            Some({{ v.pattern }}) => serde_json::from_str(raw.get()).map(Self::{{ v.name }}).map_err(serde::de::Error::custom),
 {% endif %}{% endfor %}{% if fallback.cfg and t.parent_variant is not none and t.parent_variant != t.fallback %}{% set base = t.variants[t.parent_variant] %}            // Compiled out, `{{ fallback.name }}` leaves it to `{{ base.name }}`.
             _ => {
                 #[allow(unused_variables)]
@@ -39,7 +39,7 @@ impl<'de> Deserialize<'de> for {{ t.name }} {
             }
 {% else %}            _ => serde_json::from_str(raw.get()).map(Self::{{ fallback.name }}).map_err(serde::de::Error::custom),
 {% endif %}        }{% else %}        match tag.tag.as_ref() {
-{% for v in t.variants %}            {{ v.literal }} => serde_json::from_str(raw.get()).map(Self::{{ v.name }}).map_err(serde::de::Error::custom),
+{% for v in t.variants %}            {{ v.pattern }} => serde_json::from_str(raw.get()).map(Self::{{ v.name }}).map_err(serde::de::Error::custom),
 {% endfor %}            other => Err(serde::de::Error::unknown_variant(other, &[{% for v in t.variants %}{{ v.literal }}{% if not loop.last %}, {% endif %}{% endfor %}])),
         }{% endif %}
     }

@@ -84,6 +84,8 @@ pub(crate) struct VariantView {
     pub literal: String,
     /// The value is made up: no tag selects the variant.
     pub synthetic: bool,
+    /// Every wire value selecting the variant, as a match pattern.
+    pub pattern: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -969,6 +971,7 @@ impl Builder<'_> {
                         cfg: Vec::new(),
                         literal: format!("{value:?}"),
                         synthetic: false,
+                        pattern: format!("{value:?}"),
                     });
                 }
             }
@@ -1004,7 +1007,11 @@ impl Builder<'_> {
                         value: variant.value.clone(),
                         ty,
                         doc: vec![if !variant.synthetic {
-                            code_span(&format!("{}: {:?}", u.tag.escape_debug(), variant.value))
+                            std::iter::once(&variant.value)
+                                .chain(&variant.aliases)
+                                .map(|tag| code_span(&format!("{}: {tag:?}", u.tag.escape_debug())))
+                                .collect::<Vec<_>>()
+                                .join(" or ")
                         } else if u.fallback == Some(index) {
                             format!("Read when {} names no other variant.", view.tag_doc)
                         } else {
@@ -1014,6 +1021,11 @@ impl Builder<'_> {
                         cfg,
                         literal: format!("{:?}", variant.value),
                         synthetic: variant.synthetic,
+                        pattern: std::iter::once(&variant.value)
+                            .chain(&variant.aliases)
+                            .map(|tag| format!("{tag:?}"))
+                            .collect::<Vec<_>>()
+                            .join(" | "),
                     });
                 }
             }

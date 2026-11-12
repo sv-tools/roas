@@ -214,6 +214,9 @@ pub(crate) struct Variant {
     /// `value` is made up, no tag on the wire: the variant is read only
     /// as the fallback, never by its tag.
     pub synthetic: bool,
+    /// Further wire values selecting the variant: its component name, when
+    /// `mapping` gives it another tag and the name to no schema.
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -400,10 +403,12 @@ impl Ir {
                     // A tag of its own reads it no more; being the default,
                     // neither does an unknown or missing one.
                     if !v.synthetic {
-                        gone.push(UnionNote::Pruned {
-                            tag: v.value.clone(),
-                            default: None,
-                        });
+                        gone.extend(std::iter::once(&v.value).chain(&v.aliases).map(|tag| {
+                            UnionNote::Pruned {
+                                tag: tag.clone(),
+                                default: None,
+                            }
+                        }));
                     }
                     if v.synthetic || u.fallback == Some(index) {
                         gone.push(UnionNote::Pruned {
