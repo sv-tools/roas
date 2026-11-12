@@ -72,12 +72,7 @@ pub(crate) fn lower(front: &Front, config: &Config) -> Ir {
     }
     lowerer.polymorphic();
     lowerer.mark_cycles();
-    for (parent, value, read_as) in lowerer.ir.suppress() {
-        lowerer
-            .ir
-            .diagnostics
-            .push(pruned(&parent, &value, read_as.as_deref()));
-    }
+    lowerer.ir.suppress();
     lowerer.mark_opted_out_branches();
     lowerer.ir
 }
@@ -199,15 +194,19 @@ impl<'a> Lowerer<'a> {
                 .as_deref()
                 .and_then(target)
                 .unwrap_or_else(|| parent.clone());
-            // What an unknown tag is read as is always a variant: when its
-            // name is a tag `mapping` gives to another schema, under a tag
-            // of its own, which any unknown tag reads it as anyway.
-            if !variants.iter().any(|(_, n)| *n == fallback_name) {
-                let mut value = fallback_name.clone();
-                while variants.iter().any(|(v, _)| *v == value) {
-                    value.push('~');
+            // The parent, and what an unknown tag is read as, are always
+            // variants: when a name is a tag `mapping` gives to another
+            // schema, under a tag of its own, which any unknown tag reads
+            // it as anyway. The parent is what a tag is read as once the
+            // schema it names is not generated or compiled out.
+            for name in [parent.clone(), fallback_name.clone()] {
+                if !variants.iter().any(|(_, n)| *n == name) {
+                    let mut value = name.clone();
+                    while variants.iter().any(|(v, _)| *v == value) {
+                        value.push('~');
+                    }
+                    variants.push((value, name));
                 }
-                variants.push((value, fallback_name.clone()));
             }
             let fallback = variants.iter().position(|(_, n)| *n == fallback_name);
             let parent_id = self.component_ids[parent].clone();

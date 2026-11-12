@@ -1967,3 +1967,73 @@ fn a_left_out_subtype_is_said_to_be_read_as_the_default_mapping() {
         g.diagnostics
     );
 }
+
+#[test]
+fn a_left_out_default_mapping_leaves_unknown_tags_to_the_parent() {
+    let mut components = parent_family();
+    components["Pet"]["discriminator"]["mapping"] =
+        serde_json::json!({"Pet": "#/components/schemas/Cat"});
+    components["Pet"]["discriminator"]["defaultMapping"] =
+        serde_json::json!("#/components/schemas/Dog");
+    components["Dog"]["allOf"][1]["properties"]["bark"] = serde_json::json!({"not": {}});
+    let g = generate(&document(components), &rust_config("")).unwrap();
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    let squeezed: String = text.split_whitespace().collect();
+    assert!(
+        squeezed.contains("_=>serde_json::from_str(raw.get()).map(Self::Pet)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_compiled_out_default_mapping_leaves_unknown_tags_to_the_parent() {
+    let mut components = parent_family();
+    components["Pet"]["discriminator"]["defaultMapping"] =
+        serde_json::json!("#/components/schemas/Dog");
+    let g = generate(
+        &document(components),
+        &rust_config("[types.Dog]\nattrs = ['#[cfg(feature = \"dogs\")]']\n"),
+    )
+    .unwrap();
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    let union = text.find("pub enum PetUnion").expect("a union");
+    let head = &text[text[..union].rfind("\n\n").unwrap()..union];
+    assert!(!head.contains("cfg"), "{head}");
+    let squeezed: String = text.split_whitespace().collect();
+    assert!(
+        squeezed.contains("letread=|raw:&str|serde_json::from_str(raw).map(Self::Pet);#[cfg(feature=\"dogs\")]letread=|raw:&str|serde_json::from_str(raw).map(Self::Dog);"),
+        "{text}"
+    );
+}
+
+#[test]
+fn no_left_out_warning_for_a_parent_not_generated() {
+    let mut components = parent_family();
+    components["Pet"]["properties"]["x"] =
+        serde_json::json!({"$id": "https://example.com/x", "type": "string"});
+    components["Cat"]["allOf"][1]["properties"]["lives"] = serde_json::json!({"not": {}});
+    let g = generate(&document(components), &rust_config("")).unwrap();
+    assert!(
+        !g.diagnostics
+            .iter()
+            .any(|d| d.message.contains("is not generated; such a value")),
+        "{:?}",
+        g.diagnostics
+    );
+}
+
+#[test]
+fn a_tag_value_any_string_may_be_is_a_rust_literal() {
+    let mut components = parent_family();
+    components["Pet"]["discriminator"]["mapping"] =
+        serde_json::json!({"a<b>&'\u{1}": "#/components/schemas/Cat"});
+    generate(&document(components), &rust_config("")).expect("valid Rust");
+}

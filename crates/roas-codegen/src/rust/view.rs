@@ -80,6 +80,8 @@ pub(crate) struct VariantView {
     /// The variant's conditional-compilation gates, repeated on every
     /// match arm naming it.
     pub cfg: Vec<String>,
+    /// The wire value as a Rust string literal.
+    pub literal: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -112,6 +114,11 @@ pub(crate) struct TypeView {
     /// For a tagged union, the index of the variant an unknown or missing
     /// tag is read as; `None` refuses such a value.
     pub fallback: Option<usize>,
+    /// For a union read by a parent's discriminator, the index of the
+    /// parent's variant: what the fallback falls back to when compiled out.
+    pub parent_variant: Option<usize>,
+    /// The discriminator property as a Rust string literal.
+    pub tag_literal: String,
     /// `oneOf` rather than `anyOf`, for an open union's documentation.
     pub exclusive: bool,
     /// The statements of `Validate::validate_into`, with validation on;
@@ -682,14 +689,12 @@ impl Builder<'_> {
         check_container_attrs(&user_attrs, &raw_name)?;
         attrs.extend(user_attrs);
         attrs.extend(self.codegen_attrs(&def.extensions, &def.id, false));
-        // A union read by a parent's discriminator exists only where what
-        // it reads an unknown tag as does; each other variant is gated on
-        // its own.
+        // A union read by a parent's discriminator exists only where the
+        // parent does; each other variant is gated on its own.
         if let TypeKind::UnionTagged(u) = &def.kind
-            && u.parent.is_some()
-            && let Some(fallback) = u.fallback.and_then(|i| u.variants[i].ty.direct_named())
+            && let Some(parent) = &u.parent
         {
-            for gate in self.type_gates(fallback, &raw_name)? {
+            for gate in self.type_gates(parent, &raw_name)? {
                 if !attrs.contains(&gate) {
                     attrs.push(gate);
                 }
@@ -714,6 +719,8 @@ impl Builder<'_> {
             inner: String::new(),
             tag: String::new(),
             fallback: None,
+            parent_variant: None,
+            tag_literal: String::new(),
             exclusive: false,
             validate: None,
             validate_null: Vec::new(),
@@ -955,6 +962,7 @@ impl Builder<'_> {
                         doc: Vec::new(),
                         attrs: vec![format!("#[serde(rename = {value:?})]")],
                         cfg: Vec::new(),
+                        literal: format!("{value:?}"),
                     });
                 }
             }
@@ -962,7 +970,13 @@ impl Builder<'_> {
                 view.kind = "union_tagged";
                 view.derives.push("Serialize".to_owned());
                 view.tag = u.tag.clone();
+                view.tag_literal = format!("{:?}", u.tag);
                 view.fallback = u.fallback;
+                view.parent_variant = u.parent.as_ref().and_then(|p| {
+                    u.variants
+                        .iter()
+                        .position(|v| v.ty.direct_named() == Some(p))
+                });
                 let mut allocator = Allocator::default();
                 for variant in &u.variants {
                     let name = allocator.allocate(legal(pascal(&variant.suggested_name)));
@@ -985,6 +999,7 @@ impl Builder<'_> {
                         doc: vec![format!("`{}: {:?}`", u.tag, variant.value)],
                         attrs: cfg.clone(),
                         cfg,
+                        literal: format!("{:?}", variant.value),
                     });
                 }
             }

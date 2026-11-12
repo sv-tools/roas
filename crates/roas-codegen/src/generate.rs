@@ -356,7 +356,12 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
             }
         }
         // Re-run suppression with the extra errors.
-        for (parent, value, read_as) in ir.suppress() {
+        ir.suppress();
+    }
+    // What was left out of a parent's union, once it is settled whether
+    // the parent is generated at all.
+    for (parent, value, read_as) in std::mem::take(&mut ir.pruned) {
+        if !ir.suppressed.contains(&parent) {
             ir.diagnostics
                 .push(crate::lower::pruned(&parent, &value, read_as.as_deref()));
         }

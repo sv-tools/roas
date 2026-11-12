@@ -302,15 +302,18 @@ pub(crate) struct Ir {
     pub diagnostics: Vec<Diagnostic>,
     /// Types not emitted: their own error, or a dependency's.
     pub suppressed: BTreeSet<SchemaId>,
+    /// Schemas left out of their parent's union: the parent, the tag, and
+    /// what the tag is read as instead.
+    pub pruned: Vec<(SchemaId, String, Option<String>)>,
 }
 
 impl Ir {
     /// Suppresses every type with an error, or holding one. A union read by
     /// a parent's discriminator first leaves out the schemas not generated
     /// on their own account — judged with every such union set aside — so
-    /// that they do not take every holder of the parent with them. Returns
-    /// each left out, as its parent and the tag it was read by.
-    pub(crate) fn suppress(&mut self) -> Vec<(SchemaId, String, Option<String>)> {
+    /// that they do not take every holder of the parent with them; each left
+    /// out is recorded in `pruned`.
+    pub(crate) fn suppress(&mut self) {
         fn closure(ir: &Ir, aside: &BTreeSet<SchemaId>) -> BTreeSet<SchemaId> {
             let mut suppressed: BTreeSet<SchemaId> = ir
                 .types
@@ -394,7 +397,7 @@ impl Ir {
             );
         }
         self.suppressed = closure(self, &BTreeSet::new());
-        notes
+        self.pruned.extend(notes);
     }
 
     /// Named types a definition holds directly — the edges that can

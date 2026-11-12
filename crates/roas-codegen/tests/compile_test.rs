@@ -719,7 +719,7 @@ fn validated_description() -> serde_json::Value {
                 {"type": "object", "properties": {"lives": {"type": "integer", "maximum": 9}}}]},
             "VShelter": {"type": "object", "properties": {"first": {"$ref": "#/components/schemas/VBase"}}},
             "GBase": {"type": "object", "required": ["kind"], "properties": {"kind": {"type": "string"}},
-                "discriminator": {"propertyName": "kind"}},
+                "discriminator": {"propertyName": "kind", "defaultMapping": "#/components/schemas/GCat"}},
             "GCat": {"allOf": [{"$ref": "#/components/schemas/GBase"},
                 {"type": "object", "properties": {"lives": {"type": "integer", "maximum": 9}}}]},
             "GHolder": {"type": "object", "properties": {"g": {"$ref": "#/components/schemas/GBase"}}},
@@ -1236,6 +1236,8 @@ fn main() {
     assert_eq!(report::<VShelter>(r#"{"first":{"kind":"VKitty","lives":9,"name":"ab"}}"#), vec![]);
     // A subtype compiled out leaves its tag to the parent: the holder stays.
     assert_eq!(report::<GHolder>(r#"{"g":{"kind":"GCat","lives":10}}"#), vec![]);
+    // ...and so does a `defaultMapping` to it: unknown tags are the parent's.
+    assert_eq!(report::<GHolder>(r#"{"g":{"kind":"other","lives":10}}"#), vec![]);
     assert_eq!(report::<Ni>("2"), vec![]);
     assert_eq!(report::<Ni>("2.0"), vec![]);
     assert_eq!(report::<Pins>(r#"{"n":3}"#), vec![v("/n")]);
@@ -1806,6 +1808,7 @@ func main() {
 	check(`{"first":{"kind":"VKitty","lives":9,"name":"ab"}}`, report[api.VShelter](`{"first":{"kind":"VKitty","lives":9,"name":"ab"}}`))
 	// Go has no gates: the subtype is read as itself.
 	check(`{"g":{"kind":"GCat","lives":10}}`, report[api.GHolder](`{"g":{"kind":"GCat","lives":10}}`), v("/g/lives"))
+	check(`{"g":{"kind":"other","lives":10}}`, report[api.GHolder](`{"g":{"kind":"other","lives":10}}`), v("/g/lives"))
 	check(`2`, report[api.Ni](`2`))
 	check(`2.0`, report[api.Ni](`2.0`))
 	check(`{"n":3}`, report[api.Pins](`{"n":3}`), v("/n"))
