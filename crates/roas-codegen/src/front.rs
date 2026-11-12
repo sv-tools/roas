@@ -202,6 +202,9 @@ pub(crate) struct FrontSchema {
     pub const_value: Option<Value>,
     /// `patternProperties`: each pattern, as written, with its schema.
     pub patterns: Vec<(String, Slot)>,
+    /// A `discriminator` on an object schema: a parent the schemas building
+    /// on it with `allOf` are selected from.
+    pub discriminator: Option<roas::v3_2::discriminator::Discriminator>,
 }
 
 /// The translation of one document's components.
@@ -635,6 +638,7 @@ impl Translator<'_> {
             dialect: None,
             const_value: None,
             patterns: Vec::new(),
+            discriminator: None,
         }
     }
 
@@ -1108,6 +1112,7 @@ impl Translator<'_> {
             .as_ref()
             .map(|p| p.keys().cloned().collect())
             .unwrap_or_default();
+        front.discriminator = s.discriminator.clone();
         for (source, slot) in s.pattern_properties.iter().flatten() {
             let mut child = pointer_text.clone();
             push_token(&mut child, "patternProperties");

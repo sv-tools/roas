@@ -39,7 +39,24 @@ func (u *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 		return err
 	}
 	tag, err := readTag(raw, {{ t.name_literal }}, {{ t.tag_literal }})
-	if err != nil {
+{% if t.fallback is not none %}{% set fallback = t.variants[t.fallback] %}	if err == nil {
+		switch tag {
+{% for v in t.variants %}		case {{ v.literal }}:
+			var v {{ v.ty }}
+			if err := json.Unmarshal(raw, &v, decodeOptions); err != nil {
+				return err
+			}
+			*u = {{ t.name }}{tag: tag, value: v}
+			return nil
+{% endfor %}		}
+	}
+	// An unknown or missing tag is read as the {{ fallback.literal }} variant.
+	var v {{ fallback.ty }}
+	if err := json.Unmarshal(raw, &v, decodeOptions); err != nil {
+		return err
+	}
+	*u = {{ t.name }}{tag: {{ fallback.literal }}, value: v}
+	return nil{% else %}	if err != nil {
 		return err
 	}
 	switch tag {
@@ -51,6 +68,6 @@ func (u *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 		*u = {{ t.name }}{tag: tag, value: v}
 		return nil
 {% endfor %}	}
-	return fmt.Errorf("%s: %q is not a known %s", {{ t.name_literal }}, tag, {{ t.tag_literal }})
+	return fmt.Errorf("%s: %q is not a known %s", {{ t.name_literal }}, tag, {{ t.tag_literal }}){% endif %}
 }
 {% block trailing %}{% endblock %}

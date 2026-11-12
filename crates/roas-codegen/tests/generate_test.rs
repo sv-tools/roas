@@ -1730,3 +1730,41 @@ fn a_yaml_integer_const_written_as_a_float_is_compared_rounded_even_read_exactly
         .collect::<String>();
     assert!(code.contains("as f64)"), "{code}");
 }
+
+#[test]
+fn a_parent_discriminator_that_cannot_select_is_warned_about() {
+    let g = generate(
+        &document(serde_json::json!({
+            "N": {"type": "object", "properties": {"k": {"type": "integer"}},
+                "discriminator": {"propertyName": "k"}},
+            "NSub": {"allOf": [{"$ref": "#/components/schemas/N"}, {"type": "object"}]},
+            "M": {"type": "object", "properties": {"k": {"type": "string"}},
+                "discriminator": {"propertyName": "k", "mapping": {"x": "#/components/schemas/Elsewhere"}}},
+            "MSub": {"allOf": [{"$ref": "#/components/schemas/M"}, {"type": "object"}]},
+            "Elsewhere": {"type": "object"}
+        })),
+        &rust_config(""),
+    )
+    .unwrap();
+    let warned = |name: &str, text: &str| {
+        g.diagnostics
+            .iter()
+            .any(|d| d.pointer == format!("/components/schemas/{name}") && d.message.contains(text))
+    };
+    assert!(warned("N", "not a string property"), "{:?}", g.diagnostics);
+    assert!(
+        warned("M", "neither this schema nor one building on it"),
+        "{:?}",
+        g.diagnostics
+    );
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    // No union for `N`; one for `M`, with its mapped value left out.
+    assert!(
+        !text.contains("pub enum NUnion") && text.contains("pub enum MUnion"),
+        "{text}"
+    );
+}

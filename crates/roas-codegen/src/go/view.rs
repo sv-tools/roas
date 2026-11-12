@@ -180,6 +180,9 @@ pub(crate) struct TypeView {
     pub inner: String,
     /// Discriminator property of a tagged union, and as a literal.
     pub tag: String,
+    /// For a tagged union, the index of the variant an unknown or missing
+    /// tag is read as; `None` refuses such a value.
+    pub fallback: Option<usize>,
     pub tag_literal: String,
     /// `oneOf` rather than `anyOf`, for an open union's documentation.
     pub exclusive: bool,
@@ -626,6 +629,7 @@ impl Builder<'_> {
             branches: Vec::new(),
             inner: String::new(),
             tag: String::new(),
+            fallback: None,
             tag_literal: String::new(),
             exclusive: false,
             required_count: 0,
@@ -891,6 +895,7 @@ impl Builder<'_> {
                 self.support.tagged = true;
                 view.tag = u.tag.clone();
                 view.tag_literal = quote(&u.tag);
+                view.fallback = u.fallback;
                 let mut methods = Allocator::default();
                 for reserved in ["Tag", "Value", "MarshalJSONTo", "UnmarshalJSONFrom"] {
                     methods.reserve(reserved);

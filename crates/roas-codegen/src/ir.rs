@@ -218,6 +218,10 @@ pub(crate) struct TaggedUnion {
     /// The discriminator property.
     pub tag: String,
     pub variants: Vec<Variant>,
+    /// The variant a value with an unknown or missing tag is read as: for
+    /// a parent schema's discriminator, the parent itself (or the
+    /// `defaultMapping`); `None` refuses such a value.
+    pub fallback: Option<usize>,
 }
 
 /// One projection of an open holder.

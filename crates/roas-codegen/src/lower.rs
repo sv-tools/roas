@@ -70,6 +70,7 @@ pub(crate) fn lower(front: &Front, config: &Config) -> Ir {
     for (name, slot) in &front.components {
         lowerer.component(name, slot);
     }
+    lowerer.polymorphic();
     lowerer.mark_cycles();
     lowerer.suppress();
     lowerer.mark_opted_out_branches();
@@ -77,6 +78,195 @@ pub(crate) fn lower(front: &Front, config: &Config) -> Ir {
 }
 
 impl<'a> Lowerer<'a> {
+    /// A parent schema with a `discriminator` and the components that
+    /// build on it with `allOf`: every value position holding the parent
+    /// holds a union of them instead, selected by the discriminator — by
+    /// `mapping`, else by component name; any other tag is the parent (or
+    /// the `defaultMapping`). The discriminator here is a hint JSON Schema
+    /// validation does not use; the union trusts it.
+    fn polymorphic(&mut self) {
+        let components = &self.front.components;
+        let mut unions: BTreeMap<SchemaId, SchemaId> = BTreeMap::new();
+        for (parent, slot) in components {
+            let Slot::Inline(schema) = slot else { continue };
+            let (Some(discriminator), Kind::Object { properties, .. }) =
+                (&schema.discriminator, &schema.kind)
+            else {
+                continue;
+            };
+            let builds_on = |slot: &Slot| {
+                match slot {
+                Slot::Inline(s) => match &s.kind {
+                    Kind::AllOf { branches } => branches.iter().any(|b| {
+                        matches!(b, Slot::Ref { target: RefTarget::Component(n), .. } if n == parent)
+                    }),
+                    _ => false,
+                },
+                _ => false,
+            }
+            };
+            let subtypes: Vec<&String> = components
+                .iter()
+                .filter(|(name, slot)| *name != parent && builds_on(slot))
+                .map(|(name, _)| name)
+                .collect();
+            if subtypes.is_empty() {
+                continue;
+            }
+            // The tag must be a string property of the parent.
+            let tag_is_string = matches!(
+                properties.get(&discriminator.property_name),
+                Some(Slot::Inline(tag)) if matches!(tag.kind, Kind::String { .. })
+            );
+            if !tag_is_string {
+                self.warn(
+                    DiagnosticKind::UnsupportedKeyword { keyword: "discriminator".into() },
+                    &schema.id,
+                    format!(
+                        "the discriminator names `{}`, which is not a string property of this schema; the schemas building on it are not read by it",
+                        discriminator.property_name
+                    ),
+                );
+                continue;
+            }
+            let members: BTreeSet<&str> = subtypes
+                .iter()
+                .map(|s| s.as_str())
+                .chain(std::iter::once(parent.as_str()))
+                .collect();
+            let target = |reference: &str| -> Option<String> {
+                let name = reference
+                    .strip_prefix("#/components/schemas/")
+                    .unwrap_or(reference);
+                members.contains(name).then(|| name.to_owned())
+            };
+            let mut variants: Vec<(String, String)> = Vec::new();
+            for (value, reference) in discriminator.mapping.iter().flatten() {
+                match target(reference) {
+                    Some(name) => variants.push((value.clone(), name)),
+                    None => self.warn(
+                        DiagnosticKind::UnsupportedKeyword { keyword: "discriminator".into() },
+                        &schema.id,
+                        format!(
+                            "the discriminator maps `{value}` to `{reference}`, which is neither this schema nor one building on it; the value is read as this schema"
+                        ),
+                    ),
+                }
+            }
+            for name in subtypes
+                .iter()
+                .map(|s| s.as_str())
+                .chain(std::iter::once(parent.as_str()))
+            {
+                if !variants.iter().any(|(_, n)| n == name) {
+                    variants.push((name.to_owned(), name.to_owned()));
+                }
+            }
+            let fallback_name = discriminator
+                .default_mapping
+                .as_deref()
+                .and_then(&target)
+                .unwrap_or_else(|| parent.clone());
+            let fallback = variants.iter().position(|(_, n)| *n == fallback_name);
+            let parent_id = self.component_ids[parent].clone();
+            let Some(parent_def) = self.ir.types.get(&parent_id) else {
+                continue;
+            };
+            let union_id = SchemaId {
+                pointer: crate::diagnostic::synthetic(&parent_id.pointer, "union"),
+                ..parent_id.clone()
+            };
+            let def = TypeDef {
+                id: union_id.clone(),
+                suggested_name: vec![parent.clone(), "union".to_owned()],
+                component: None,
+                title: None,
+                description: Some(format!(
+                    "A `{parent}` or a schema building on it, selected by `{}`.",
+                    discriminator.property_name
+                )),
+                deprecated: parent_def.deprecated,
+                nullable: false,
+                constraints: Default::default(),
+                extensions: BTreeMap::new(),
+                kind: TypeKind::UnionTagged(TaggedUnion {
+                    tag: discriminator.property_name.clone(),
+                    variants: variants
+                        .iter()
+                        .map(|(value, name)| Variant {
+                            value: value.clone(),
+                            ty: TypeRef::Named(self.component_ids[name].clone()),
+                            suggested_name: vec![name.clone()],
+                        })
+                        .collect(),
+                    fallback,
+                }),
+                has_error: false,
+            };
+            self.register(def);
+            unions.insert(parent_id, union_id);
+        }
+        if unions.is_empty() {
+            return;
+        }
+        // Every value position holding a parent holds its union; an
+        // `allOf` part stays the parent, which a schema building on it is
+        // made of, and a union's own parent variant stays the parent.
+        fn rewrite(
+            ty: &mut TypeRef,
+            unions: &BTreeMap<SchemaId, SchemaId>,
+            keep: Option<&SchemaId>,
+        ) {
+            match ty {
+                TypeRef::Named(id) if Some(&*id) != keep => {
+                    if let Some(union) = unions.get(id) {
+                        *id = union.clone();
+                    }
+                }
+                TypeRef::Boxed(inner)
+                | TypeRef::Nullable(inner)
+                | TypeRef::Array(inner)
+                | TypeRef::Map(inner) => rewrite(inner, unions, keep),
+                _ => {}
+            }
+        }
+        let parent_of: BTreeMap<SchemaId, SchemaId> =
+            unions.iter().map(|(p, u)| (u.clone(), p.clone())).collect();
+        for def in self.ir.types.values_mut() {
+            let keep = parent_of.get(&def.id);
+            match &mut def.kind {
+                TypeKind::Struct(s) => {
+                    for field in &mut s.fields {
+                        rewrite(&mut field.ty, &unions, None);
+                    }
+                    if let crate::ir::Additional::CatchAll(ty) = &mut s.additional {
+                        rewrite(ty, &unions, None);
+                    }
+                    for pattern in &mut s.patterns {
+                        if let crate::ir::PatternSchema::Branch(b) = &mut pattern.schema {
+                            rewrite(&mut b.ty, &unions, None);
+                        }
+                    }
+                    if let crate::ir::Others::Schema(b) = &mut s.others {
+                        rewrite(&mut b.ty, &unions, None);
+                    }
+                }
+                TypeKind::UnionTagged(u) => {
+                    for variant in &mut u.variants {
+                        rewrite(&mut variant.ty, &unions, keep);
+                    }
+                }
+                TypeKind::UnionOpen(u) => {
+                    for branch in &mut u.branches {
+                        rewrite(&mut branch.ty, &unions, None);
+                    }
+                }
+                TypeKind::Newtype(ty) | TypeKind::Alias(ty) => rewrite(ty, &unions, None),
+                TypeKind::ComposedOpen(_) | TypeKind::StringEnum(_) | TypeKind::Extern => {}
+            }
+        }
+    }
+
     /// A branch that holds an opted-out type anywhere inside proves no
     /// match: that type checks nothing, so decoding it says too little.
     fn mark_opted_out_branches(&mut self) {
@@ -1290,6 +1480,7 @@ impl<'a> Lowerer<'a> {
             return TypeKind::UnionTagged(TaggedUnion {
                 tag: discriminator.property_name.clone(),
                 variants: out,
+                fallback: None,
             });
         }
         let reason = match discriminator {

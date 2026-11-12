@@ -13,15 +13,19 @@
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         struct Tag<'a> {
-            #[serde(rename = {{ t.tag | tojson }}, borrow)]
-            tag: std::borrow::Cow<'a, str>,
+            #[serde(rename = {{ t.tag | tojson }}, borrow{% if t.fallback is not none %}, default{% endif %})]
+            tag: {% if t.fallback is not none %}Option<std::borrow::Cow<'a, str>>{% else %}std::borrow::Cow<'a, str>{% endif %},
         }
         let raw: Box<serde_json::value::RawValue> = Deserialize::deserialize(deserializer)?;
         let tag: Tag<'_> = serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
-        match tag.tag.as_ref() {
+{% if t.fallback is not none %}{% set fallback = t.variants[t.fallback] %}        // An unknown or missing tag is read as `{{ fallback.name }}`.
+        match tag.tag.as_deref() {
+{% for v in t.variants %}            Some({{ v.value | tojson }}) => serde_json::from_str(raw.get()).map(Self::{{ v.name }}).map_err(serde::de::Error::custom),
+{% endfor %}            _ => serde_json::from_str(raw.get()).map(Self::{{ fallback.name }}).map_err(serde::de::Error::custom),
+        }{% else %}        match tag.tag.as_ref() {
 {% for v in t.variants %}            {{ v.value | tojson }} => serde_json::from_str(raw.get()).map(Self::{{ v.name }}).map_err(serde::de::Error::custom),
 {% endfor %}            other => Err(serde::de::Error::unknown_variant(other, &[{% for v in t.variants %}{{ v.value | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}])),
-        }
+        }{% endif %}
     }
 }
 {% block trailing %}{% endblock %}

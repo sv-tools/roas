@@ -106,6 +106,9 @@ pub(crate) struct TypeView {
     pub inner: String,
     /// Discriminator property of a tagged union.
     pub tag: String,
+    /// For a tagged union, the index of the variant an unknown or missing
+    /// tag is read as; `None` refuses such a value.
+    pub fallback: Option<usize>,
     /// `oneOf` rather than `anyOf`, for an open union's documentation.
     pub exclusive: bool,
     /// The statements of `Validate::validate_into`, with validation on;
@@ -666,6 +669,7 @@ impl Builder<'_> {
             branches: Vec::new(),
             inner: String::new(),
             tag: String::new(),
+            fallback: None,
             exclusive: false,
             validate: None,
             validate_null: Vec::new(),
@@ -913,6 +917,7 @@ impl Builder<'_> {
                 view.kind = "union_tagged";
                 view.derives.push("Serialize".to_owned());
                 view.tag = u.tag.clone();
+                view.fallback = u.fallback;
                 let mut allocator = Allocator::default();
                 for variant in &u.variants {
                     let name = allocator.allocate(legal(pascal(&variant.suggested_name)));

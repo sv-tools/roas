@@ -112,6 +112,23 @@ fn main() {
     let ids: Ids = serde_json::from_str(r#"["a","b"]"#).unwrap();
     assert_eq!(ids.0.len(), 2);
     let _: Alias = serde_json::from_str(r#"{"petType":"Cat"}"#).unwrap();
+    // A parent schema's discriminator selects among the schemas building on
+    // it: by mapping, by component name, and anything else is the parent.
+    let shelter: Shelter = serde_json::from_str(
+        r#"{"first":{"kind":"meow","lives":9},"pets":[{"kind":"Doggo","bark":"woof"},{"kind":"Base","name":"b"},{"kind":"other","name":"o"}]}"#,
+    )
+    .unwrap();
+    assert!(matches!(&shelter.first, Some(BaseUnion::Kitty(k)) if k.lives.map(|n| n.0) == Some(9)));
+    let pets = shelter.pets.as_ref().unwrap();
+    assert!(matches!(&pets[0], BaseUnion::Doggo(d) if d.bark.as_deref() == Some("woof")));
+    assert!(matches!(&pets[1], BaseUnion::Base(b) if b.name.as_deref() == Some("b")));
+    assert!(matches!(&pets[2], BaseUnion::Base(b) if b.kind == "other"));
+    assert_eq!(
+        round_trip::<Shelter>(r#"{"first":{"kind":"meow","lives":9}}"#),
+        r#"{"first":{"kind":"meow","lives":9}}"#
+    );
+    // A `Kitty` on its own is still a `Kitty`.
+    let _: Kitty = serde_json::from_str(r#"{"kind":"meow","lives":1}"#).unwrap();
     // Beside `additionalProperties: false`, a member must be a property or
     // match a pattern; pattern members land in the catch-all.
     assert_eq!(
@@ -169,6 +186,16 @@ fn description() -> serde_json::Value {
             "Node": {"type": "object", "properties": {"next": {"type": ["object", "null"], "$comment": "x"}}},
             "Ids": {"type": "array", "items": {"type": "string"}},
             "Alias": {"$ref": "#/components/schemas/Cat"},
+            "Base": {"type": "object", "required": ["kind"],
+                "properties": {"kind": {"type": "string"}, "name": {"type": "string"}},
+                "discriminator": {"propertyName": "kind", "mapping": {"meow": "#/components/schemas/Kitty"}}},
+            "Kitty": {"allOf": [{"$ref": "#/components/schemas/Base"},
+                {"type": "object", "properties": {"lives": {"type": "integer"}}}]},
+            "Doggo": {"allOf": [{"$ref": "#/components/schemas/Base"},
+                {"type": "object", "properties": {"bark": {"type": "string"}}}]},
+            "Shelter": {"type": "object", "properties": {
+                "pets": {"type": "array", "items": {"$ref": "#/components/schemas/Base"}},
+                "first": {"$ref": "#/components/schemas/Base"}}},
             "Extensible": {"type": "object", "additionalProperties": false,
                 "properties": {"id": {"type": "string"}},
                 "patternProperties": {"^x-": {"type": "string"}, "^n\\d+$": {"type": "integer"}}},
@@ -424,6 +451,21 @@ func main() {
 	check(len(decode[api.Ids](`["a","b"]`)), 2)
 	check(roundTrip[api.Ids](`["a","b"]`), `["a","b"]`)
 	var _ api.Cat = decode[api.Alias](`{"petType":"Cat"}`)
+	shelter := decode[api.Shelter](`{"first":{"kind":"meow","lives":9},"pets":[{"kind":"Doggo","bark":"woof"},{"kind":"Base","name":"b"},{"kind":"other","name":"o"}]}`)
+	if k, ok := shelter.First.AsKitty(); !ok || int64(*k.Lives) != 9 {
+		panic(fmt.Sprintf("first: %+v", shelter.First))
+	}
+	pets := *shelter.Pets
+	if d, ok := pets[0].AsDoggo(); !ok || *d.Bark != "woof" {
+		panic(fmt.Sprintf("pets[0]: %+v", pets[0]))
+	}
+	if b, ok := pets[1].AsBase(); !ok || *b.Name != "b" {
+		panic(fmt.Sprintf("pets[1]: %+v", pets[1]))
+	}
+	if b, ok := pets[2].AsBase(); !ok || b.Kind != "other" {
+		panic(fmt.Sprintf("pets[2]: %+v", pets[2]))
+	}
+	check(roundTrip[api.Shelter](`{"first":{"kind":"meow","lives":9}}`), `{"first":{"kind":"meow","lives":9}}`)
 	check(len(decode[api.Extensible](`{"id":"a","x-k":"v","n12":5}`).AdditionalProperties), 2)
 	mustFail[api.Extensible](`{"id":"a","zz":1}`, "zz matches no pattern")
 	mustFail[api.Extensible](`{"n1x":1}`, "n1x matches no pattern")
@@ -642,6 +684,12 @@ fn validated_description() -> serde_json::Value {
             "Sib": {"$ref": "#/components/schemas/Short", "minLength": 2},
             "SibC": {"$ref": "#/components/schemas/Short", "const": "zz"},
             "Ni": {"type": "integer", "enum": [1, 2]},
+            "VBase": {"type": "object", "required": ["kind"],
+                "properties": {"kind": {"type": "string"}, "name": {"type": "string", "maxLength": 3}},
+                "discriminator": {"propertyName": "kind"}},
+            "VKitty": {"allOf": [{"$ref": "#/components/schemas/VBase"},
+                {"type": "object", "properties": {"lives": {"type": "integer", "maximum": 9}}}]},
+            "VShelter": {"type": "object", "properties": {"first": {"$ref": "#/components/schemas/VBase"}}},
             "FloatEnum": {"type": "number", "format": "float", "enum": [0.5, 1.25]},
             "DoubleEnum": {"type": "number", "enum": [0.1, 2]},
             "IntConst": {"type": "integer", "const": 7},
@@ -1149,6 +1197,10 @@ fn main() {
     // A number's enum and const are checked: integers exactly, a double
     // as far as an f64 holds it, a float equal to a value is undecided.
     assert_eq!(report::<Ni>("3"), vec![v("")]);
+    // A union read by a parent's discriminator checks the variant it holds.
+    assert_eq!(report::<VShelter>(r#"{"first":{"kind":"VKitty","lives":10}}"#), vec![v("/first/lives")]);
+    assert_eq!(report::<VShelter>(r#"{"first":{"kind":"x","name":"long"}}"#), vec![v("/first/name")]);
+    assert_eq!(report::<VShelter>(r#"{"first":{"kind":"VKitty","lives":9,"name":"ab"}}"#), vec![]);
     assert_eq!(report::<Ni>("2"), vec![]);
     assert_eq!(report::<Ni>("2.0"), vec![]);
     assert_eq!(report::<Pins>(r#"{"n":3}"#), vec![v("/n")]);
@@ -1714,6 +1766,9 @@ func main() {
 	check(`"a"`, report[api.Sib](`"a"`), u(""))
 	check(`"a"`, report[api.SibC](`"a"`), u(""))
 	check(`3`, report[api.Ni](`3`), v(""))
+	check(`{"first":{"kind":"VKitty","lives":10}}`, report[api.VShelter](`{"first":{"kind":"VKitty","lives":10}}`), v("/first/lives"))
+	check(`{"first":{"kind":"x","name":"long"}}`, report[api.VShelter](`{"first":{"kind":"x","name":"long"}}`), v("/first/name"))
+	check(`{"first":{"kind":"VKitty","lives":9,"name":"ab"}}`, report[api.VShelter](`{"first":{"kind":"VKitty","lives":9,"name":"ab"}}`))
 	check(`2`, report[api.Ni](`2`))
 	check(`2.0`, report[api.Ni](`2.0`))
 	check(`{"n":3}`, report[api.Pins](`{"n":3}`), v("/n"))
