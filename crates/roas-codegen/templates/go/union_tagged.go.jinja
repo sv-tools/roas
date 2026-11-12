@@ -50,6 +50,11 @@ func (u *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 			return nil
 {% endfor %}		}
 	}
+	// Only an object has a tag to be missing: anything else, null included,
+	// is no variant.
+	if raw.Kind() != '{' {
+		return fmt.Errorf("%s: want a JSON object, got %s", {{ t.name_literal }}, raw)
+	}
 	// An unknown or missing tag is read as the {{ fallback.literal }} variant.
 	var v {{ fallback.ty }}
 	if err := json.Unmarshal(raw, &v, decodeOptions); err != nil {

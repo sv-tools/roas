@@ -213,6 +213,10 @@ impl<'a> Lowerer<'a> {
             let Some(parent_def) = self.ir.types.get(&parent_id) else {
                 continue;
             };
+            // A substituted parent is the user's type wherever it is held.
+            if matches!(parent_def.kind, TypeKind::Extern) {
+                continue;
+            }
             let union_id = SchemaId {
                 pointer: crate::diagnostic::synthetic(&parent_id.pointer, "union"),
                 ..parent_id.clone()

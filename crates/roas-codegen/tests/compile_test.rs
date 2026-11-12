@@ -135,6 +135,9 @@ fn main() {
     assert!(matches!(held.t, Some(TaggedUnion::Lion(_))));
     let held: TagHolder = serde_json::from_str(r#"{"t":{"kind":"other"}}"#).unwrap();
     assert!(matches!(held.t, Some(TaggedUnion::Tagged(_))));
+    // A null is no variant, even of a parent boxed in a cycle.
+    assert!(serde_json::from_str::<Forest>(r#"{"trees":[null]}"#).is_err());
+    assert!(serde_json::from_str::<Forest>(r#"{"trees":[{"kind":"x","child":{"kind":"Leaf"}}]}"#).is_ok());
     // A `Kitty` on its own is still a `Kitty`.
     let _: Kitty = serde_json::from_str(r#"{"kind":"meow","lives":1}"#).unwrap();
     // Beside `additionalProperties: false`, a member must be a property or
@@ -215,6 +218,12 @@ fn description() -> serde_json::Value {
             "Lion": {"allOf": [{"$ref": "#/components/schemas/Catty"},
                 {"type": "object", "properties": {"l": {"type": "string"}}}]},
             "TagHolder": {"type": "object", "properties": {"t": {"$ref": "#/components/schemas/Tagged"}}},
+            "Tree": {"type": "object", "required": ["kind"],
+                "properties": {"kind": {"type": "string"}, "child": {"$ref": "#/components/schemas/Tree"}},
+                "discriminator": {"propertyName": "kind"}},
+            "Leaf": {"allOf": [{"$ref": "#/components/schemas/Tree"}, {"type": "object"}]},
+            "Forest": {"type": "object", "properties": {
+                "trees": {"type": "array", "items": {"$ref": "#/components/schemas/Tree"}}}},
             "Extensible": {"type": "object", "additionalProperties": false,
                 "properties": {"id": {"type": "string"}},
                 "patternProperties": {"^x-": {"type": "string"}, "^n\\d+$": {"type": "integer"}}},
@@ -491,6 +500,8 @@ func main() {
 	if _, ok := decode[api.TagHolder](`{"t":{"kind":"Lion","l":"y"}}`).T.AsLion(); !ok {
 		panic("Lion builds on Catty")
 	}
+	mustFail[api.Forest](`{"trees":[null]}`, "a null is no Tree")
+	check(len(*decode[api.Forest](`{"trees":[{"kind":"x","child":{"kind":"Leaf"}}]}`).Trees), 1)
 	if _, ok := decode[api.TagHolder](`{"t":{"kind":"other"}}`).T.AsTagged(); !ok {
 		panic("other is read as the parent")
 	}

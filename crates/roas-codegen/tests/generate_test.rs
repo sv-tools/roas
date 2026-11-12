@@ -2102,3 +2102,18 @@ fn a_self_referential_parent_keeps_its_fallback_when_the_default_is_left_out() {
         g.diagnostics
     );
 }
+
+#[test]
+fn a_substituted_parent_is_held_as_its_substitution() {
+    let mut components = parent_family();
+    components["Pet"]["x-unused"] = serde_json::json!(true);
+    let config = rust_config("[substitutions.Pet.rust]\nname = \"serde_json::Value\"\n");
+    let g = generate(&document(components), &config).unwrap();
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    assert!(!text.contains("PetUnion"), "{text}");
+    assert!(text.contains("pub p: Option<serde_json::Value>"), "{text}");
+}
