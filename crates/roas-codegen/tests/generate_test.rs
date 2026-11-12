@@ -1768,3 +1768,64 @@ fn a_parent_discriminator_that_cannot_select_is_warned_about() {
         "{text}"
     );
 }
+
+fn parent_family() -> serde_json::Value {
+    serde_json::json!({
+        "Pet": {"type": "object", "required": ["kind"], "properties": {"kind": {"type": "string"}},
+            "discriminator": {"propertyName": "kind"}},
+        "Cat": {"allOf": [{"$ref": "#/components/schemas/Pet"},
+            {"type": "object", "properties": {"lives": {"type": "integer"}}}]},
+        "Dog": {"allOf": [{"$ref": "#/components/schemas/Pet"},
+            {"type": "object", "properties": {"bark": {"type": "string"}}}]},
+        "Shelter": {"type": "object", "properties": {"p": {"$ref": "#/components/schemas/Pet"}}}
+    })
+}
+
+#[test]
+fn a_broken_schema_building_on_a_parent_is_left_out_of_its_union() {
+    let mut components = parent_family();
+    components["Cat"]["allOf"][1]["properties"]["lives"] = serde_json::json!({"not": {}});
+    let g = generate(&document(components), &rust_config("")).unwrap();
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    assert!(
+        text.contains("pub struct Shelter") && text.contains("pub enum PetUnion"),
+        "{text}"
+    );
+    assert!(!text.contains("Cat(Cat)"), "{text}");
+    assert!(
+        g.diagnostics
+            .iter()
+            .any(|d| d.pointer == "/components/schemas/Pet"
+                && d.message.contains("is not generated")),
+        "{:?}",
+        g.diagnostics
+    );
+}
+
+#[test]
+fn a_parent_union_is_gated_and_named_as_its_parent_is() {
+    let gate = "attrs = ['#[cfg(any())]']";
+    let config = rust_config(&format!(
+        "[types.Pet]\nrename = \"Animal\"\n{gate}\n[types.Cat]\n{gate}\n[types.Dog]\n{gate}\n[types.Shelter]\n{gate}\n"
+    ));
+    let g = generate(&document(parent_family()), &config).unwrap();
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    let union = text
+        .find("pub enum AnimalUnion")
+        .expect("named after the rename");
+    assert!(
+        text[..union].trim_end().ends_with("#[serde(untagged)]")
+            || text[..union].contains("#[cfg(any())]"),
+        "{text}"
+    );
+    let head = &text[text[..union].rfind("\n\n").unwrap()..union];
+    assert!(head.contains("#[cfg(any())]"), "{head}");
+}

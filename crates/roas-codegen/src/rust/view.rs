@@ -651,6 +651,31 @@ impl Builder<'_> {
         check_container_attrs(&user_attrs, &raw_name)?;
         attrs.extend(user_attrs);
         attrs.extend(self.codegen_attrs(&def.extensions, &def.id, false));
+        // A union read by a parent's discriminator exists only where its
+        // parent and every schema it reads do.
+        if let TypeKind::UnionTagged(u) = &def.kind
+            && u.parent.is_some()
+        {
+            let mut gates = Vec::new();
+            for variant in &u.variants {
+                if let Some(variant_def) = variant
+                    .ty
+                    .direct_named()
+                    .and_then(|id| self.ir.types.get(id))
+                {
+                    let configured: Vec<String> = self
+                        .type_config(variant_def)
+                        .map(|t| t.attrs.clone())
+                        .unwrap_or_default();
+                    gates.extend(cfg_gates(&configured, &raw_name)?);
+                }
+            }
+            for gate in gates {
+                if !attrs.contains(&gate) {
+                    attrs.push(gate);
+                }
+            }
+        }
         let cfg = cfg_gates(&attrs, &raw_name)?;
         let mut derives: Vec<String> = ["Debug", "Clone", "PartialEq"]
             .iter()

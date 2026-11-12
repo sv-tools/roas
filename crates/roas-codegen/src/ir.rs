@@ -222,6 +222,8 @@ pub(crate) struct TaggedUnion {
     /// a parent schema's discriminator, the parent itself (or the
     /// `defaultMapping`); `None` refuses such a value.
     pub fallback: Option<usize>,
+    /// For a union read by a parent schema's discriminator, the parent.
+    pub parent: Option<SchemaId>,
 }
 
 /// One projection of an open holder.

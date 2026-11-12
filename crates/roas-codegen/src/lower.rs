@@ -73,6 +73,7 @@ pub(crate) fn lower(front: &Front, config: &Config) -> Ir {
     lowerer.polymorphic();
     lowerer.mark_cycles();
     lowerer.suppress();
+    lowerer.prune_unions();
     lowerer.mark_opted_out_branches();
     lowerer.ir
 }
@@ -94,30 +95,55 @@ impl<'a> Lowerer<'a> {
             else {
                 continue;
             };
-            let builds_on = |slot: &Slot| {
+            // The components building on the parent, directly or through
+            // one another: an `allOf` with a `$ref` to it or to one of them.
+            let builds_on = |slot: &Slot, bases: &BTreeSet<&str>| {
                 match slot {
                 Slot::Inline(s) => match &s.kind {
                     Kind::AllOf { branches } => branches.iter().any(|b| {
-                        matches!(b, Slot::Ref { target: RefTarget::Component(n), .. } if n == parent)
+                        matches!(b, Slot::Ref { target: RefTarget::Component(n), .. } if bases.contains(n.as_str()))
                     }),
                     _ => false,
                 },
                 _ => false,
             }
             };
+            let mut family: BTreeSet<&str> = BTreeSet::from([parent.as_str()]);
+            loop {
+                let before = family.len();
+                for (name, slot) in components {
+                    if !family.contains(name.as_str()) && builds_on(slot, &family) {
+                        family.insert(name.as_str());
+                    }
+                }
+                if family.len() == before {
+                    break;
+                }
+            }
             let subtypes: Vec<&String> = components
-                .iter()
-                .filter(|(name, slot)| *name != parent && builds_on(slot))
-                .map(|(name, _)| name)
+                .keys()
+                .filter(|name| *name != parent && family.contains(name.as_str()))
                 .collect();
             if subtypes.is_empty() {
                 continue;
             }
-            // The tag must be a string property of the parent.
-            let tag_is_string = matches!(
-                properties.get(&discriminator.property_name),
-                Some(Slot::Inline(tag)) if matches!(tag.kind, Kind::String { .. })
-            );
+            // The tag must be a string property of the parent, written in
+            // place or behind references.
+            let tag_is_string = {
+                let mut slot = properties.get(&discriminator.property_name);
+                let mut seen = BTreeSet::new();
+                loop {
+                    match slot {
+                        Some(Slot::Inline(tag)) => break matches!(tag.kind, Kind::String { .. }),
+                        Some(Slot::Ref {
+                            target: RefTarget::Component(name),
+                            siblings: None,
+                            ..
+                        }) if seen.insert(name.clone()) => slot = components.get(name),
+                        _ => break false,
+                    }
+                }
+            };
             if !tag_is_string {
                 self.warn(
                     DiagnosticKind::UnsupportedKeyword { keyword: "discriminator".into() },
@@ -153,12 +179,14 @@ impl<'a> Lowerer<'a> {
                     ),
                 }
             }
+            // By name, unless `mapping` has the schema already or uses the
+            // name for another one.
             for name in subtypes
                 .iter()
                 .map(|s| s.as_str())
                 .chain(std::iter::once(parent.as_str()))
             {
-                if !variants.iter().any(|(_, n)| n == name) {
+                if !variants.iter().any(|(value, n)| n == name || value == name) {
                     variants.push((name.to_owned(), name.to_owned()));
                 }
             }
@@ -176,9 +204,16 @@ impl<'a> Lowerer<'a> {
                 pointer: crate::diagnostic::synthetic(&parent_id.pointer, "union"),
                 ..parent_id.clone()
             };
+            // Named after the parent as it is generated.
+            let base = self
+                .config
+                .types
+                .get(parent)
+                .and_then(|t| t.rename.clone())
+                .unwrap_or_else(|| parent.clone());
             let def = TypeDef {
                 id: union_id.clone(),
-                suggested_name: vec![parent.clone(), "union".to_owned()],
+                suggested_name: vec![base, "union".to_owned()],
                 component: None,
                 title: None,
                 description: Some(format!(
@@ -200,6 +235,7 @@ impl<'a> Lowerer<'a> {
                         })
                         .collect(),
                     fallback,
+                    parent: Some(parent_id.clone()),
                 }),
                 has_error: false,
             };
@@ -1481,6 +1517,7 @@ impl<'a> Lowerer<'a> {
                 tag: discriminator.property_name.clone(),
                 variants: out,
                 fallback: None,
+                parent: None,
             });
         }
         let reason = match discriminator {
@@ -1860,6 +1897,55 @@ impl<'a> Lowerer<'a> {
 
     /// A type with an error, and every type that holds it, is not
     /// emitted; the rest still is.
+    /// A schema building on a parent that is not generated is left out of
+    /// the parent's union, rather than taking every holder of the parent
+    /// with it: a value it would be read as is read as the parent.
+    fn prune_unions(&mut self) {
+        let suppressed = self.ir.suppressed.clone();
+        let mut pruned = false;
+        let mut notes = Vec::new();
+        for def in self.ir.types.values_mut() {
+            let TypeKind::UnionTagged(u) = &mut def.kind else {
+                continue;
+            };
+            let Some(parent) = u.parent.clone() else {
+                continue;
+            };
+            if suppressed.contains(&parent) || !suppressed.contains(&def.id) {
+                continue;
+            }
+            let fallback = u.fallback.map(|i| u.variants[i].ty.clone());
+            let before = u.variants.len();
+            u.variants.retain(|v| {
+                let gone =
+                    v.ty.direct_named()
+                        .is_some_and(|id| suppressed.contains(id));
+                if gone {
+                    notes.push((parent.clone(), v.value.clone()));
+                }
+                !gone
+            });
+            if u.variants.len() == before {
+                continue;
+            }
+            pruned = true;
+            let parent_ty = TypeRef::Named(parent.clone());
+            u.fallback = fallback
+                .and_then(|ty| u.variants.iter().position(|v| v.ty == ty))
+                .or_else(|| u.variants.iter().position(|v| v.ty == parent_ty));
+        }
+        for (parent, value) in notes {
+            self.warn(
+                DiagnosticKind::UnsupportedKeyword { keyword: "discriminator".into() },
+                &parent,
+                format!("the schema the discriminator reads `{value}` as is not generated; such a value is read as this schema"),
+            );
+        }
+        if pruned {
+            self.suppress();
+        }
+    }
+
     fn suppress(&mut self) {
         let mut suppressed: BTreeSet<SchemaId> = self
             .ir

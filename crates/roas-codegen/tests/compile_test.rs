@@ -127,6 +127,14 @@ fn main() {
         round_trip::<Shelter>(r#"{"first":{"kind":"meow","lives":9}}"#),
         r#"{"first":{"kind":"meow","lives":9}}"#
     );
+    // A mapping key wins over a component name; a schema building on one
+    // building on the parent is a variant too; the tag may be a `$ref`.
+    let held: TagHolder = serde_json::from_str(r#"{"t":{"kind":"Doggy","c":"x"}}"#).unwrap();
+    assert!(matches!(held.t, Some(TaggedUnion::Catty(_))));
+    let held: TagHolder = serde_json::from_str(r#"{"t":{"kind":"Lion","l":"y"}}"#).unwrap();
+    assert!(matches!(held.t, Some(TaggedUnion::Lion(_))));
+    let held: TagHolder = serde_json::from_str(r#"{"t":{"kind":"other"}}"#).unwrap();
+    assert!(matches!(held.t, Some(TaggedUnion::Tagged(_))));
     // A `Kitty` on its own is still a `Kitty`.
     let _: Kitty = serde_json::from_str(r#"{"kind":"meow","lives":1}"#).unwrap();
     // Beside `additionalProperties: false`, a member must be a property or
@@ -196,6 +204,17 @@ fn description() -> serde_json::Value {
             "Shelter": {"type": "object", "properties": {
                 "pets": {"type": "array", "items": {"$ref": "#/components/schemas/Base"}},
                 "first": {"$ref": "#/components/schemas/Base"}}},
+            "TagKind": {"type": "string", "enum": ["Doggy", "Catty", "Lion", "Tagged", "other"]},
+            "Tagged": {"type": "object", "required": ["kind"],
+                "properties": {"kind": {"$ref": "#/components/schemas/TagKind"}},
+                "discriminator": {"propertyName": "kind", "mapping": {"Doggy": "#/components/schemas/Catty"}}},
+            "Catty": {"allOf": [{"$ref": "#/components/schemas/Tagged"},
+                {"type": "object", "properties": {"c": {"type": "string"}}}]},
+            "Doggy": {"allOf": [{"$ref": "#/components/schemas/Tagged"},
+                {"type": "object", "properties": {"d": {"type": "string"}}}]},
+            "Lion": {"allOf": [{"$ref": "#/components/schemas/Catty"},
+                {"type": "object", "properties": {"l": {"type": "string"}}}]},
+            "TagHolder": {"type": "object", "properties": {"t": {"$ref": "#/components/schemas/Tagged"}}},
             "Extensible": {"type": "object", "additionalProperties": false,
                 "properties": {"id": {"type": "string"}},
                 "patternProperties": {"^x-": {"type": "string"}, "^n\\d+$": {"type": "integer"}}},
@@ -466,6 +485,15 @@ func main() {
 		panic(fmt.Sprintf("pets[2]: %+v", pets[2]))
 	}
 	check(roundTrip[api.Shelter](`{"first":{"kind":"meow","lives":9}}`), `{"first":{"kind":"meow","lives":9}}`)
+	if _, ok := decode[api.TagHolder](`{"t":{"kind":"Doggy","c":"x"}}`).T.AsCatty(); !ok {
+		panic("Doggy is mapped to Catty")
+	}
+	if _, ok := decode[api.TagHolder](`{"t":{"kind":"Lion","l":"y"}}`).T.AsLion(); !ok {
+		panic("Lion builds on Catty")
+	}
+	if _, ok := decode[api.TagHolder](`{"t":{"kind":"other"}}`).T.AsTagged(); !ok {
+		panic("other is read as the parent")
+	}
 	check(len(decode[api.Extensible](`{"id":"a","x-k":"v","n12":5}`).AdditionalProperties), 2)
 	mustFail[api.Extensible](`{"id":"a","zz":1}`, "zz matches no pattern")
 	mustFail[api.Extensible](`{"n1x":1}`, "n1x matches no pattern")
