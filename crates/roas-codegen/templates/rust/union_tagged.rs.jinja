@@ -1,7 +1,7 @@
 {% block doc %}{% for line in t.doc %}/// {{ line }}
-{% endfor %}/// Selected by `{{ t.tag }}`. Serialization writes the variant as it is;
-/// deserialization reads `{{ t.tag }}` first and then decodes the whole
-/// value as that variant, so the variant type keeps its own `{{ t.tag }}`.
+{% endfor %}/// Selected by {{ t.tag_doc }}. Serialization writes the variant as it is;
+/// deserialization reads {{ t.tag_doc }} first and then decodes the whole
+/// value as that variant, so the variant type keeps its own {{ t.tag_doc }}.
 {% endblock %}{% block derives %}#[derive({{ t.derives | join(", ") }})]
 {% endblock %}{% block attrs %}#[serde(untagged)]
 {% for a in t.attrs %}{{ a }}
@@ -9,19 +9,39 @@
 {% block variants %}{% for v in t.variants %}{% include "rust/variant.rs.jinja" %}{% endfor %}{% endblock %}}
 
 {% for a in t.cfg %}{{ a }}
-{% endfor %}impl<'de> Deserialize<'de> for {{ t.name }} {
+{% endfor %}// Only the fallback arm is left once every other variant is compiled out.
+#[allow(clippy::match_single_binding)]
+impl<'de> Deserialize<'de> for {{ t.name }} {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         struct Tag<'a> {
-            #[serde(rename = {{ t.tag | tojson }}, borrow)]
-            tag: std::borrow::Cow<'a, str>,
+            #[serde(rename = {{ t.tag_literal }}, borrow{% if t.fallback is not none %}, default{% endif %})]
+            tag: {% if t.fallback is not none %}Option<std::borrow::Cow<'a, str>>{% else %}std::borrow::Cow<'a, str>{% endif %},
         }
         let raw: Box<serde_json::value::RawValue> = Deserialize::deserialize(deserializer)?;
-        let tag: Tag<'_> = serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
-        match tag.tag.as_ref() {
-{% for v in t.variants %}            {{ v.value | tojson }} => serde_json::from_str(raw.get()).map(Self::{{ v.name }}).map_err(serde::de::Error::custom),
-{% endfor %}            other => Err(serde::de::Error::unknown_variant(other, &[{% for v in t.variants %}{{ v.value | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}])),
+        // Only an object has a tag: serde's derive would read one out of an
+        // array too.
+        if !raw.get().trim_start().starts_with('{') {
+            return Err(serde::de::Error::custom(format!("{}: want a JSON object, got {}", {{ t.name | tojson }}, raw.get())));
         }
+        let tag: Tag<'_> = serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
+{% if t.fallback is not none %}{% set fallback = t.variants[t.fallback] %}        // An unknown or missing tag is read as `{{ fallback.name }}`.
+        match tag.tag.as_deref() {
+{% for v in t.variants %}{% if not v.synthetic %}{% for a in v.cfg %}            {{ a }}
+{% endfor %}            Some({{ v.pattern }}) => serde_json::from_str(raw.get()).map(Self::{{ v.name }}).map_err(serde::de::Error::custom),
+{% endif %}{% endfor %}{% if fallback.cfg and t.parent_variant is not none and t.parent_variant != t.fallback %}{% set base = t.variants[t.parent_variant] %}            // Compiled out, `{{ fallback.name }}` leaves it to `{{ base.name }}`.
+            _ => {
+                #[allow(unused_variables)]
+                let read = |raw: &str| serde_json::from_str(raw).map(Self::{{ base.name }});
+{% for a in fallback.cfg %}                {{ a }}
+{% endfor %}                let read = |raw: &str| serde_json::from_str(raw).map(Self::{{ fallback.name }});
+                read(raw.get()).map_err(serde::de::Error::custom)
+            }
+{% else %}            _ => serde_json::from_str(raw.get()).map(Self::{{ fallback.name }}).map_err(serde::de::Error::custom),
+{% endif %}        }{% else %}        match tag.tag.as_ref() {
+{% for v in t.variants %}            {{ v.pattern }} => serde_json::from_str(raw.get()).map(Self::{{ v.name }}).map_err(serde::de::Error::custom),
+{% endfor %}            other => Err(serde::de::Error::unknown_variant(other, &[{% for v in t.variants %}{{ v.literal }}{% if not loop.last %}, {% endif %}{% endfor %}])),
+        }{% endif %}
     }
 }
 {% block trailing %}{% endblock %}

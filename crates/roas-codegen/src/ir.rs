@@ -211,6 +211,12 @@ pub(crate) struct Variant {
     pub value: String,
     pub ty: TypeRef,
     pub suggested_name: Vec<String>,
+    /// `value` is made up, no tag on the wire: the variant is read only
+    /// as the fallback, never by its tag.
+    pub synthetic: bool,
+    /// Further wire values selecting the variant: its component name, when
+    /// `mapping` gives it another tag and the name to no schema.
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -218,6 +224,12 @@ pub(crate) struct TaggedUnion {
     /// The discriminator property.
     pub tag: String,
     pub variants: Vec<Variant>,
+    /// The variant a value with an unknown or missing tag is read as: for
+    /// a parent schema's discriminator, the parent itself (or the
+    /// `defaultMapping`); `None` refuses such a value.
+    pub fallback: Option<usize>,
+    /// For a union read by a parent schema's discriminator, the parent.
+    pub parent: Option<SchemaId>,
 }
 
 /// One projection of an open holder.
@@ -296,9 +308,132 @@ pub(crate) struct Ir {
     pub diagnostics: Vec<Diagnostic>,
     /// Types not emitted: their own error, or a dependency's.
     pub suppressed: BTreeSet<SchemaId>,
+    /// What to warn about a parent's union once every pass is done, and
+    /// so what an unknown tag is finally read as.
+    pub union_notes: Vec<(SchemaId, UnionNote)>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum UnionNote {
+    /// A schema left out of the union: the tag reading it, or, when that
+    /// tag is made up, the schema it names as the default.
+    Pruned {
+        tag: String,
+        default: Option<String>,
+    },
+    /// A `mapping` entry naming a schema off the family.
+    OffFamily { tag: String, reference: String },
+    /// A `defaultMapping` naming a schema off the family.
+    OffFamilyDefault { reference: String },
 }
 
 impl Ir {
+    /// Suppresses every type with an error, or holding one. A union read by
+    /// a parent's discriminator first leaves out the schemas not generated
+    /// on their own account — judged with every such union set aside — so
+    /// that they do not take every holder of the parent with them; each left
+    /// out is recorded in `union_notes`.
+    pub(crate) fn suppress(&mut self) {
+        fn closure(ir: &Ir, aside: &BTreeSet<SchemaId>) -> BTreeSet<SchemaId> {
+            let mut suppressed: BTreeSet<SchemaId> = ir
+                .types
+                .values()
+                .filter(|d| d.has_error)
+                .map(|d| d.id.clone())
+                .collect();
+            loop {
+                let before = suppressed.len();
+                for def in ir.types.values() {
+                    if suppressed.contains(&def.id) || aside.contains(&def.id) {
+                        continue;
+                    }
+                    if Ir::all_edges(def).iter().any(|e| suppressed.contains(e)) {
+                        suppressed.insert(def.id.clone());
+                    }
+                }
+                if suppressed.len() == before {
+                    return suppressed;
+                }
+            }
+        }
+        let unions: BTreeSet<SchemaId> = self
+            .types
+            .values()
+            .filter(|d| {
+                !d.has_error && matches!(&d.kind, TypeKind::UnionTagged(u) if u.parent.is_some())
+            })
+            .map(|d| d.id.clone())
+            .collect();
+        // A union whose parent is broken on its own account goes, and with
+        // it what holds it: set aside only the others, until that settles.
+        let mut aside = unions;
+        let alone = loop {
+            let alone = closure(self, &aside);
+            let kept: BTreeSet<SchemaId> = aside
+                .iter()
+                .filter(|id| {
+                    !matches!(self.types.get(*id).map(|d| &d.kind),
+                        Some(TypeKind::UnionTagged(u)) if u.parent.as_ref().is_some_and(|p| alone.contains(p)))
+                })
+                .cloned()
+                .collect();
+            if kept.len() == aside.len() {
+                break alone;
+            }
+            aside = kept;
+        };
+        let mut notes = Vec::new();
+        for id in &aside {
+            let Some(TypeKind::UnionTagged(u)) = self.types.get_mut(id).map(|d| &mut d.kind) else {
+                continue;
+            };
+            let Some(parent) = u.parent.clone() else {
+                continue;
+            };
+            // A parent not generated on its own account takes its union.
+            if alone.contains(&parent) {
+                continue;
+            }
+            let fallback = u.fallback.map(|i| u.variants[i].ty.clone());
+            let mut gone = Vec::new();
+            let mut index = 0;
+            u.variants.retain(|v| {
+                let left_out = v.ty.direct_named().is_some_and(|id| alone.contains(id));
+                if left_out {
+                    // A tag of its own reads it no more; being the default,
+                    // neither does an unknown or missing one.
+                    if !v.synthetic {
+                        gone.extend(std::iter::once(&v.value).chain(&v.aliases).map(|tag| {
+                            UnionNote::Pruned {
+                                tag: tag.clone(),
+                                default: None,
+                            }
+                        }));
+                    }
+                    if v.synthetic || u.fallback == Some(index) {
+                        gone.push(UnionNote::Pruned {
+                            tag: v.value.clone(),
+                            default: Some(v.suggested_name.join("")),
+                        });
+                    }
+                }
+                index += 1;
+                !left_out
+            });
+            // By name: a variant in a cycle is boxed.
+            u.fallback = fallback
+                .and_then(|ty| u.variants.iter().position(|v| v.ty == ty))
+                .or_else(|| {
+                    u.variants
+                        .iter()
+                        .position(|v| v.ty.direct_named() == Some(&parent))
+                });
+            notes.extend(gone.into_iter().map(|note| (parent.clone(), note)));
+        }
+        self.suppressed = closure(self, &BTreeSet::new());
+        self.union_notes.extend(notes);
+    }
+
     /// Named types a definition holds directly — the edges that can
     /// close a cycle needing indirection.
     pub(crate) fn direct_edges(def: &TypeDef) -> Vec<SchemaId> {

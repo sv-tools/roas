@@ -112,6 +112,51 @@ fn main() {
     let ids: Ids = serde_json::from_str(r#"["a","b"]"#).unwrap();
     assert_eq!(ids.0.len(), 2);
     let _: Alias = serde_json::from_str(r#"{"petType":"Cat"}"#).unwrap();
+    // A parent schema's discriminator selects among the schemas building on
+    // it: by mapping, by component name, and anything else is the parent.
+    let shelter: Shelter = serde_json::from_str(
+        r#"{"first":{"kind":"meow","lives":9},"pets":[{"kind":"Doggo","bark":"woof"},{"kind":"Base","name":"b"},{"kind":"other","name":"o"}]}"#,
+    )
+    .unwrap();
+    assert!(matches!(&shelter.first, Some(BaseUnion::Kitty(k)) if k.lives.map(|n| n.0) == Some(9)));
+    let pets = shelter.pets.as_ref().unwrap();
+    assert!(matches!(&pets[0], BaseUnion::Doggo(d) if d.bark.as_deref() == Some("woof")));
+    assert!(matches!(&pets[1], BaseUnion::Base(b) if b.name.as_deref() == Some("b")));
+    assert!(matches!(&pets[2], BaseUnion::Base(b) if b.kind == "other"));
+    // `mapping` overrides a value, not a schema: `Kitty` is still selected
+    // by its name.
+    let shelter: Shelter = serde_json::from_str(r#"{"first":{"kind":"Kitty","lives":3}}"#).unwrap();
+    assert!(matches!(&shelter.first, Some(BaseUnion::Kitty(_))));
+    // `mapping` gives the parent's name to `MDog`: the parent is read only
+    // as the fallback, its made-up tag selecting nothing.
+    let held: MHolder = serde_json::from_str(r#"{"m":{"kind":"MPet","bark":"b"}}"#).unwrap();
+    assert!(matches!(held.m, Some(MPetUnion::MDog(_))));
+    let held: MHolder = serde_json::from_str(r#"{"m":{"kind":"MPet~"}}"#).unwrap();
+    assert!(matches!(held.m, Some(MPetUnion::MPet(_))));
+    // A null tag is read as a missing one.
+    let held: NHolder = serde_json::from_str(r#"{"n":{"kind":null}}"#).unwrap();
+    assert!(matches!(held.n, Some(NBaseUnion::NBase(_))));
+    let held: NHolder = serde_json::from_str(r#"{"n":{"kind":"NCat","lives":1}}"#).unwrap();
+    assert!(matches!(held.n, Some(NBaseUnion::NCat(_))));
+    assert_eq!(
+        round_trip::<Shelter>(r#"{"first":{"kind":"meow","lives":9}}"#),
+        r#"{"first":{"kind":"meow","lives":9}}"#
+    );
+    // A mapping key wins over a component name; a schema building on one
+    // building on the parent is a variant too; the tag may be a `$ref`.
+    let held: TagHolder = serde_json::from_str(r#"{"t":{"kind":"Doggy","c":"x"}}"#).unwrap();
+    assert!(matches!(held.t, Some(TaggedUnion::Catty(_))));
+    let held: TagHolder = serde_json::from_str(r#"{"t":{"kind":"Lion","l":"y"}}"#).unwrap();
+    assert!(matches!(held.t, Some(TaggedUnion::Lion(_))));
+    let held: TagHolder = serde_json::from_str(r#"{"t":{"kind":"other"}}"#).unwrap();
+    assert!(matches!(held.t, Some(TaggedUnion::Tagged(_))));
+    // A null is no variant, even of a parent boxed in a cycle.
+    assert!(serde_json::from_str::<Forest>(r#"{"trees":[null]}"#).is_err());
+    assert!(serde_json::from_str::<Forest>(r#"{"trees":[[]]}"#).is_err());
+    assert!(serde_json::from_str::<Forest>(r#"{"trees":[{"kind":5}]}"#).is_err());
+    assert!(serde_json::from_str::<Forest>(r#"{"trees":[{"kind":"x","child":{"kind":"Leaf"}}]}"#).is_ok());
+    // A `Kitty` on its own is still a `Kitty`.
+    let _: Kitty = serde_json::from_str(r#"{"kind":"meow","lives":1}"#).unwrap();
     // Beside `additionalProperties: false`, a member must be a property or
     // match a pattern; pattern members land in the catch-all.
     assert_eq!(
@@ -169,6 +214,43 @@ fn description() -> serde_json::Value {
             "Node": {"type": "object", "properties": {"next": {"type": ["object", "null"], "$comment": "x"}}},
             "Ids": {"type": "array", "items": {"type": "string"}},
             "Alias": {"$ref": "#/components/schemas/Cat"},
+            "Base": {"type": "object", "required": ["kind"],
+                "properties": {"kind": {"type": "string"}, "name": {"type": "string"}},
+                "discriminator": {"propertyName": "kind", "mapping": {"meow": "#/components/schemas/Kitty"}}},
+            "Kitty": {"allOf": [{"$ref": "#/components/schemas/Base"},
+                {"type": "object", "properties": {"lives": {"type": "integer"}}}]},
+            "Doggo": {"allOf": [{"$ref": "#/components/schemas/Base"},
+                {"type": "object", "properties": {"bark": {"type": "string"}}}]},
+            "NBase": {"type": "object", "properties": {"kind": {"type": ["string", "null"]}},
+                "discriminator": {"propertyName": "kind"}},
+            "NCat": {"allOf": [{"$ref": "#/components/schemas/NBase"},
+                {"type": "object", "properties": {"lives": {"type": "integer"}}}]},
+            "NHolder": {"type": "object", "properties": {"n": {"$ref": "#/components/schemas/NBase"}}},
+            "MPet": {"type": "object", "required": ["kind"], "properties": {"kind": {"type": "string"}},
+                "discriminator": {"propertyName": "kind", "mapping": {"MPet": "#/components/schemas/MDog"}}},
+            "MDog": {"allOf": [{"$ref": "#/components/schemas/MPet"},
+                {"type": "object", "properties": {"bark": {"type": "string"}}}]},
+            "MHolder": {"type": "object", "properties": {"m": {"$ref": "#/components/schemas/MPet"}}},
+            "Shelter": {"type": "object", "properties": {
+                "pets": {"type": "array", "items": {"$ref": "#/components/schemas/Base"}},
+                "first": {"$ref": "#/components/schemas/Base"}}},
+            "TagKind": {"type": "string", "enum": ["Doggy", "Catty", "Lion", "Tagged", "other"]},
+            "Tagged": {"type": "object", "required": ["kind"],
+                "properties": {"kind": {"$ref": "#/components/schemas/TagKind"}},
+                "discriminator": {"propertyName": "kind", "mapping": {"Doggy": "#/components/schemas/Catty"}}},
+            "Catty": {"allOf": [{"$ref": "#/components/schemas/Tagged"},
+                {"type": "object", "properties": {"c": {"type": "string"}}}]},
+            "Doggy": {"allOf": [{"$ref": "#/components/schemas/Tagged"},
+                {"type": "object", "properties": {"d": {"type": "string"}}}]},
+            "Lion": {"allOf": [{"$ref": "#/components/schemas/Catty"},
+                {"type": "object", "properties": {"l": {"type": "string"}}}]},
+            "TagHolder": {"type": "object", "properties": {"t": {"$ref": "#/components/schemas/Tagged"}}},
+            "Tree": {"type": "object", "required": ["kind"],
+                "properties": {"kind": {"type": "string"}, "child": {"$ref": "#/components/schemas/Tree"}},
+                "discriminator": {"propertyName": "kind"}},
+            "Leaf": {"allOf": [{"$ref": "#/components/schemas/Tree"}, {"type": "object"}]},
+            "Forest": {"type": "object", "properties": {
+                "trees": {"type": "array", "items": {"$ref": "#/components/schemas/Tree"}}}},
             "Extensible": {"type": "object", "additionalProperties": false,
                 "properties": {"id": {"type": "string"}},
                 "patternProperties": {"^x-": {"type": "string"}, "^n\\d+$": {"type": "integer"}}},
@@ -424,6 +506,54 @@ func main() {
 	check(len(decode[api.Ids](`["a","b"]`)), 2)
 	check(roundTrip[api.Ids](`["a","b"]`), `["a","b"]`)
 	var _ api.Cat = decode[api.Alias](`{"petType":"Cat"}`)
+	shelter := decode[api.Shelter](`{"first":{"kind":"meow","lives":9},"pets":[{"kind":"Doggo","bark":"woof"},{"kind":"Base","name":"b"},{"kind":"other","name":"o"}]}`)
+	if k, ok := shelter.First.AsKitty(); !ok || int64(*k.Lives) != 9 {
+		panic(fmt.Sprintf("first: %+v", shelter.First))
+	}
+	pets := *shelter.Pets
+	if d, ok := pets[0].AsDoggo(); !ok || *d.Bark != "woof" {
+		panic(fmt.Sprintf("pets[0]: %+v", pets[0]))
+	}
+	if b, ok := pets[1].AsBase(); !ok || *b.Name != "b" {
+		panic(fmt.Sprintf("pets[1]: %+v", pets[1]))
+	}
+	if b, ok := pets[2].AsBase(); !ok || b.Kind != "other" {
+		panic(fmt.Sprintf("pets[2]: %+v", pets[2]))
+	}
+	// mapping overrides a value, not a schema: Kitty is still selected by
+	// its name.
+	if _, ok := decode[api.Shelter](`{"first":{"kind":"Kitty","lives":3}}`).First.AsKitty(); !ok {
+		panic("Kitty is selected by its name too")
+	}
+	check(roundTrip[api.Shelter](`{"first":{"kind":"meow","lives":9}}`), `{"first":{"kind":"meow","lives":9}}`)
+	// `mapping` gives the parent's name to MDog: the parent is read only as
+	// the fallback, its made-up tag selecting nothing.
+	if _, ok := decode[api.MHolder](`{"m":{"kind":"MPet","bark":"b"}}`).M.AsMDog(); !ok {
+		panic("MPet is mapped to MDog")
+	}
+	if _, ok := decode[api.MHolder](`{"m":{"kind":"MPet~"}}`).M.AsMPet(); !ok {
+		panic("a made-up tag is read as the fallback")
+	}
+	// A null tag is read as a missing one.
+	if _, ok := decode[api.NHolder](`{"n":{"kind":null}}`).N.AsNBase(); !ok {
+		panic("a null tag is read as the parent")
+	}
+	if _, ok := decode[api.NHolder](`{"n":{"kind":"NCat","lives":1}}`).N.AsNCat(); !ok {
+		panic("NCat is selected by name")
+	}
+	if _, ok := decode[api.TagHolder](`{"t":{"kind":"Doggy","c":"x"}}`).T.AsCatty(); !ok {
+		panic("Doggy is mapped to Catty")
+	}
+	if _, ok := decode[api.TagHolder](`{"t":{"kind":"Lion","l":"y"}}`).T.AsLion(); !ok {
+		panic("Lion builds on Catty")
+	}
+	mustFail[api.Forest](`{"trees":[null]}`, "a null is no Tree")
+	mustFail[api.Forest](`{"trees":[[]]}`, "an array is no Tree")
+	mustFail[api.Forest](`{"trees":[{"kind":5}]}`, "a tag is a string")
+	check(len(*decode[api.Forest](`{"trees":[{"kind":"x","child":{"kind":"Leaf"}}]}`).Trees), 1)
+	if _, ok := decode[api.TagHolder](`{"t":{"kind":"other"}}`).T.AsTagged(); !ok {
+		panic("other is read as the parent")
+	}
 	check(len(decode[api.Extensible](`{"id":"a","x-k":"v","n12":5}`).AdditionalProperties), 2)
 	mustFail[api.Extensible](`{"id":"a","zz":1}`, "zz matches no pattern")
 	mustFail[api.Extensible](`{"n1x":1}`, "n1x matches no pattern")
@@ -642,6 +772,17 @@ fn validated_description() -> serde_json::Value {
             "Sib": {"$ref": "#/components/schemas/Short", "minLength": 2},
             "SibC": {"$ref": "#/components/schemas/Short", "const": "zz"},
             "Ni": {"type": "integer", "enum": [1, 2]},
+            "VBase": {"type": "object", "required": ["kind"],
+                "properties": {"kind": {"type": "string"}, "name": {"type": "string", "maxLength": 3}},
+                "discriminator": {"propertyName": "kind"}},
+            "VKitty": {"allOf": [{"$ref": "#/components/schemas/VBase"},
+                {"type": "object", "properties": {"lives": {"type": "integer", "maximum": 9}}}]},
+            "VShelter": {"type": "object", "properties": {"first": {"$ref": "#/components/schemas/VBase"}}},
+            "GBase": {"type": "object", "required": ["kind"], "properties": {"kind": {"type": "string"}},
+                "discriminator": {"propertyName": "kind", "defaultMapping": "#/components/schemas/GCat"}},
+            "GCat": {"allOf": [{"$ref": "#/components/schemas/GBase"},
+                {"type": "object", "properties": {"lives": {"type": "integer", "maximum": 9}}}]},
+            "GHolder": {"type": "object", "properties": {"g": {"$ref": "#/components/schemas/GBase"}}},
             "FloatEnum": {"type": "number", "format": "float", "enum": [0.5, 1.25]},
             "DoubleEnum": {"type": "number", "enum": [0.1, 2]},
             "IntConst": {"type": "integer", "const": 7},
@@ -932,7 +1073,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
-        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedInt": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedClosed": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "SubAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "ShortAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "FreeAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "ClosedAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "RequiredAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesAliased": {"fields": {"ab": {"attrs": ["#[serde(alias = \"b\")]"]}}}, "ReqFreeAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesTrueAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesEmptyAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "IntCatch": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
+        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GCat": {"attrs": ["#[cfg(any())]"]}, "GatedInt": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedClosed": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "SubAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "ShortAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "FreeAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "ClosedAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "RequiredAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesAliased": {"fields": {"ab": {"attrs": ["#[serde(alias = \"b\")]"]}}}, "ReqFreeAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesTrueAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesEmptyAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "IntCatch": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
@@ -1149,6 +1290,14 @@ fn main() {
     // A number's enum and const are checked: integers exactly, a double
     // as far as an f64 holds it, a float equal to a value is undecided.
     assert_eq!(report::<Ni>("3"), vec![v("")]);
+    // A union read by a parent's discriminator checks the variant it holds.
+    assert_eq!(report::<VShelter>(r#"{"first":{"kind":"VKitty","lives":10}}"#), vec![v("/first/lives")]);
+    assert_eq!(report::<VShelter>(r#"{"first":{"kind":"x","name":"long"}}"#), vec![v("/first/name")]);
+    assert_eq!(report::<VShelter>(r#"{"first":{"kind":"VKitty","lives":9,"name":"ab"}}"#), vec![]);
+    // A subtype compiled out leaves its tag to the parent: the holder stays.
+    assert_eq!(report::<GHolder>(r#"{"g":{"kind":"GCat","lives":10}}"#), vec![]);
+    // ...and so does a `defaultMapping` to it: unknown tags are the parent's.
+    assert_eq!(report::<GHolder>(r#"{"g":{"kind":"other","lives":10}}"#), vec![]);
     assert_eq!(report::<Ni>("2"), vec![]);
     assert_eq!(report::<Ni>("2.0"), vec![]);
     assert_eq!(report::<Pins>(r#"{"n":3}"#), vec![v("/n")]);
@@ -1714,6 +1863,12 @@ func main() {
 	check(`"a"`, report[api.Sib](`"a"`), u(""))
 	check(`"a"`, report[api.SibC](`"a"`), u(""))
 	check(`3`, report[api.Ni](`3`), v(""))
+	check(`{"first":{"kind":"VKitty","lives":10}}`, report[api.VShelter](`{"first":{"kind":"VKitty","lives":10}}`), v("/first/lives"))
+	check(`{"first":{"kind":"x","name":"long"}}`, report[api.VShelter](`{"first":{"kind":"x","name":"long"}}`), v("/first/name"))
+	check(`{"first":{"kind":"VKitty","lives":9,"name":"ab"}}`, report[api.VShelter](`{"first":{"kind":"VKitty","lives":9,"name":"ab"}}`))
+	// Go has no gates: the subtype is read as itself.
+	check(`{"g":{"kind":"GCat","lives":10}}`, report[api.GHolder](`{"g":{"kind":"GCat","lives":10}}`), v("/g/lives"))
+	check(`{"g":{"kind":"other","lives":10}}`, report[api.GHolder](`{"g":{"kind":"other","lives":10}}`), v("/g/lives"))
 	check(`2`, report[api.Ni](`2`))
 	check(`2.0`, report[api.Ni](`2.0`))
 	check(`{"n":3}`, report[api.Pins](`{"n":3}`), v("/n"))

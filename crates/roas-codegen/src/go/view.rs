@@ -154,6 +154,10 @@ pub(crate) struct VariantView {
     pub ty: String,
     pub accessor: String,
     pub constructor: String,
+    /// The value is made up: no tag selects the variant.
+    pub synthetic: bool,
+    /// Every wire value selecting the variant, as a `case` list.
+    pub cases: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -180,6 +184,9 @@ pub(crate) struct TypeView {
     pub inner: String,
     /// Discriminator property of a tagged union, and as a literal.
     pub tag: String,
+    /// For a tagged union, the index of the variant an unknown or missing
+    /// tag is read as; `None` refuses such a value.
+    pub fallback: Option<usize>,
     pub tag_literal: String,
     /// `oneOf` rather than `anyOf`, for an open union's documentation.
     pub exclusive: bool,
@@ -626,6 +633,7 @@ impl Builder<'_> {
             branches: Vec::new(),
             inner: String::new(),
             tag: String::new(),
+            fallback: None,
             tag_literal: String::new(),
             exclusive: false,
             required_count: 0,
@@ -883,6 +891,8 @@ impl Builder<'_> {
                         ty: String::new(),
                         accessor: String::new(),
                         constructor: String::new(),
+                        synthetic: false,
+                        cases: String::new(),
                     });
                 }
             }
@@ -891,6 +901,7 @@ impl Builder<'_> {
                 self.support.tagged = true;
                 view.tag = u.tag.clone();
                 view.tag_literal = quote(&u.tag);
+                view.fallback = u.fallback;
                 let mut methods = Allocator::default();
                 for reserved in ["Tag", "Value", "MarshalJSONTo", "UnmarshalJSONFrom"] {
                     methods.reserve(reserved);
@@ -911,6 +922,12 @@ impl Builder<'_> {
                         ty: self.spell(&variant.ty)?,
                         accessor,
                         constructor,
+                        synthetic: variant.synthetic,
+                        cases: std::iter::once(&variant.value)
+                            .chain(&variant.aliases)
+                            .map(|tag| quote(tag))
+                            .collect::<Vec<_>>()
+                            .join(", "),
                     });
                 }
             }

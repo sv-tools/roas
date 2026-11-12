@@ -356,23 +356,23 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
             }
         }
         // Re-run suppression with the extra errors.
-        let mut suppressed = ir.suppressed.clone();
-        loop {
-            let before = suppressed.len();
-            for def in ir.types.values() {
-                if def.has_error
-                    || crate::ir::Ir::all_edges(def)
-                        .iter()
-                        .any(|e| suppressed.contains(e))
-                {
-                    suppressed.insert(def.id.clone());
-                }
-            }
-            if suppressed.len() == before {
-                break;
-            }
+        ir.suppress();
+    }
+    // What was left out of a parent's union, once it is settled whether
+    // the parent is generated at all.
+    for (parent, note) in std::mem::take(&mut ir.union_notes) {
+        if ir.suppressed.contains(&parent) {
+            continue;
         }
-        ir.suppressed = suppressed;
+        // What the union reads the tag as now, once every pass is done.
+        let read_as = ir.types.values().find_map(|def| match &def.kind {
+            crate::ir::TypeKind::UnionTagged(u) if u.parent.as_ref() == Some(&parent) => u
+                .fallback
+                .and_then(|i| u.variants[i].suggested_name.first().cloned()),
+            _ => None,
+        });
+        ir.diagnostics
+            .push(crate::lower::union_note(&parent, &note, read_as.as_deref()));
     }
     point_into_source(&mut ir.diagnostics, document.version());
     diagnostics.append(&mut ir.diagnostics);

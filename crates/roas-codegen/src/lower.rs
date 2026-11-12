@@ -8,7 +8,7 @@ use crate::front::{
 };
 use crate::ir::{
     Additional, Branch, Field, Ir, OpenUnion, StructDef, TaggedUnion, TypeDef, TypeKind, TypeRef,
-    Variant,
+    UnionNote, Variant,
 };
 use roas::v3_2::discriminator::Discriminator;
 use serde_json::Value;
@@ -70,13 +70,294 @@ pub(crate) fn lower(front: &Front, config: &Config) -> Ir {
     for (name, slot) in &front.components {
         lowerer.component(name, slot);
     }
+    lowerer.polymorphic();
     lowerer.mark_cycles();
-    lowerer.suppress();
+    lowerer.ir.suppress();
     lowerer.mark_opted_out_branches();
     lowerer.ir
 }
 
 impl<'a> Lowerer<'a> {
+    /// A parent schema with a `discriminator` and the components that
+    /// build on it with `allOf`: every value position holding the parent
+    /// holds a union of them instead, selected by the discriminator — by
+    /// `mapping`, else by component name; any other tag is the parent (or
+    /// the `defaultMapping`). The discriminator here is a hint JSON Schema
+    /// validation does not use; the union trusts it.
+    fn polymorphic(&mut self) {
+        let components = &self.front.components;
+        let mut unions: BTreeMap<SchemaId, SchemaId> = BTreeMap::new();
+        for (parent, slot) in components {
+            let Slot::Inline(schema) = slot else { continue };
+            let (Some(discriminator), Kind::Object { properties, .. }) =
+                (&schema.discriminator, &schema.kind)
+            else {
+                continue;
+            };
+            // A substituted parent is the user's type wherever it is held.
+            if matches!(
+                self.ir
+                    .types
+                    .get(&self.component_ids[parent])
+                    .map(|d| &d.kind),
+                Some(TypeKind::Extern)
+            ) {
+                continue;
+            }
+            // The components building on the parent, directly or through
+            // one another: an `allOf` with a `$ref` to it or to one of them.
+            let builds_on = |slot: &Slot, bases: &BTreeSet<&str>| {
+                match slot {
+                Slot::Inline(s) => match &s.kind {
+                    Kind::AllOf { branches } => branches.iter().any(|b| {
+                        matches!(b, Slot::Ref { target: RefTarget::Component(n), .. } if bases.contains(n.as_str()))
+                    }),
+                    _ => false,
+                },
+                _ => false,
+            }
+            };
+            let mut family: BTreeSet<&str> = BTreeSet::from([parent.as_str()]);
+            loop {
+                let before = family.len();
+                for (name, slot) in components {
+                    if !family.contains(name.as_str()) && builds_on(slot, &family) {
+                        family.insert(name.as_str());
+                    }
+                }
+                if family.len() == before {
+                    break;
+                }
+            }
+            let subtypes: Vec<&String> = components
+                .keys()
+                .filter(|name| *name != parent && family.contains(name.as_str()))
+                .collect();
+            if subtypes.is_empty() {
+                continue;
+            }
+            // The tag must be a string property of the parent, written in
+            // place or behind references.
+            let tag_is_string = {
+                let mut slot = properties.get(&discriminator.property_name);
+                let mut seen = BTreeSet::new();
+                loop {
+                    match slot {
+                        Some(Slot::Inline(tag)) => break matches!(tag.kind, Kind::String { .. }),
+                        Some(Slot::Ref {
+                            target: RefTarget::Component(name),
+                            siblings: None,
+                            ..
+                        }) if seen.insert(name.clone()) => slot = components.get(name),
+                        _ => break false,
+                    }
+                }
+            };
+            if !tag_is_string {
+                self.warn(
+                    DiagnosticKind::UnsupportedKeyword { keyword: "discriminator".into() },
+                    &schema.id,
+                    format!(
+                        "the discriminator names `{}`, which is not a string property of this schema; the schemas building on it are not read by it",
+                        discriminator.property_name
+                    ),
+                );
+                continue;
+            }
+            let members: BTreeSet<&str> = subtypes
+                .iter()
+                .map(|s| s.as_str())
+                .chain(std::iter::once(parent.as_str()))
+                .collect();
+            let target = |reference: &str| -> Option<String> {
+                let name = reference
+                    .strip_prefix("#/components/schemas/")
+                    .unwrap_or(reference);
+                members.contains(name).then(|| name.to_owned())
+            };
+            let fallback_name = match discriminator.default_mapping.as_deref() {
+                Some(reference) => target(reference).unwrap_or_else(|| {
+                    // Warned about once it is settled the parent is generated.
+                    self.ir.union_notes.push((
+                        schema.id.clone(),
+                        UnionNote::OffFamilyDefault {
+                            reference: reference.to_owned(),
+                        },
+                    ));
+                    parent.clone()
+                }),
+                None => parent.clone(),
+            };
+            let mut variants: Vec<(String, String)> = Vec::new();
+            // Tags `mapping` gives to no member: read as the fallback, so
+            // no member takes them by name.
+            let mut taken = BTreeSet::new();
+            for (value, reference) in discriminator.mapping.iter().flatten() {
+                match target(reference) {
+                    Some(name) => variants.push((value.clone(), name)),
+                    None => {
+                        taken.insert(value.clone());
+                        // Warned about once the fallback is settled.
+                        self.ir.union_notes.push((
+                            schema.id.clone(),
+                            UnionNote::OffFamily {
+                                tag: value.clone(),
+                                reference: reference.clone(),
+                            },
+                        ));
+                    }
+                }
+            }
+            // By name, unless `mapping` uses the name as a tag: `mapping`
+            // overrides a value, not a schema, so a schema it gives another
+            // tag is still selected by its name too.
+            let mut aliases: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+            for name in subtypes
+                .iter()
+                .map(|s| s.as_str())
+                .chain(std::iter::once(parent.as_str()))
+            {
+                if taken.contains(name) || variants.iter().any(|(value, _)| value == name) {
+                    continue;
+                }
+                match variants.iter().position(|(_, n)| n == name) {
+                    Some(i) => aliases.entry(i).or_default().push(name.to_owned()),
+                    None => variants.push((name.to_owned(), name.to_owned())),
+                }
+            }
+            // The parent, and what an unknown tag is read as, are always
+            // variants: when a name is a tag `mapping` gives to another
+            // schema, under a tag of its own, which any unknown tag reads
+            // it as anyway. The parent is what a tag is read as once the
+            // schema it names is not generated or compiled out.
+            let mut synthetic = BTreeSet::new();
+            for name in [parent.clone(), fallback_name.clone()] {
+                if !variants.iter().any(|(_, n)| *n == name) {
+                    let mut value = name.clone();
+                    while taken.contains(&value)
+                        || variants.iter().any(|(v, _)| *v == value)
+                        || aliases.values().flatten().any(|a| *a == value)
+                    {
+                        value.push('~');
+                    }
+                    if value != name {
+                        synthetic.insert(value.clone());
+                    }
+                    variants.push((value, name));
+                }
+            }
+            let fallback = variants.iter().position(|(_, n)| *n == fallback_name);
+            let parent_id = self.component_ids[parent].clone();
+            let Some(parent_def) = self.ir.types.get(&parent_id) else {
+                continue;
+            };
+
+            let union_id = SchemaId {
+                pointer: crate::diagnostic::synthetic(&parent_id.pointer, "union"),
+                ..parent_id.clone()
+            };
+            // Named after the parent as it is generated.
+            let base = self
+                .config
+                .types
+                .get(parent)
+                .and_then(|t| t.rename.clone())
+                .unwrap_or_else(|| parent.clone());
+            let def = TypeDef {
+                id: union_id.clone(),
+                suggested_name: vec![base, "union".to_owned()],
+                component: None,
+                title: None,
+                description: Some(format!(
+                    "A `{parent}` or a schema building on it, selected by `{}`.",
+                    discriminator.property_name
+                )),
+                deprecated: parent_def.deprecated,
+                nullable: false,
+                constraints: Default::default(),
+                extensions: BTreeMap::new(),
+                kind: TypeKind::UnionTagged(TaggedUnion {
+                    tag: discriminator.property_name.clone(),
+                    variants: variants
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (value, name))| Variant {
+                            value: value.clone(),
+                            ty: TypeRef::Named(self.component_ids[name].clone()),
+                            suggested_name: vec![name.clone()],
+                            synthetic: synthetic.contains(value),
+                            aliases: aliases.remove(&i).unwrap_or_default(),
+                        })
+                        .collect(),
+                    fallback,
+                    parent: Some(parent_id.clone()),
+                }),
+                has_error: false,
+            };
+            self.register(def);
+            unions.insert(parent_id, union_id);
+        }
+        if unions.is_empty() {
+            return;
+        }
+        // Every value position holding a parent holds its union; an
+        // `allOf` part stays the parent, which a schema building on it is
+        // made of, and a union's own parent variant stays the parent.
+        fn rewrite(
+            ty: &mut TypeRef,
+            unions: &BTreeMap<SchemaId, SchemaId>,
+            keep: Option<&SchemaId>,
+        ) {
+            match ty {
+                TypeRef::Named(id) if Some(&*id) != keep => {
+                    if let Some(union) = unions.get(id) {
+                        *id = union.clone();
+                    }
+                }
+                TypeRef::Boxed(inner)
+                | TypeRef::Nullable(inner)
+                | TypeRef::Array(inner)
+                | TypeRef::Map(inner) => rewrite(inner, unions, keep),
+                _ => {}
+            }
+        }
+        let parent_of: BTreeMap<SchemaId, SchemaId> =
+            unions.iter().map(|(p, u)| (u.clone(), p.clone())).collect();
+        for def in self.ir.types.values_mut() {
+            let keep = parent_of.get(&def.id);
+            match &mut def.kind {
+                TypeKind::Struct(s) => {
+                    for field in &mut s.fields {
+                        rewrite(&mut field.ty, &unions, None);
+                    }
+                    if let crate::ir::Additional::CatchAll(ty) = &mut s.additional {
+                        rewrite(ty, &unions, None);
+                    }
+                    for pattern in &mut s.patterns {
+                        if let crate::ir::PatternSchema::Branch(b) = &mut pattern.schema {
+                            rewrite(&mut b.ty, &unions, None);
+                        }
+                    }
+                    if let crate::ir::Others::Schema(b) = &mut s.others {
+                        rewrite(&mut b.ty, &unions, None);
+                    }
+                }
+                TypeKind::UnionTagged(u) => {
+                    for variant in &mut u.variants {
+                        rewrite(&mut variant.ty, &unions, keep);
+                    }
+                }
+                TypeKind::UnionOpen(u) => {
+                    for branch in &mut u.branches {
+                        rewrite(&mut branch.ty, &unions, None);
+                    }
+                }
+                TypeKind::Newtype(ty) | TypeKind::Alias(ty) => rewrite(ty, &unions, None),
+                TypeKind::ComposedOpen(_) | TypeKind::StringEnum(_) | TypeKind::Extern => {}
+            }
+        }
+    }
+
     /// A branch that holds an opted-out type anywhere inside proves no
     /// match: that type checks nothing, so decoding it says too little.
     fn mark_opted_out_branches(&mut self) {
@@ -1285,11 +1566,15 @@ impl<'a> Lowerer<'a> {
                     value,
                     ty: lowered.ty,
                     suggested_name,
+                    synthetic: false,
+                    aliases: Vec::new(),
                 });
             }
             return TypeKind::UnionTagged(TaggedUnion {
                 tag: discriminator.property_name.clone(),
                 variants: out,
+                fallback: None,
+                parent: None,
             });
         }
         let reason = match discriminator {
@@ -1666,32 +1951,36 @@ impl<'a> Lowerer<'a> {
             }
         }
     }
+}
 
-    /// A type with an error, and every type that holds it, is not
-    /// emitted; the rest still is.
-    fn suppress(&mut self) {
-        let mut suppressed: BTreeSet<SchemaId> = self
-            .ir
-            .types
-            .values()
-            .filter(|d| d.has_error)
-            .map(|d| d.id.clone())
-            .collect();
-        loop {
-            let before = suppressed.len();
-            for def in self.ir.types.values() {
-                if suppressed.contains(&def.id) {
-                    continue;
-                }
-                if Ir::all_edges(def).iter().any(|e| suppressed.contains(e)) {
-                    suppressed.insert(def.id.clone());
-                }
-            }
-            if suppressed.len() == before {
-                break;
-            }
-        }
-        self.ir.suppressed = suppressed;
+/// The warning a note on a parent's union makes, `read_as` the schema an
+/// unknown tag is finally read as.
+pub(crate) fn union_note(parent: &SchemaId, note: &UnionNote, read_as: Option<&str>) -> Diagnostic {
+    let read_as = read_as.map_or("this schema".to_owned(), |name| format!("`{name}`"));
+    Diagnostic {
+        severity: Severity::Warning,
+        kind: DiagnosticKind::UnsupportedKeyword {
+            keyword: "discriminator".into(),
+        },
+        schema_id: parent.clone(),
+        pointer: source_of(&parent.pointer),
+        message: match note {
+            UnionNote::Pruned {
+                default: Some(name),
+                ..
+            } => format!(
+                "the discriminator's default `{name}` is not generated; an unknown or missing value is read as {read_as}"
+            ),
+            UnionNote::Pruned { tag, default: None } => format!(
+                "the schema the discriminator reads `{tag}` as is not generated; such a value is read as {read_as}"
+            ),
+            UnionNote::OffFamilyDefault { reference } => format!(
+                "the discriminator's default is `{reference}`, which is neither this schema nor one building on it; an unknown or missing value is read as {read_as}"
+            ),
+            UnionNote::OffFamily { tag, reference } => format!(
+                "the discriminator maps `{tag}` to `{reference}`, which is neither this schema nor one building on it; the value is read as {read_as}"
+            ),
+        },
     }
 }
 

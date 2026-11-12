@@ -77,6 +77,15 @@ pub(crate) struct VariantView {
     pub ty: String,
     pub doc: Vec<String>,
     pub attrs: Vec<String>,
+    /// The variant's conditional-compilation gates, repeated on every
+    /// match arm naming it.
+    pub cfg: Vec<String>,
+    /// The wire value as a Rust string literal.
+    pub literal: String,
+    /// The value is made up: no tag selects the variant.
+    pub synthetic: bool,
+    /// Every wire value selecting the variant, as a match pattern.
+    pub pattern: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +115,16 @@ pub(crate) struct TypeView {
     pub inner: String,
     /// Discriminator property of a tagged union.
     pub tag: String,
+    /// For a tagged union, the index of the variant an unknown or missing
+    /// tag is read as; `None` refuses such a value.
+    pub fallback: Option<usize>,
+    /// For a union read by a parent's discriminator, the index of the
+    /// parent's variant: what the fallback falls back to when compiled out.
+    pub parent_variant: Option<usize>,
+    /// The discriminator property as a Rust string literal.
+    pub tag_literal: String,
+    /// The tag as it reads in a doc comment.
+    pub tag_doc: String,
     /// `oneOf` rather than `anyOf`, for an open union's documentation.
     pub exclusive: bool,
     /// The statements of `Validate::validate_into`, with validation on;
@@ -174,7 +193,7 @@ pub(crate) fn constraint_notes(c: &Constraints) -> Vec<String> {
         push("maxLength", v.to_string());
     }
     if let Some(v) = &c.pattern {
-        push("pattern", format!("`{}`", v.escape_debug()));
+        push("pattern", code_span(&v.escape_debug().to_string()));
     }
     if let Some(v) = &c.minimum {
         push("minimum", v.to_string());
@@ -415,6 +434,34 @@ impl Builder<'_> {
         }
     }
 
+    /// The cfg gates a generated type carries: configured, or from the
+    /// description's `x-rust-attrs` as applied.
+    fn type_gates(&self, id: &SchemaId, at: &str) -> Result<Vec<String>, GenerateError> {
+        let Some(def) = self.ir.types.get(id) else {
+            return Ok(Vec::new());
+        };
+        let mut attrs: Vec<String> = self
+            .type_config(def)
+            .map(|t| t.attrs.clone())
+            .unwrap_or_default();
+        if self.config.allow_codegen_extensions {
+            let described: Vec<String> = match def.extensions.get("x-rust-attrs") {
+                Some(serde_json::Value::String(a)) => vec![a.clone()],
+                Some(serde_json::Value::Array(items)) => items
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            attrs.extend(
+                described
+                    .into_iter()
+                    .filter(|a| check_container_attrs(std::slice::from_ref(a), "").is_ok()),
+            );
+        }
+        cfg_gates(&attrs, at)
+    }
+
     fn type_config(&self, def: &TypeDef) -> Option<&TypeConfig> {
         def.component
             .as_ref()
@@ -648,6 +695,17 @@ impl Builder<'_> {
         check_container_attrs(&user_attrs, &raw_name)?;
         attrs.extend(user_attrs);
         attrs.extend(self.codegen_attrs(&def.extensions, &def.id, false));
+        // A union read by a parent's discriminator exists only where the
+        // parent does; each other variant is gated on its own.
+        if let TypeKind::UnionTagged(u) = &def.kind
+            && let Some(parent) = &u.parent
+        {
+            for gate in self.type_gates(parent, &raw_name)? {
+                if !attrs.contains(&gate) {
+                    attrs.push(gate);
+                }
+            }
+        }
         let cfg = cfg_gates(&attrs, &raw_name)?;
         let mut derives: Vec<String> = ["Debug", "Clone", "PartialEq"]
             .iter()
@@ -666,6 +724,10 @@ impl Builder<'_> {
             branches: Vec::new(),
             inner: String::new(),
             tag: String::new(),
+            fallback: None,
+            parent_variant: None,
+            tag_literal: String::new(),
+            tag_doc: String::new(),
             exclusive: false,
             validate: None,
             validate_null: Vec::new(),
@@ -906,6 +968,10 @@ impl Builder<'_> {
                         ty: String::new(),
                         doc: Vec::new(),
                         attrs: vec![format!("#[serde(rename = {value:?})]")],
+                        cfg: Vec::new(),
+                        literal: format!("{value:?}"),
+                        synthetic: false,
+                        pattern: format!("{value:?}"),
                     });
                 }
             }
@@ -913,16 +979,53 @@ impl Builder<'_> {
                 view.kind = "union_tagged";
                 view.derives.push("Serialize".to_owned());
                 view.tag = u.tag.clone();
+                view.tag_literal = format!("{:?}", u.tag);
+                view.tag_doc = code_span(&u.tag.escape_debug().to_string());
+                view.fallback = u.fallback;
+                view.parent_variant = u.parent.as_ref().and_then(|p| {
+                    u.variants
+                        .iter()
+                        .position(|v| v.ty.direct_named() == Some(p))
+                });
                 let mut allocator = Allocator::default();
-                for variant in &u.variants {
+                for (index, variant) in u.variants.iter().enumerate() {
                     let name = allocator.allocate(legal(pascal(&variant.suggested_name)));
                     let ty = self.spell(&variant.ty)?;
+                    // Beside a parent, a variant gated out leaves its tag to
+                    // the fallback; the union itself carries the parent's
+                    // gates.
+                    let cfg = match variant.ty.direct_named() {
+                        Some(id) if u.parent.is_some() => self
+                            .type_gates(id, &view.raw_name)?
+                            .into_iter()
+                            .filter(|g| !view.cfg.contains(g))
+                            .collect(),
+                        _ => Vec::new(),
+                    };
                     view.variants.push(VariantView {
                         name,
                         value: variant.value.clone(),
                         ty,
-                        doc: vec![format!("`{}: {:?}`", u.tag, variant.value)],
-                        attrs: Vec::new(),
+                        doc: vec![if !variant.synthetic {
+                            std::iter::once(&variant.value)
+                                .chain(&variant.aliases)
+                                .map(|tag| code_span(&format!("{}: {tag:?}", u.tag.escape_debug())))
+                                .collect::<Vec<_>>()
+                                .join(" or ")
+                        } else if u.fallback == Some(index) {
+                            format!("Read when {} names no other variant.", view.tag_doc)
+                        } else {
+                            "No tag selects this variant: it is read only when the fallback is not available.".to_owned()
+                        }],
+                        attrs: cfg.clone(),
+                        cfg,
+                        literal: format!("{:?}", variant.value),
+                        synthetic: variant.synthetic,
+                        pattern: std::iter::once(&variant.value)
+                            .chain(&variant.aliases)
+                            .map(|tag| format!("{tag:?}"))
+                            .collect::<Vec<_>>()
+                            .join(" | "),
                     });
                 }
             }
@@ -990,4 +1093,17 @@ impl Builder<'_> {
         }
         Ok(out)
     }
+}
+
+/// `text` as a Markdown code span, fenced by more backticks than any run
+/// in it.
+fn code_span(text: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest + 1);
+    let pad = if text.starts_with('`') || text.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
+    format!("{fence}{pad}{text}{pad}{fence}")
 }
