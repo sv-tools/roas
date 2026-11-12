@@ -2106,7 +2106,8 @@ fn a_self_referential_parent_keeps_its_fallback_when_the_default_is_left_out() {
 #[test]
 fn a_substituted_parent_is_held_as_its_substitution() {
     let mut components = parent_family();
-    components["Pet"]["x-unused"] = serde_json::json!(true);
+    components["Pet"]["discriminator"]["mapping"] =
+        serde_json::json!({"x": "#/components/schemas/Shelter"});
     let config = rust_config("[substitutions.Pet.rust]\nname = \"serde_json::Value\"\n");
     let g = generate(&document(components), &config).unwrap();
     let text = g
@@ -2116,4 +2117,12 @@ fn a_substituted_parent_is_held_as_its_substitution() {
         .collect::<String>();
     assert!(!text.contains("PetUnion"), "{text}");
     assert!(text.contains("pub p: Option<serde_json::Value>"), "{text}");
+    // Nor is its discriminator read, or warned about.
+    assert!(
+        !g.diagnostics
+            .iter()
+            .any(|d| d.message.contains("discriminator")),
+        "{:?}",
+        g.diagnostics
+    );
 }

@@ -94,6 +94,16 @@ impl<'a> Lowerer<'a> {
             else {
                 continue;
             };
+            // A substituted parent is the user's type wherever it is held.
+            if matches!(
+                self.ir
+                    .types
+                    .get(&self.component_ids[parent])
+                    .map(|d| &d.kind),
+                Some(TypeKind::Extern)
+            ) {
+                continue;
+            }
             // The components building on the parent, directly or through
             // one another: an `allOf` with a `$ref` to it or to one of them.
             let builds_on = |slot: &Slot, bases: &BTreeSet<&str>| {
@@ -213,10 +223,7 @@ impl<'a> Lowerer<'a> {
             let Some(parent_def) = self.ir.types.get(&parent_id) else {
                 continue;
             };
-            // A substituted parent is the user's type wherever it is held.
-            if matches!(parent_def.kind, TypeKind::Extern) {
-                continue;
-            }
+
             let union_id = SchemaId {
                 pointer: crate::diagnostic::synthetic(&parent_id.pointer, "union"),
                 ..parent_id.clone()

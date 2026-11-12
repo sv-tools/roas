@@ -17,6 +17,11 @@
             tag: {% if t.fallback is not none %}Option<std::borrow::Cow<'a, str>>{% else %}std::borrow::Cow<'a, str>{% endif %},
         }
         let raw: Box<serde_json::value::RawValue> = Deserialize::deserialize(deserializer)?;
+        // Only an object has a tag: serde's derive would read one out of an
+        // array too.
+        if !raw.get().trim_start().starts_with('{') {
+            return Err(serde::de::Error::custom(format!("{}: want a JSON object, got {}", {{ t.name | tojson }}, raw.get())));
+        }
         let tag: Tag<'_> = serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
 {% if t.fallback is not none %}{% set fallback = t.variants[t.fallback] %}        // An unknown or missing tag is read as `{{ fallback.name }}`.
         match tag.tag.as_deref() {

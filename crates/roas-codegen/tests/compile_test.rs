@@ -137,6 +137,8 @@ fn main() {
     assert!(matches!(held.t, Some(TaggedUnion::Tagged(_))));
     // A null is no variant, even of a parent boxed in a cycle.
     assert!(serde_json::from_str::<Forest>(r#"{"trees":[null]}"#).is_err());
+    assert!(serde_json::from_str::<Forest>(r#"{"trees":[[]]}"#).is_err());
+    assert!(serde_json::from_str::<Forest>(r#"{"trees":[{"kind":5}]}"#).is_err());
     assert!(serde_json::from_str::<Forest>(r#"{"trees":[{"kind":"x","child":{"kind":"Leaf"}}]}"#).is_ok());
     // A `Kitty` on its own is still a `Kitty`.
     let _: Kitty = serde_json::from_str(r#"{"kind":"meow","lives":1}"#).unwrap();
@@ -501,6 +503,8 @@ func main() {
 		panic("Lion builds on Catty")
 	}
 	mustFail[api.Forest](`{"trees":[null]}`, "a null is no Tree")
+	mustFail[api.Forest](`{"trees":[[]]}`, "an array is no Tree")
+	mustFail[api.Forest](`{"trees":[{"kind":5}]}`, "a tag is a string")
 	check(len(*decode[api.Forest](`{"trees":[{"kind":"x","child":{"kind":"Leaf"}}]}`).Trees), 1)
 	if _, ok := decode[api.TagHolder](`{"t":{"kind":"other"}}`).T.AsTagged(); !ok {
 		panic("other is read as the parent")

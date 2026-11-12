@@ -38,8 +38,20 @@ func (u *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 	if err != nil {
 		return err
 	}
-	tag, err := readTag(raw, {{ t.name_literal }}, {{ t.tag_literal }})
-{% if t.fallback is not none %}{% set fallback = t.variants[t.fallback] %}	if err == nil {
+{% if t.fallback is not none %}{% set fallback = t.variants[t.fallback] %}	// Only an object has a tag to be missing: anything else, null included,
+	// is no variant.
+	if raw.Kind() != '{' {
+		return fmt.Errorf("%s: want a JSON object, got %s", {{ t.name_literal }}, raw)
+	}
+	var members map[string]jsontext.Value
+	if err := json.Unmarshal(raw, &members); err != nil {
+		return err
+	}
+	if member, ok := members[{{ t.tag_literal }}]; ok {
+		var tag string
+		if member.Kind() != '"' || json.Unmarshal(member, &tag) != nil {
+			return fmt.Errorf("%s: discriminator %q must be a string, got %s", {{ t.name_literal }}, {{ t.tag_literal }}, member)
+		}
 		switch tag {
 {% for v in t.variants %}		case {{ v.literal }}:
 			var v {{ v.ty }}
@@ -50,18 +62,14 @@ func (u *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 			return nil
 {% endfor %}		}
 	}
-	// Only an object has a tag to be missing: anything else, null included,
-	// is no variant.
-	if raw.Kind() != '{' {
-		return fmt.Errorf("%s: want a JSON object, got %s", {{ t.name_literal }}, raw)
-	}
 	// An unknown or missing tag is read as the {{ fallback.literal }} variant.
 	var v {{ fallback.ty }}
 	if err := json.Unmarshal(raw, &v, decodeOptions); err != nil {
 		return err
 	}
 	*u = {{ t.name }}{tag: {{ fallback.literal }}, value: v}
-	return nil{% else %}	if err != nil {
+	return nil{% else %}	tag, err := readTag(raw, {{ t.name_literal }}, {{ t.tag_literal }})
+	if err != nil {
 		return err
 	}
 	switch tag {
