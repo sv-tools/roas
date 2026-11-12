@@ -168,6 +168,138 @@ fn render(
                     ));
                 }
             }
+            Check::NumberIn {
+                values,
+                keyword,
+                literal,
+            } => {
+                let what = if *keyword == "const" {
+                    format!("the const {literal}")
+                } else {
+                    format!("one of the enum values {literal}")
+                };
+                match kind {
+                    ValueKind::Integer(_) => {
+                        // Exactly, as integers; a fraction is no integer's
+                        // value, nor is one past every int64.
+                        // One written as a float past 2^53, read as one,
+                        // stands for every integer that rounds to it: equal
+                        // to it once rounded is undecided.
+                        let mut held: Vec<i64> = values
+                            .iter()
+                            .filter(|n| checks::integer_held(n))
+                            .filter_map(checks::exact_integer)
+                            .filter_map(|n| i64::try_from(n).ok())
+                            .collect();
+                        held.sort_unstable();
+                        held.dedup();
+                        let mut unheld: Vec<f64> = values
+                            .iter()
+                            .filter(|n| !checks::integer_held(n))
+                            .filter_map(serde_json::Number::as_f64)
+                            .filter(|f| f.is_finite() && f.fract() == 0.0)
+                            .collect();
+                        unheld.sort_by(f64::total_cmp);
+                        unheld.dedup();
+                        let violation = format!(
+                            "{r}.violation({p}, fmt.Sprintf({}, int64({e})))",
+                            lit(&format!("%d is not {what}"))
+                        );
+                        let missed = if unheld.is_empty() {
+                            violation
+                        } else {
+                            let at = unheld
+                                .iter()
+                                .map(|f| format!("float64(int64({e})) == {f:?}"))
+                                .collect::<Vec<_>>()
+                                .join(" || ");
+                            format!(
+                                "if {at} {{ {r}.unevaluated({p}, {}) }} else {{ {violation} }}",
+                                lit(&format!("{keyword} {literal}: a listed value was read as a float, which does not tell the integers near it apart"))
+                            )
+                        };
+                        out.push(if held.is_empty() {
+                            missed
+                        } else {
+                            let list = held.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+                            format!("switch int64({e}) {{ case {list}: default: {missed} }}")
+                        });
+                    }
+                    ValueKind::Number(FloatWidth::Float) => {
+                        // A `float` equal to a value is ambiguous: literals
+                        // around it decode to it, as at a bound.
+                        let mut set: Vec<f32> = values
+                            .iter()
+                            .filter_map(serde_json::Number::as_f64)
+                            .filter(|f| f.is_finite())
+                            .flat_map(checks::f32_candidates)
+                            .filter(|f| f.is_finite())
+                            .collect();
+                        set.sort_by(f32::total_cmp);
+                        set.dedup();
+                        let violation = format!(
+                            "{r}.violation({p}, fmt.Sprintf({}, float32({e})))",
+                            lit(&format!("%v is not {what}"))
+                        );
+                        out.push(if set.is_empty() {
+                            violation
+                        } else {
+                            let at = set
+                                .iter()
+                                .map(|f| format!("float32({e}) == {f:?}"))
+                                .collect::<Vec<_>>()
+                                .join(" || ");
+                            format!(
+                                "if {at} {{ {r}.unevaluated({p}, {}) }} else {{ {violation} }}",
+                                lit(&format!("{keyword} {literal}: the value rounds to the same float as a listed value"))
+                            )
+                        });
+                    }
+                    _ => {
+                        // Decided as far as a float64 holds the value; a
+                        // listed value no float holds as written leaves a
+                        // value equal to its float undecided.
+                        let floats = |exact: bool| {
+                            let mut set: Vec<f64> = values
+                                .iter()
+                                .filter(|n| checks::f64_holds(n) == exact)
+                                .filter_map(serde_json::Number::as_f64)
+                                .filter(|f| f.is_finite())
+                                .collect();
+                            set.sort_by(f64::total_cmp);
+                            set.dedup();
+                            set
+                        };
+                        let any = |set: &[f64]| {
+                            set.iter()
+                                .map(|f| format!("float64({e}) == {f:?}"))
+                                .collect::<Vec<_>>()
+                                .join(" || ")
+                        };
+                        let (exact, inexact) = (floats(true), floats(false));
+                        let violation = format!(
+                            "{r}.violation({p}, fmt.Sprintf({}, float64({e})))",
+                            lit(&format!("%v is not {what}"))
+                        );
+                        // A value equal to a listed value held exactly is
+                        // decided first; only then one no float holds.
+                        let missed = if inexact.is_empty() {
+                            violation
+                        } else {
+                            format!(
+                                "if {} {{ {r}.unevaluated({p}, {}) }} else {{ {violation} }}",
+                                any(&inexact),
+                                lit(&format!("{keyword} {literal}: a listed value is not exactly a float, and the value is its float"))
+                            )
+                        };
+                        out.push(if exact.is_empty() {
+                            missed
+                        } else {
+                            format!("if !({}) {{ {missed} }}", any(&exact))
+                        });
+                    }
+                }
+            }
             Check::NumAtLeast {
                 bound,
                 exclusive,

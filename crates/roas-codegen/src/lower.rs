@@ -706,14 +706,24 @@ impl<'a> Lowerer<'a> {
             Kind::Integer { width, enum_values } => {
                 self.number_diagnostics(schema, true);
                 if enum_values.is_some() {
-                    self.warn(DiagnosticKind::NumericEnum, &schema.id, "`enum` over integers is not represented in the type; the values are listed in its documentation".into());
+                    let checked = if self.config.validation {
+                        " and checked by generated validation"
+                    } else {
+                        ""
+                    };
+                    self.warn(DiagnosticKind::NumericEnum, &schema.id, format!("`enum` over integers is not represented in the type, which stays an integer; the values are listed in its documentation{checked}"));
                 }
                 TypeRef::Integer(width.unwrap_or(IntWidth::Int64))
             }
             Kind::Number { width, enum_values } => {
                 self.number_diagnostics(schema, false);
                 if enum_values.is_some() {
-                    self.warn(DiagnosticKind::NumericEnum, &schema.id, "`enum` over numbers is not represented in the type; the values are listed in its documentation".into());
+                    let checked = if self.config.validation {
+                        " and checked by generated validation"
+                    } else {
+                        ""
+                    };
+                    self.warn(DiagnosticKind::NumericEnum, &schema.id, format!("`enum` over numbers is not represented in the type, which stays a number; the values are listed in its documentation{checked}"));
                 }
                 TypeRef::Number(width.unwrap_or(FloatWidth::Double))
             }
@@ -1400,12 +1410,17 @@ impl<'a> Lowerer<'a> {
             );
         }
         if schema.const_value.is_some() && !self.const_is_tag(schema) {
+            let message = if schema.constraints.const_number.is_some() && self.config.validation {
+                "`const` is not represented in the type, which stays a number; generated validation checks it"
+            } else {
+                "`const` is not represented in the type; the value is not enforced"
+            };
             self.warn(
                 DiagnosticKind::UnsupportedKeyword {
                     keyword: "const".into(),
                 },
                 &schema.id,
-                "`const` is not represented in the type; the value is not enforced".into(),
+                message.into(),
             );
         }
         if let Some(dialect) = &schema.dialect
@@ -1682,17 +1697,9 @@ impl<'a> Lowerer<'a> {
 
 /// A schema saying what neither its type nor a generated check enforces.
 fn schema_unchecked(schema: &FrontSchema) -> bool {
-    let numeric_enum = matches!(
-        &schema.kind,
-        Kind::Integer {
-            enum_values: Some(_),
-            ..
-        } | Kind::Number {
-            enum_values: Some(_),
-            ..
-        }
-    );
-    numeric_enum || schema.const_value.is_some() || !schema.unsupported.is_empty()
+    // A number's `enum` and `const` are checked; any other `const` is not.
+    (schema.const_value.is_some() && schema.constraints.const_number.is_none())
+        || !schema.unsupported.is_empty()
 }
 
 /// What an inline branch constrains that no named type carries for it.

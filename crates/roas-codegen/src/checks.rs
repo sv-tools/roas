@@ -80,6 +80,13 @@ pub(crate) enum Check {
         integral: bool,
         literal: String,
     },
+    /// A number's `enum` or `const`: the values it may be. `literal` is
+    /// how they are written in a message.
+    NumberIn {
+        values: Vec<Number>,
+        keyword: &'static str,
+        literal: String,
+    },
     MinItems(u64),
     MaxItems(u64),
     UniqueItems(Unique),
@@ -237,6 +244,7 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                     literal: n.to_string(),
                 });
             }
+            out.extend(number_in(c));
             if let Some(n) = &c.multiple_of {
                 out.push(match decimal(n) {
                     Some((factor, scale)) if factor != 0 => Check::IntMultipleOf {
@@ -280,6 +288,7 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                     }
                 });
             }
+            out.extend(number_in(c));
             if let Some(n) = &c.multiple_of {
                 out.push(Check::NumMultipleOf {
                     integral: n.is_i64() || n.is_u64(),
@@ -901,6 +910,8 @@ pub(crate) fn unchecked_keywords(ty: &TypeRef, c: &Constraints) -> Vec<&'static 
         (c.max_properties.is_some(), "maxProperties", map),
         (c.property_names, "propertyNames", map),
         (!c.pattern_properties.is_empty(), "patternProperties", map),
+        (c.enum_numbers.is_some(), "enum", number),
+        (c.const_number.is_some(), "const", number),
     ] {
         if present && !applies {
             out.push(keyword);
@@ -1128,6 +1139,8 @@ fn declared_keywords(c: &Constraints) -> Vec<&'static str> {
         (c.max_properties.is_some(), "maxProperties"),
         (c.property_names, "propertyNames"),
         (!c.pattern_properties.is_empty(), "patternProperties"),
+        (c.enum_numbers.is_some(), "enum"),
+        (c.const_number.is_some(), "const"),
     ]
     .into_iter()
     .filter_map(|(present, keyword)| present.then_some(keyword))
@@ -1246,6 +1259,93 @@ fn floor_ceil(n: &Number) -> (i128, i128) {
 }
 
 /// The smallest integer satisfying `>= n` (or `> n`).
+/// A number's `enum` and `const`, as checks.
+fn number_in(c: &Constraints) -> Vec<Check> {
+    let mut out = Vec::new();
+    if let Some(values) = &c.enum_numbers {
+        out.push(Check::NumberIn {
+            values: values.clone(),
+            keyword: "enum",
+            literal: format!(
+                "[{}]",
+                values
+                    .iter()
+                    .map(Number::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
+    if let Some(n) = &c.const_number {
+        out.push(Check::NumberIn {
+            values: vec![n.clone()],
+            keyword: "const",
+            literal: n.to_string(),
+        });
+    }
+    out
+}
+
+/// Whether an `f64` holds `n` as written: the float's shortest form reads
+/// back as the same number. Not past the float range, nor underflowing to
+/// zero, nor with more digits than a float keeps.
+pub(crate) fn f64_holds(n: &Number) -> bool {
+    let Some(f) = n.as_f64().filter(|f| f.is_finite()) else {
+        return false;
+    };
+    let Some(back) = Number::from_f64(f) else {
+        return false;
+    };
+    match (parse_decimal(n), parse_decimal(&back)) {
+        (Some(a), Some(b)) => {
+            (a.digits.is_empty() && b.digits.is_empty())
+                || (a.negative == b.negative && a.digits == b.digits && a.exponent == b.exponent)
+        }
+        _ => false,
+    }
+}
+
+/// The float32 values a literal equal to `f` may decode to: the nearest,
+/// and the other one around it too when `f` is exactly halfway between
+/// them, where reading through an `f64` may round either way.
+pub(crate) fn f32_candidates(f: f64) -> Vec<f32> {
+    // Past the largest float32 up to the halfway point to the next power
+    // of two, a literal decodes to the largest float32; past that, it does
+    // not decode at all, so nothing is equal to it.
+    if f.is_finite() && (f as f32).is_infinite() {
+        let halfway = f64::from(f32::MAX) + 2f64.powi(103);
+        return if f.abs() <= halfway {
+            vec![f32::MAX.copysign(f as f32)]
+        } else {
+            Vec::new()
+        };
+    }
+    let (below, above) = f32_neighbours(f);
+    if below != above && f - f64::from(below) == f64::from(above) - f {
+        vec![below, above]
+    } else {
+        vec![f as f32]
+    }
+}
+
+/// Whether `n`, an integer, is known as written: an integer token, one
+/// small enough that every integer near it is a float too, or a float
+/// whose text says more than its `f64` does — which only a description
+/// read exactly (`exact-numbers`, JSON) keeps. A float written as an `f64`
+/// prints it, as a YAML source does even then, says no more than it.
+pub(crate) fn integer_held(n: &Number) -> bool {
+    n.is_i64()
+        || n.is_u64()
+        || n.as_f64().is_some_and(|f| f.abs() < 2f64.powi(53))
+        || (cfg!(feature = "exact-numbers") && !f64_holds(n))
+}
+
+/// The integer `n` is, when it is one.
+pub(crate) fn exact_integer(n: &Number) -> Option<i128> {
+    let (floor, ceil) = floor_ceil(n);
+    (floor == ceil).then_some(floor)
+}
+
 fn int_lower(n: &Number, exclusive: bool) -> i128 {
     let (floor, ceil) = floor_ceil(n);
     if exclusive { floor + 1 } else { ceil }
@@ -1283,6 +1383,57 @@ pub(crate) fn decimal(n: &Number) -> Option<(i128, u32)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_float_listed_past_the_float32_range_decodes_to_the_largest_or_nothing() {
+        assert_eq!(super::f32_candidates(3.4028235677973366e38), [f32::MAX]);
+        assert_eq!(super::f32_candidates(-3.4028235677973366e38), [-f32::MAX]);
+        assert!(super::f32_candidates(1e39).is_empty());
+    }
+
+    #[test]
+    fn an_integer_read_as_a_float_past_2_53_is_not_held() {
+        let big: Number = serde_json::from_str("9007199254740992.0").unwrap();
+        let int: Number = serde_json::from_str("9007199254740993").unwrap();
+        let small: Number = serde_json::from_str("2.0").unwrap();
+        assert!(super::integer_held(&int) && super::integer_held(&small));
+        // Its text says no more than its float: it may have been read as one.
+        assert!(!super::integer_held(&big));
+        #[cfg(feature = "exact-numbers")]
+        {
+            let precise: Number = serde_json::from_str("9007199254740993.0").unwrap();
+            assert!(super::integer_held(&precise));
+        }
+    }
+
+    #[test]
+    fn f64_holds_a_number_only_as_written() {
+        for (text, holds) in [
+            ("0.1", true),
+            ("2", true),
+            ("-2.50", true),
+            ("0", true),
+            ("-0", true),
+            ("1e2", true),
+            ("2.5e-1", true),
+            ("5e-324", true),
+            ("1.7976931348623157e308", true),
+            ("9007199254740993", false),
+            ("18446744073709551615", false),
+        ] {
+            let n: Number = serde_json::from_str(text).unwrap();
+            assert_eq!(super::f64_holds(&n), holds, "{text}");
+        }
+        #[cfg(feature = "exact-numbers")]
+        for text in [
+            "1e-400",
+            "0.10000000000000000000001",
+            "123456789012345678901234567890123456",
+        ] {
+            let n: Number = serde_json::from_str(text).unwrap();
+            assert!(!super::f64_holds(&n), "{text}");
+        }
+    }
+
     use super::*;
 
     fn n(text: &str) -> Number {

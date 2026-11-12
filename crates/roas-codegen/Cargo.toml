@@ -38,7 +38,10 @@ roas = { workspace = true, features = ["v2", "v3_0", "v3_1", "v3_2"] }
 # construct an argument.
 enumset.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# `float_roundtrip`: a number in the description is read as the float
+# nearest it, as the generated code's decoder reads a value, so a bound or
+# an enum value compares as written.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 serde-saphyr.workspace = true
 thiserror.workspace = true
 toml.workspace = true

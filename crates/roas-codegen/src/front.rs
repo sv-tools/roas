@@ -101,8 +101,12 @@ pub(crate) struct Constraints {
     pub names: Option<Box<Constraints>>,
     /// `patternProperties` patterns, in declaration order.
     pub pattern_properties: Vec<String>,
-    /// Keywords neither the type nor a generated check enforces: a numeric
-    /// `enum` and a `const` the type does not pin.
+    /// A numeric `enum`: the values a number may be.
+    pub enum_numbers: Option<Vec<serde_json::Number>>,
+    /// A numeric `const` on a number.
+    pub const_number: Option<serde_json::Number>,
+    /// Keywords neither the type nor a generated check enforces: a `const`
+    /// the type does not pin.
     pub unenforced: Vec<&'static str>,
     /// The constraints of an inline `items` or `additionalProperties`
     /// schema, checked on each item or member value its type holds unless
@@ -556,16 +560,23 @@ impl Translator<'_> {
                 front.unsupported.push(keyword);
             }
         }
-        let numeric_enum = matches!(
-            &front.kind,
+        // A number's `enum` and `const` are checked by generated validation.
+        match &front.kind {
             Kind::Integer {
-                enum_values: Some(_),
+                enum_values: Some(values),
                 ..
-            } | Kind::Number {
-                enum_values: Some(_),
+            } => front.constraints.enum_numbers = Some(values.iter().map(|&n| n.into()).collect()),
+            Kind::Number {
+                enum_values: Some(values),
                 ..
-            }
-        );
+            } => front.constraints.enum_numbers = Some(values.clone()),
+            _ => {}
+        }
+        if let (Some(Value::Number(n)), Kind::Integer { .. } | Kind::Number { .. }) =
+            (&front.const_value, &front.kind)
+        {
+            front.constraints.const_number = Some(n.clone());
+        }
         // A required member with no property of its own lands in the
         // catch-all, where decoding does not ask for it.
         let undeclared = matches!(
@@ -574,8 +585,10 @@ impl Translator<'_> {
                 if required.iter().any(|r| !properties.contains_key(r))
         );
         for (present, keyword) in [
-            (numeric_enum, "enum"),
-            (front.const_value.is_some(), "const"),
+            (
+                front.const_value.is_some() && front.constraints.const_number.is_none(),
+                "const",
+            ),
             (undeclared, "required"),
         ] {
             if present && !front.constraints.unenforced.contains(&keyword) {
