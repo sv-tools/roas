@@ -93,6 +93,12 @@ pub(crate) enum Check {
         exclusive: bool,
         literal: String,
     },
+    /// A bound on an exact decimal no value it holds meets.
+    DecOutside {
+        at_least: bool,
+        exclusive: bool,
+        literal: String,
+    },
     /// `multipleOf` on an exact decimal.
     DecMultipleOf {
         divisor: Dec,
@@ -316,11 +322,10 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
             }
         }
         ValueKind::Decimal => {
-            // A literal the decimal cannot hold is an error when lowering,
-            // which leaves the type out: unevaluated only for the record.
+            // A literal no decimal holds is warned about when lowering.
             let unheld = |keyword: &'static str, n: &Number| Check::Unevaluated {
                 keyword,
-                reason: format!("{n} has more digits than an exact decimal holds"),
+                reason: format!("{n} is past what an exact decimal holds"),
             };
             for (n, keyword, exclusive, at_least) in [
                 (&c.minimum, "minimum", false, true),
@@ -330,18 +335,24 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
             ] {
                 let Some(n) = n else { continue };
                 let literal = n.to_string();
-                out.push(match dec(n) {
-                    Some(bound) if at_least => Check::DecAtLeast {
+                out.push(match held_bound(n, exclusive, at_least) {
+                    HeldBound::Dec(bound, exclusive) if at_least => Check::DecAtLeast {
                         bound,
                         exclusive,
                         literal,
                     },
-                    Some(bound) => Check::DecAtMost {
+                    HeldBound::Dec(bound, exclusive) => Check::DecAtMost {
                         bound,
                         exclusive,
                         literal,
                     },
-                    None => unheld(keyword, n),
+                    HeldBound::Never => Check::DecOutside {
+                        at_least,
+                        exclusive,
+                        literal,
+                    },
+                    HeldBound::Always => continue,
+                    HeldBound::Unheld => unheld(keyword, n),
                 });
             }
             out.extend(number_in(c));
@@ -1459,6 +1470,82 @@ pub(crate) fn dec(n: &Number) -> Option<Dec> {
         mantissa: if d.negative { -magnitude } else { magnitude },
         exponent: i32::try_from(d.exponent).ok()?,
     })
+}
+
+/// A bound on an exact decimal, as one deciding the same for every value
+/// a decimal holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeldBound {
+    /// Compared with this decimal, exclusively or not.
+    Dec(Dec, bool),
+    /// Every value meets it.
+    Always,
+    /// No value meets it.
+    Never,
+    /// Past the exponents a decimal holds, yet among its values.
+    Unheld,
+}
+
+/// `value >= n` (`at_least`) or `value <= n`, exclusive or not, for the
+/// values an exact decimal holds — at most [`MAX_DIGITS`] significant
+/// digits times a power of ten in the `i32` range. A bound with more
+/// digits is rounded to that many towards the values meeting it, which is
+/// the nearest of them: no value lies between it and the bound.
+pub(crate) fn held_bound(n: &Number, exclusive: bool, at_least: bool) -> HeldBound {
+    if let Some(d) = dec(n) {
+        return HeldBound::Dec(d, exclusive);
+    }
+    let Some(p) = parse_decimal(n) else {
+        return HeldBound::Unheld;
+    };
+    let zero = Dec {
+        mantissa: 0,
+        exponent: 0,
+    };
+    let count = p.digits.len() as i64;
+    // The power of ten of the bound's leading digit.
+    let leading = p.exponent.saturating_add(count - 1);
+    // Past every value: the largest held is below `10^(i32::MAX + 38)`.
+    if leading > i64::from(i32::MAX) + MAX_DIGITS as i64 - 1 {
+        return if p.negative == at_least {
+            HeldBound::Always
+        } else {
+            HeldBound::Never
+        };
+    }
+    // Between zero and every other value: the smallest positive held is
+    // `10^i32::MIN`.
+    if leading < i64::from(i32::MIN) {
+        return HeldBound::Dec(zero, p.negative != at_least);
+    }
+    if p.digits.len() <= MAX_DIGITS {
+        return HeldBound::Unheld;
+    }
+    let Ok(mut mantissa) = p.digits[..MAX_DIGITS].parse::<i128>() else {
+        return HeldBound::Unheld;
+    };
+    let mut exponent = p.exponent + (count - MAX_DIGITS as i64);
+    // The digits cut off are not all zero: rounding away from zero moves
+    // the magnitude up to the next value.
+    if at_least != p.negative {
+        mantissa += 1;
+    }
+    while mantissa % 10 == 0 {
+        mantissa /= 10;
+        exponent += 1;
+    }
+    match i32::try_from(exponent) {
+        // The bound is no value, so a value meets it exclusively exactly
+        // when it meets the rounded one inclusively.
+        Ok(exponent) => HeldBound::Dec(
+            Dec {
+                mantissa: if p.negative { -mantissa } else { mantissa },
+                exponent,
+            },
+            false,
+        ),
+        Err(_) => HeldBound::Unheld,
+    }
 }
 
 /// A number's magnitude as `digits / 10^scale`, exactly as written. `None`

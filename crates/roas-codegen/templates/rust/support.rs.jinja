@@ -113,7 +113,9 @@ impl From<Int32> for i32 {
 /// most 38 significant digits and an `i32` exponent. Decoded from the
 /// number's own JSON token, so nothing is rounded; written in its shortest
 /// form, so `1.50` is written back as `1.5`. A number past those limits is
-/// refused at decode rather than rounded.
+/// refused at decode rather than rounded. Through `serde_json::Value`, as
+/// `to_value` and `from_value` go, it is read as a float and rounded: use
+/// JSON text.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Decimal {
     // Canonical: no trailing zero in the mantissa, zero as `0 × 10^0`.
@@ -246,26 +248,25 @@ impl std::fmt::Display for Decimal {
     /// The shortest JSON number for the value: plain unless its point
     /// lies far from its digits, as JavaScript writes numbers.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.mantissa < 0 {
-            f.write_str("-")?;
-        }
+        let sign = if self.mantissa < 0 { "-" } else { "" };
         let digits = self.mantissa.unsigned_abs().to_string();
         let count = digits.len() as i64;
         let exponent = i64::from(self.exponent);
         // The power of ten of the leading digit.
         let leading = count - 1 + exponent;
-        if !(-7..21).contains(&leading) {
+        let text = if !(-6..21).contains(&leading) {
             let (first, rest) = digits.split_at(1);
             let point = if rest.is_empty() { "" } else { "." };
-            write!(f, "{first}{point}{rest}e{leading}")
+            format!("{sign}{first}{point}{rest}e{leading}")
         } else if exponent >= 0 {
-            write!(f, "{digits}{}", "0".repeat(exponent as usize))
+            format!("{sign}{digits}{}", "0".repeat(exponent as usize))
         } else if count + exponent > 0 {
             let (whole, fraction) = digits.split_at((count + exponent) as usize);
-            write!(f, "{whole}.{fraction}")
+            format!("{sign}{whole}.{fraction}")
         } else {
-            write!(f, "0.{}{digits}", "0".repeat((-(count + exponent)) as usize))
-        }
+            format!("{sign}0.{}{digits}", "0".repeat((-(count + exponent)) as usize))
+        };
+        f.pad(&text)
     }
 }
 

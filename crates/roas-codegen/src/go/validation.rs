@@ -245,11 +245,17 @@ fn render(
                         let mut set: Vec<checks::Dec> =
                             values.iter().filter_map(checks::dec).collect();
                         set.dedup();
-                        let list = set.iter().map(decimal).collect::<Vec<_>>().join(", ");
-                        out.push(format!(
-                            "switch {e} {{ case {list}: default: {r}.violation({p}, fmt.Sprintf({}, {e})) }}",
+                        // A listed value no decimal holds is no value's.
+                        let violation = format!(
+                            "{r}.violation({p}, fmt.Sprintf({}, {e}))",
                             lit(&format!("%v is not {what}"))
-                        ));
+                        );
+                        out.push(if set.is_empty() {
+                            violation
+                        } else {
+                            let list = set.iter().map(decimal).collect::<Vec<_>>().join(", ");
+                            format!("switch {e} {{ case {list}: default: {violation} }}")
+                        });
                     }
                     ValueKind::Number(FloatWidth::Float) => {
                         // A `float` equal to a value is ambiguous: literals
@@ -413,6 +419,22 @@ fn render(
                 out.push(format!(
                     "if !({e}.Cmp({}) {op} 0) {{ {r}.violation({p}, fmt.Sprintf({}, {e})) }}",
                     decimal(bound),
+                    lit(&format!("%v is {word} {keyword} {literal}"))
+                ));
+            }
+            Check::DecOutside {
+                at_least,
+                exclusive,
+                literal,
+            } => {
+                let (keyword, word) = match (at_least, exclusive) {
+                    (true, false) => ("minimum", "below"),
+                    (true, true) => ("exclusiveMinimum", "below"),
+                    (false, false) => ("maximum", "above"),
+                    (false, true) => ("exclusiveMaximum", "above"),
+                };
+                out.push(format!(
+                    "{r}.violation({p}, fmt.Sprintf({}, {e}))",
                     lit(&format!("%v is {word} {keyword} {literal}"))
                 ));
             }

@@ -383,6 +383,10 @@ fn exact_numbers_hold_every_number_as_a_decimal() {
     let mut components = components;
     // 39 significant digits: no exact decimal holds the bound. Read from
     // text, as `json!` would read the literal as a float.
+    components["Odd"] = serde_json::from_str(
+        r#"{"type": "number", "multipleOf": 1.000000000000000000000000000000000000001}"#,
+    )
+    .unwrap();
     components["TooLong"] = serde_json::from_str(
         r#"{"type": "number", "maximum": 1.00000000000000000000000000000000000001}"#,
     )
@@ -408,21 +412,32 @@ fn exact_numbers_hold_every_number_as_a_decimal() {
             text.contains(field) && text.contains(int) && text.contains("Decimal2"),
             "{text}"
         );
+        // Only a multiple no decimal holds leaves values unevaluated.
         assert!(
-            !text.contains("TooLong") && !text.contains("Holder"),
+            g.diagnostics
+                .iter()
+                .any(|d| d.pointer == "/components/schemas/Odd"
+                    && d.severity == Severity::Warning
+                    && d.message.starts_with(
+                        "`multipleOf` 1.000000000000000000000000000000000000001 is past"
+                    )),
+            "{:?}",
+            g.diagnostics
+        );
+        assert!(
+            !g.diagnostics
+                .iter()
+                .any(|d| d.pointer == "/components/schemas/TooLong"),
+            "{:?}",
+            g.diagnostics
+        );
+        // Its bound still decides every value: nothing is left out.
+        assert!(
+            text.contains("TooLong") && text.contains("Holder"),
             "{text}"
         );
-        let errors: Vec<_> = g
-            .diagnostics
-            .iter()
-            .filter(|d| d.severity == Severity::Error)
-            .collect();
         assert!(
-            errors.len() == 1
-                && errors[0].pointer == "/components/schemas/TooLong"
-                && errors[0]
-                    .message
-                    .contains("more than 38 significant digits"),
+            !g.diagnostics.iter().any(|d| d.severity == Severity::Error),
             "{:?}",
             g.diagnostics
         );

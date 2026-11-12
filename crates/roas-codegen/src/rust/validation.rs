@@ -50,6 +50,16 @@ fn float_bound(bound: f64, width: FloatWidth) -> Result<String, f64> {
     }
 }
 
+/// The keyword a bound comes from, and where a value failing it lies.
+fn bound_words(at_least: bool, exclusive: bool) -> (&'static str, &'static str) {
+    match (at_least, exclusive) {
+        (true, false) => ("minimum", "below"),
+        (true, true) => ("exclusiveMinimum", "below"),
+        (false, false) => ("maximum", "above"),
+        (false, true) => ("exclusiveMaximum", "above"),
+    }
+}
+
 /// An exact decimal as a `Decimal` constant.
 fn decimal(d: &checks::Dec) -> String {
     format!(
@@ -253,10 +263,16 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                         let mut set: Vec<checks::Dec> =
                             values.iter().filter_map(checks::dec).collect();
                         set.dedup();
-                        let list = set.iter().map(decimal).collect::<Vec<_>>().join(", ");
-                        out.push(format!(
-                            "if ![{list}].contains({v}) {{ {r}.violation({p}, format!(\"{{}} is not {what}\", {v})); }}"
-                        ));
+                        // A listed value no decimal holds is no value's.
+                        let violation = format!(
+                            "{r}.violation({p}, format!(\"{{}} is not {what}\", {v}));"
+                        );
+                        out.push(if set.is_empty() {
+                            violation
+                        } else {
+                            let list = set.iter().map(decimal).collect::<Vec<_>>().join(", ");
+                            format!("if ![{list}].contains({v}) {{ {violation} }}")
+                        });
                     }
                     ValueKind::Number(FloatWidth::Float) => {
                         // A `float` equal to a value is ambiguous: literals
@@ -351,6 +367,16 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                 out.push(format!(
                     "if !(*{v} {op} {}) {{ {r}.violation({p}, format!(\"{{}} is {word} {keyword} {literal}\", {v})); }}",
                     decimal(bound)
+                ));
+            }
+            Check::DecOutside {
+                at_least,
+                exclusive,
+                literal,
+            } => {
+                let (keyword, word) = bound_words(*at_least, *exclusive);
+                out.push(format!(
+                    "{r}.violation({p}, format!(\"{{}} is {word} {keyword} {literal}\", {v}));"
                 ));
             }
             Check::DecMultipleOf { divisor, literal } => out.push(format!(

@@ -2145,6 +2145,22 @@ fn exact_generation(target: Target) -> roas_codegen::Generation {
             "Rates": {"type": "array", "items": {"type": "number", "maximum": 1}}
         }}
     });
+    let mut description = description;
+    // Literals past what a decimal holds, read from text: `json!` would
+    // read them as floats.
+    description["components"]["schemas"]["Long"] = serde_json::from_str(
+        r#"{"type": "object", "properties": {
+            "lo": {"type": "number", "minimum": 0.10000000000000000000000000000000000000001},
+            "hi": {"type": "number", "exclusiveMaximum": 0.10000000000000000000000000000000000000001},
+            "huge": {"type": "number", "maximum": 1e3000000000},
+            "never": {"type": "number", "minimum": 1e3000000000},
+            "tiny": {"type": "number", "exclusiveMinimum": -1e-3000000000},
+            "pick": {"type": "number", "enum": [1, 1.000000000000000000000000000000000000001]},
+            "only": {"type": "number", "const": 1.000000000000000000000000000000000000001},
+            "odd": {"type": "number", "multipleOf": 1.000000000000000000000000000000000000001}
+        }}"#,
+    )
+    .unwrap();
     let bytes = serde_json::to_vec(&description).unwrap();
     let doc =
         SourceDocument::parse(Input::Json(bytes), Url::parse("file:///x.json").unwrap()).unwrap();
@@ -2175,6 +2191,10 @@ fn v(pointer: &str) -> (String, FindingKind) {
     (pointer.to_owned(), FindingKind::Violation)
 }
 
+fn u(pointer: &str) -> (String, FindingKind) {
+    (pointer.to_owned(), FindingKind::Unevaluated)
+}
+
 fn d(text: &str) -> Decimal {
     text.parse().unwrap()
 }
@@ -2195,7 +2215,9 @@ fn main() {
         r#"{"amount":0,"big":1.23456789012345678901234567890123456e135}"#
     );
     assert_eq!(round_trip::<Price>(r#"{"amount":0,"big":0.000001}"#), r#"{"amount":0,"big":0.000001}"#);
-    assert_eq!(round_trip::<Price>(r#"{"amount":0,"big":1e-8}"#), r#"{"amount":0,"big":1e-8}"#);
+    assert_eq!(round_trip::<Price>(r#"{"amount":0,"big":1e-7}"#), r#"{"amount":0,"big":1e-7}"#);
+    assert_eq!(round_trip::<Price>(r#"{"amount":0,"big":-12e-8}"#), r#"{"amount":0,"big":-1.2e-7}"#);
+    assert_eq!(format!("[{:>6}]", d("-1.5")), "[  -1.5]");
     assert_eq!(round_trip::<Price>(r#"{"amount":0,"big":-1E+21}"#), r#"{"amount":0,"big":-1e21}"#);
     assert_eq!(round_trip::<Price>(r#"{"amount":-0.0}"#), r#"{"amount":0}"#);
     // Past 38 digits or an i32 exponent, and anything but a number, is refused.
@@ -2230,6 +2252,16 @@ fn main() {
     assert_eq!(report::<Price>(r#"{"amount":0,"fixed":-0.250}"#), vec![]);
     assert_eq!(report::<Price>(r#"{"amount":0,"fixed":-0.26}"#), vec![v("/fixed")]);
     assert_eq!(report::<Rates>(r#"[1, 1.0000000000000000000000001]"#), vec![v("/1")]);
+    // A bound with more digits than a decimal holds still decides every value.
+    let long = r#"{"lo":0.1000000000000000000000000000000000001,"hi":0.1,"huge":1e300,"tiny":0,"pick":1}"#;
+    assert_eq!(report::<Long>(long), vec![]);
+    assert_eq!(report::<Long>(r#"{"lo":0.1}"#), vec![v("/lo")]);
+    assert_eq!(report::<Long>(r#"{"hi":0.1000000000000000000000000000000000001}"#), vec![v("/hi")]);
+    assert_eq!(report::<Long>(r#"{"never":1e300}"#), vec![v("/never")]);
+    assert_eq!(report::<Long>(r#"{"tiny":-1e-30}"#), vec![v("/tiny")]);
+    assert_eq!(report::<Long>(r#"{"pick":2}"#), vec![v("/pick")]);
+    assert_eq!(report::<Long>(r#"{"only":1}"#), vec![v("/only")]);
+    assert_eq!(report::<Long>(r#"{"odd":3}"#), vec![u("/odd")]);
     println!("exact numbers behave");
 }
 "##;
@@ -2314,6 +2346,7 @@ func report[T api.Validator](js string) []found {
 }
 
 func v(p string) found { return found{p, api.Violation} }
+func u(p string) found { return found{p, api.Unevaluated} }
 
 func check(what string, got []found, want ...found) {
 	if want == nil {
@@ -2360,7 +2393,8 @@ func main() {
 	same(roundTrip(exact), exact)
 	same(roundTrip(`{"amount":0,"big":123456789012345678901234567890123456e100}`), `{"amount":0,"big":1.23456789012345678901234567890123456e135}`)
 	same(roundTrip(`{"amount":0,"big":0.000001}`), `{"amount":0,"big":0.000001}`)
-	same(roundTrip(`{"amount":0,"big":1e-8}`), `{"amount":0,"big":1e-8}`)
+	same(roundTrip(`{"amount":0,"big":1e-7}`), `{"amount":0,"big":1e-7}`)
+	same(roundTrip(`{"amount":0,"big":-12e-8}`), `{"amount":0,"big":-1.2e-7}`)
 	same(roundTrip(`{"amount":0,"big":-1E+21}`), `{"amount":0,"big":-1e21}`)
 	same(roundTrip(`{"amount":-0.0}`), `{"amount":0}`)
 	for _, js := range []string{
@@ -2397,6 +2431,14 @@ func main() {
 	check("const", report[api.Price](`{"amount":0,"fixed":-0.250}`))
 	check("not const", report[api.Price](`{"amount":0,"fixed":-0.26}`), v("/fixed"))
 	check("items", report[api.Rates](`[1, 1.0000000000000000000000001]`), v("/1"))
+	check("long", report[api.Long](`{"lo":0.1000000000000000000000000000000000001,"hi":0.1,"huge":1e300,"tiny":0,"pick":1}`))
+	check("lo", report[api.Long](`{"lo":0.1}`), v("/lo"))
+	check("hi", report[api.Long](`{"hi":0.1000000000000000000000000000000000001}`), v("/hi"))
+	check("never", report[api.Long](`{"never":1e300}`), v("/never"))
+	check("tiny", report[api.Long](`{"tiny":-1e-30}`), v("/tiny"))
+	check("pick", report[api.Long](`{"pick":2}`), v("/pick"))
+	check("only", report[api.Long](`{"only":1}`), v("/only"))
+	check("odd", report[api.Long](`{"odd":3}`), u("/odd"))
 	fmt.Println("exact numbers behave")
 }
 "##;

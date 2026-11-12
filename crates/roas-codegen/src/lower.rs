@@ -1785,31 +1785,37 @@ impl<'a> Lowerer<'a> {
 
     fn number_diagnostics(&mut self, schema: &FrontSchema, integer: bool) {
         let c = &schema.constraints;
-        // Held exactly, a number loses nothing to its type; only a literal
-        // the decimal cannot hold is an error, since no check on it can be
-        // generated.
+        // Held exactly, a number loses nothing to its type. A bound with
+        // more digits than a decimal holds still decides every value, and
+        // a listed value with more is no value's; only a `multipleOf` no
+        // decimal holds, or a bound past its exponents among its values,
+        // leaves values unevaluated — said only where validation hears it.
         if !integer && self.config.exact_numbers {
-            let literals = [
-                ("minimum", &c.minimum),
-                ("exclusiveMinimum", &c.exclusive_minimum),
-                ("maximum", &c.maximum),
-                ("exclusiveMaximum", &c.exclusive_maximum),
-                ("multipleOf", &c.multiple_of),
-                ("const", &c.const_number),
+            use crate::checks::{HeldBound, dec, held_bound};
+            let mut unheld: Vec<String> = [
+                ("minimum", &c.minimum, true),
+                ("exclusiveMinimum", &c.exclusive_minimum, true),
+                ("maximum", &c.maximum, false),
+                ("exclusiveMaximum", &c.exclusive_maximum, false),
             ]
             .into_iter()
-            .filter_map(|(keyword, n)| n.as_ref().map(|n| (keyword, n)))
-            .chain(c.enum_numbers.iter().flatten().map(|n| ("enum", n)));
-            let unheld: Vec<String> = literals
-                .filter(|(_, n)| crate::checks::dec(n).is_none())
-                .map(|(keyword, n)| format!("`{keyword}` {n}"))
-                .collect();
-            if !unheld.is_empty() {
-                self.error(
+            .filter_map(|(keyword, n, at_least)| {
+                let n = n.as_ref()?;
+                (held_bound(n, false, at_least) == HeldBound::Unheld)
+                    .then(|| format!("`{keyword}` {n}"))
+            })
+            .collect();
+            if let Some(n) = &c.multiple_of
+                && dec(n).is_none()
+            {
+                unheld.push(format!("`multipleOf` {n}"));
+            }
+            if !unheld.is_empty() && self.config.validation {
+                self.warn(
                     DiagnosticKind::LossyNumber,
                     &schema.id,
                     format!(
-                        "{} has more than {} significant digits, or an exponent past the 32-bit range, which an exact decimal cannot hold",
+                        "{} is past the {} significant digits and 32-bit exponent an exact decimal holds; values are reported as unevaluated against it",
                         unheld.join(", "),
                         crate::checks::MAX_DIGITS
                     ),
