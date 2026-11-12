@@ -123,6 +123,11 @@ fn main() {
     assert!(matches!(&pets[0], BaseUnion::Doggo(d) if d.bark.as_deref() == Some("woof")));
     assert!(matches!(&pets[1], BaseUnion::Base(b) if b.name.as_deref() == Some("b")));
     assert!(matches!(&pets[2], BaseUnion::Base(b) if b.kind == "other"));
+    // A null tag is read as a missing one.
+    let held: NHolder = serde_json::from_str(r#"{"n":{"kind":null}}"#).unwrap();
+    assert!(matches!(held.n, Some(NBaseUnion::NBase(_))));
+    let held: NHolder = serde_json::from_str(r#"{"n":{"kind":"NCat","lives":1}}"#).unwrap();
+    assert!(matches!(held.n, Some(NBaseUnion::NCat(_))));
     assert_eq!(
         round_trip::<Shelter>(r#"{"first":{"kind":"meow","lives":9}}"#),
         r#"{"first":{"kind":"meow","lives":9}}"#
@@ -206,6 +211,11 @@ fn description() -> serde_json::Value {
                 {"type": "object", "properties": {"lives": {"type": "integer"}}}]},
             "Doggo": {"allOf": [{"$ref": "#/components/schemas/Base"},
                 {"type": "object", "properties": {"bark": {"type": "string"}}}]},
+            "NBase": {"type": "object", "properties": {"kind": {"type": ["string", "null"]}},
+                "discriminator": {"propertyName": "kind"}},
+            "NCat": {"allOf": [{"$ref": "#/components/schemas/NBase"},
+                {"type": "object", "properties": {"lives": {"type": "integer"}}}]},
+            "NHolder": {"type": "object", "properties": {"n": {"$ref": "#/components/schemas/NBase"}}},
             "Shelter": {"type": "object", "properties": {
                 "pets": {"type": "array", "items": {"$ref": "#/components/schemas/Base"}},
                 "first": {"$ref": "#/components/schemas/Base"}}},
@@ -496,6 +506,13 @@ func main() {
 		panic(fmt.Sprintf("pets[2]: %+v", pets[2]))
 	}
 	check(roundTrip[api.Shelter](`{"first":{"kind":"meow","lives":9}}`), `{"first":{"kind":"meow","lives":9}}`)
+	// A null tag is read as a missing one.
+	if _, ok := decode[api.NHolder](`{"n":{"kind":null}}`).N.AsNBase(); !ok {
+		panic("a null tag is read as the parent")
+	}
+	if _, ok := decode[api.NHolder](`{"n":{"kind":"NCat","lives":1}}`).N.AsNCat(); !ok {
+		panic("NCat is selected by name")
+	}
 	if _, ok := decode[api.TagHolder](`{"t":{"kind":"Doggy","c":"x"}}`).T.AsCatty(); !ok {
 		panic("Doggy is mapped to Catty")
 	}

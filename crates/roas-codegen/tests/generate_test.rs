@@ -1807,6 +1807,41 @@ fn a_broken_schema_building_on_a_parent_is_left_out_of_its_union() {
 }
 
 #[test]
+fn a_discriminator_default_or_mapping_off_the_family_is_warned_about() {
+    let mut components = parent_family();
+    components["Other"] = serde_json::json!({"type": "object"});
+    let messages = |discriminator: serde_json::Value| {
+        let mut components = components.clone();
+        components["Pet"]["discriminator"] = discriminator;
+        generate(&document(components), &rust_config(""))
+            .unwrap()
+            .diagnostics
+            .into_iter()
+            .filter(|d| d.pointer == "/components/schemas/Pet")
+            .map(|d| d.message)
+            .collect::<Vec<_>>()
+    };
+    let warned = messages(serde_json::json!({"propertyName": "kind",
+        "defaultMapping": "#/components/schemas/Other"}));
+    assert!(
+        warned
+            .iter()
+            .any(|m| m.contains("default is `#/components/schemas/Other`")
+                && m.ends_with("read as this schema")),
+        "{warned:?}"
+    );
+    let warned = messages(serde_json::json!({"propertyName": "kind",
+        "mapping": {"x": "#/components/schemas/Other"},
+        "defaultMapping": "#/components/schemas/Cat"}));
+    assert!(
+        warned
+            .iter()
+            .any(|m| m.contains("maps `x`") && m.ends_with("read as `Cat`")),
+        "{warned:?}"
+    );
+}
+
+#[test]
 fn a_made_up_tag_selects_nothing() {
     // `mapping` gives the parent's name to `Dog`: the parent is kept under
     // `Pet~`, which a value tagged `Pet~` must not select over `Dog`.

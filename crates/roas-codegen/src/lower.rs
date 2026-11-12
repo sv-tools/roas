@@ -175,6 +175,19 @@ impl<'a> Lowerer<'a> {
                     .unwrap_or(reference);
                 members.contains(name).then(|| name.to_owned())
             };
+            let fallback_name = match discriminator.default_mapping.as_deref() {
+                Some(reference) => target(reference).unwrap_or_else(|| {
+                    self.warn(
+                        DiagnosticKind::UnsupportedKeyword { keyword: "discriminator".into() },
+                        &schema.id,
+                        format!(
+                            "the discriminator's default is `{reference}`, which is neither this schema nor one building on it; an unknown or missing value is read as this schema"
+                        ),
+                    );
+                    parent.clone()
+                }),
+                None => parent.clone(),
+            };
             let mut variants: Vec<(String, String)> = Vec::new();
             for (value, reference) in discriminator.mapping.iter().flatten() {
                 match target(reference) {
@@ -183,7 +196,7 @@ impl<'a> Lowerer<'a> {
                         DiagnosticKind::UnsupportedKeyword { keyword: "discriminator".into() },
                         &schema.id,
                         format!(
-                            "the discriminator maps `{value}` to `{reference}`, which is neither this schema nor one building on it; the value is read as this schema"
+                            "the discriminator maps `{value}` to `{reference}`, which is neither this schema nor one building on it; the value is read as `{fallback_name}`"
                         ),
                     ),
                 }
@@ -199,11 +212,6 @@ impl<'a> Lowerer<'a> {
                     variants.push((name.to_owned(), name.to_owned()));
                 }
             }
-            let fallback_name = discriminator
-                .default_mapping
-                .as_deref()
-                .and_then(target)
-                .unwrap_or_else(|| parent.clone());
             // The parent, and what an unknown tag is read as, are always
             // variants: when a name is a tag `mapping` gives to another
             // schema, under a tag of its own, which any unknown tag reads

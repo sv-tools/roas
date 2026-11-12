@@ -47,7 +47,8 @@ func (u *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 	if err := json.Unmarshal(raw, &members); err != nil {
 		return err
 	}
-	if member, ok := members[{{ t.tag_literal }}]; ok {
+	// A null tag is no tag, as a missing one.
+	if member, ok := members[{{ t.tag_literal }}]; ok && member.Kind() != 'n' {
 		var tag string
 		if member.Kind() != '"' || json.Unmarshal(member, &tag) != nil {
 			return fmt.Errorf("%s: discriminator %q must be a string, got %s", {{ t.name_literal }}, {{ t.tag_literal }}, member)
