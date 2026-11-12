@@ -382,10 +382,14 @@ impl Ir {
                 }
                 !gone
             });
-            let parent_ty = TypeRef::Named(parent.clone());
+            // By name: a variant in a cycle is boxed.
             u.fallback = fallback
                 .and_then(|ty| u.variants.iter().position(|v| v.ty == ty))
-                .or_else(|| u.variants.iter().position(|v| v.ty == parent_ty));
+                .or_else(|| {
+                    u.variants
+                        .iter()
+                        .position(|v| v.ty.direct_named() == Some(&parent))
+                });
             notes.extend(gone_values.into_iter().map(|v| (parent.clone(), v)));
         }
         self.suppressed = closure(self, &BTreeSet::new());

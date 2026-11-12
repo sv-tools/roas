@@ -2074,3 +2074,31 @@ fn a_discriminator_named_with_a_newline_is_valid_rust() {
     );
     assert!(g.is_ok(), "{:?}", g.err());
 }
+
+#[test]
+fn a_self_referential_parent_keeps_its_fallback_when_the_default_is_left_out() {
+    let mut components = parent_family();
+    components["Pet"]["properties"]["friend"] =
+        serde_json::json!({"$ref": "#/components/schemas/Pet"});
+    components["Pet"]["discriminator"]["defaultMapping"] =
+        serde_json::json!("#/components/schemas/Dog");
+    components["Dog"]["allOf"][1]["properties"]["bark"] = serde_json::json!({"not": {}});
+    let g = generate(&document(components), &rust_config("")).unwrap();
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    let squeezed: String = text.split_whitespace().collect();
+    assert!(
+        squeezed.contains("_=>serde_json::from_str(raw.get()).map(Self::Pet)"),
+        "{text}"
+    );
+    assert!(
+        g.diagnostics
+            .iter()
+            .any(|d| d.message.ends_with("read as `Pet`")),
+        "{:?}",
+        g.diagnostics
+    );
+}
