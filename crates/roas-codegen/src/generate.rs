@@ -360,7 +360,7 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
     }
     // What was left out of a parent's union, once it is settled whether
     // the parent is generated at all.
-    for (parent, value) in std::mem::take(&mut ir.pruned) {
+    for (parent, note) in std::mem::take(&mut ir.union_notes) {
         if ir.suppressed.contains(&parent) {
             continue;
         }
@@ -372,7 +372,7 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
             _ => None,
         });
         ir.diagnostics
-            .push(crate::lower::pruned(&parent, &value, read_as.as_deref()));
+            .push(crate::lower::union_note(&parent, &note, read_as.as_deref()));
     }
     point_into_source(&mut ir.diagnostics, document.version());
     diagnostics.append(&mut ir.diagnostics);

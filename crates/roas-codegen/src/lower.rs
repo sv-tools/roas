@@ -8,7 +8,7 @@ use crate::front::{
 };
 use crate::ir::{
     Additional, Branch, Field, Ir, OpenUnion, StructDef, TaggedUnion, TypeDef, TypeKind, TypeRef,
-    Variant,
+    UnionNote, Variant,
 };
 use roas::v3_2::discriminator::Discriminator;
 use serde_json::Value;
@@ -197,13 +197,14 @@ impl<'a> Lowerer<'a> {
                     Some(name) => variants.push((value.clone(), name)),
                     None => {
                         taken.insert(value.clone());
-                        self.warn(
-                        DiagnosticKind::UnsupportedKeyword { keyword: "discriminator".into() },
-                        &schema.id,
-                        format!(
-                            "the discriminator maps `{value}` to `{reference}`, which is neither this schema nor one building on it; the value is read as `{fallback_name}`"
-                        ),
-                    );
+                        // Warned about once the fallback is settled.
+                        self.ir.union_notes.push((
+                            schema.id.clone(),
+                            UnionNote::OffFamily {
+                                tag: value.clone(),
+                                reference: reference.clone(),
+                            },
+                        ));
                     }
                 }
             }
@@ -1942,8 +1943,10 @@ impl<'a> Lowerer<'a> {
     }
 }
 
-/// The warning for a schema left out of its parent's union.
-pub(crate) fn pruned(parent: &SchemaId, value: &str, read_as: Option<&str>) -> Diagnostic {
+/// The warning a note on a parent's union makes, `read_as` the schema an
+/// unknown tag is finally read as.
+pub(crate) fn union_note(parent: &SchemaId, note: &UnionNote, read_as: Option<&str>) -> Diagnostic {
+    let read_as = read_as.map_or("this schema".to_owned(), |name| format!("`{name}`"));
     Diagnostic {
         severity: Severity::Warning,
         kind: DiagnosticKind::UnsupportedKeyword {
@@ -1951,10 +1954,20 @@ pub(crate) fn pruned(parent: &SchemaId, value: &str, read_as: Option<&str>) -> D
         },
         schema_id: parent.clone(),
         pointer: source_of(&parent.pointer),
-        message: format!(
-            "the schema the discriminator reads `{value}` as is not generated; such a value is read as {}",
-            read_as.map_or("this schema".to_owned(), |name| format!("`{name}`"))
-        ),
+        message: match note {
+            UnionNote::Pruned {
+                default: Some(name),
+                ..
+            } => format!(
+                "the discriminator's default `{name}` is not generated; an unknown or missing value is read as {read_as}"
+            ),
+            UnionNote::Pruned { tag, default: None } => format!(
+                "the schema the discriminator reads `{tag}` as is not generated; such a value is read as {read_as}"
+            ),
+            UnionNote::OffFamily { tag, reference } => format!(
+                "the discriminator maps `{tag}` to `{reference}`, which is neither this schema nor one building on it; the value is read as {read_as}"
+            ),
+        },
     }
 }
 

@@ -1873,6 +1873,43 @@ fn a_mapping_key_off_the_family_is_no_member_by_name() {
 }
 
 #[test]
+fn a_union_warning_names_what_a_tag_is_finally_read_as() {
+    let messages = |discriminator: serde_json::Value| {
+        let mut components = parent_family();
+        components["Dog"]["allOf"][1]["properties"]["bark"] = serde_json::json!({"not": {}});
+        components["Pet"]["discriminator"] = discriminator;
+        generate(&document(components), &rust_config(""))
+            .unwrap()
+            .diagnostics
+            .into_iter()
+            .filter(|d| d.pointer == "/components/schemas/Pet")
+            .map(|d| d.message)
+            .collect::<Vec<_>>()
+    };
+    // The default is left out: a tag off the family is read as the parent.
+    let warned = messages(serde_json::json!({"propertyName": "kind",
+        "mapping": {"Lizard": "#/components/schemas/Shelter"},
+        "defaultMapping": "#/components/schemas/Dog"}));
+    assert!(
+        warned
+            .iter()
+            .any(|m| m.contains("maps `Lizard`") && m.ends_with("read as `Pet`")),
+        "{warned:?}"
+    );
+    // A default under a made-up tag is named, not its tag.
+    let warned = messages(serde_json::json!({"propertyName": "kind",
+        "mapping": {"Dog": "#/components/schemas/Cat"},
+        "defaultMapping": "#/components/schemas/Dog"}));
+    assert!(
+        warned
+            .iter()
+            .any(|m| m.contains("default `Dog` is not generated") && m.ends_with("read as `Pet`")),
+        "{warned:?}"
+    );
+    assert!(warned.iter().all(|m| !m.contains('~')), "{warned:?}");
+}
+
+#[test]
 fn a_made_up_tag_selects_nothing() {
     // `mapping` gives the parent's name to `Dog`: the parent is kept under
     // `Pet~`, which a value tagged `Pet~` must not select over `Dog`.

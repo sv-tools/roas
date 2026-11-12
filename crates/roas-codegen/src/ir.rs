@@ -305,8 +305,21 @@ pub(crate) struct Ir {
     pub diagnostics: Vec<Diagnostic>,
     /// Types not emitted: their own error, or a dependency's.
     pub suppressed: BTreeSet<SchemaId>,
-    /// Schemas left out of their parent's union: the parent and the tag.
-    pub pruned: Vec<(SchemaId, String)>,
+    /// What to warn about a parent's union once every pass is done, and
+    /// so what an unknown tag is finally read as.
+    pub union_notes: Vec<(SchemaId, UnionNote)>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum UnionNote {
+    /// A schema left out of the union: the tag reading it, or, when that
+    /// tag is made up, the schema it names as the default.
+    Pruned {
+        tag: String,
+        default: Option<String>,
+    },
+    /// A `mapping` entry naming a schema off the family.
+    OffFamily { tag: String, reference: String },
 }
 
 impl Ir {
@@ -314,7 +327,7 @@ impl Ir {
     /// a parent's discriminator first leaves out the schemas not generated
     /// on their own account — judged with every such union set aside — so
     /// that they do not take every holder of the parent with them; each left
-    /// out is recorded in `pruned`.
+    /// out is recorded in `union_notes`.
     pub(crate) fn suppress(&mut self) {
         fn closure(ir: &Ir, aside: &BTreeSet<SchemaId>) -> BTreeSet<SchemaId> {
             let mut suppressed: BTreeSet<SchemaId> = ir
@@ -377,13 +390,16 @@ impl Ir {
                 continue;
             }
             let fallback = u.fallback.map(|i| u.variants[i].ty.clone());
-            let mut gone_values = Vec::new();
+            let mut gone = Vec::new();
             u.variants.retain(|v| {
-                let gone = v.ty.direct_named().is_some_and(|id| alone.contains(id));
-                if gone {
-                    gone_values.push(v.value.clone());
+                let left_out = v.ty.direct_named().is_some_and(|id| alone.contains(id));
+                if left_out {
+                    gone.push(UnionNote::Pruned {
+                        tag: v.value.clone(),
+                        default: v.synthetic.then(|| v.suggested_name.join("")),
+                    });
                 }
-                !gone
+                !left_out
             });
             // By name: a variant in a cycle is boxed.
             u.fallback = fallback
@@ -393,10 +409,10 @@ impl Ir {
                         .iter()
                         .position(|v| v.ty.direct_named() == Some(&parent))
                 });
-            notes.extend(gone_values.into_iter().map(|v| (parent.clone(), v)));
+            notes.extend(gone.into_iter().map(|note| (parent.clone(), note)));
         }
         self.suppressed = closure(self, &BTreeSet::new());
-        self.pruned.extend(notes);
+        self.union_notes.extend(notes);
     }
 
     /// Named types a definition holds directly — the edges that can

@@ -9,7 +9,9 @@
 {% block variants %}{% for v in t.variants %}{% include "rust/variant.rs.jinja" %}{% endfor %}{% endblock %}}
 
 {% for a in t.cfg %}{{ a }}
-{% endfor %}impl<'de> Deserialize<'de> for {{ t.name }} {
+{% endfor %}// Only the fallback arm is left once every other variant is compiled out.
+#[allow(clippy::match_single_binding)]
+impl<'de> Deserialize<'de> for {{ t.name }} {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         struct Tag<'a> {
