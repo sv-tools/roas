@@ -60,6 +60,30 @@ const TEMPLATE_NAMES: &[&str] = &[
     "refuseNull",
     "readTag",
     "integerToken",
+    "decimalToken",
+    "decimalDigits",
+    "power",
+    "all",
+    "start",
+    "end",
+    "count",
+    "leading",
+    "sx",
+    "sy",
+    "lx",
+    "ly",
+    "dx",
+    "dy",
+    "c",
+    "b",
+    "shift",
+    "quotient",
+    "remainder",
+    "prime",
+    "taken",
+    "m",
+    "y",
+    "divisor",
     "v",
     "u",
     "d",
@@ -100,6 +124,8 @@ pub(crate) struct SupportView {
     pub nullable: bool,
     pub int64: bool,
     pub int32: bool,
+    /// A `number` held exactly, under `exact_numbers`: `Decimal`.
+    pub decimal: bool,
     pub null: bool,
     pub tagged: bool,
     /// A self-writing struct has a catch-all, written in key order.
@@ -331,6 +357,9 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         if builder.needs.math {
             builtin.push(("math", "math"));
         }
+        if builder.support.decimal {
+            builtin.extend([("math/big", "big"), ("strconv", "strconv")]);
+        }
         if builder.needs.utf8 {
             builtin.push(("unicode/utf8", "utf8"));
         }
@@ -402,6 +431,11 @@ impl Builder<'_> {
         // The helpers every file may declare.
         for reserved in ["Nullable", "Int64", "Int32", "Null"] {
             self.package_names.reserve(reserved);
+        }
+        if self.config.exact_numbers {
+            for reserved in ["Decimal", "DecimalMaxDigits", "ParseDecimal"] {
+                self.package_names.reserve(reserved);
+            }
         }
         if self.config.validation {
             for reserved in [
@@ -486,6 +520,11 @@ impl Builder<'_> {
             }
             TypeRef::Number(FloatWidth::Double) => self.refused("float64"),
             TypeRef::Number(FloatWidth::Float) => self.refused("float32"),
+            // Its own decoder refuses null.
+            TypeRef::Decimal => {
+                self.support.decimal = true;
+                "Decimal".into()
+            }
             TypeRef::Boolean => self.refused("bool"),
             TypeRef::Null => {
                 self.support.null = true;

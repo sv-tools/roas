@@ -50,6 +50,14 @@ fn float_bound(bound: f64, width: FloatWidth) -> Result<String, f64> {
     }
 }
 
+/// An exact decimal as a `Decimal` constant.
+fn decimal(d: &checks::Dec) -> String {
+    format!(
+        "Decimal {{ mantissa: {}, exponent: {} }}",
+        d.mantissa, d.exponent
+    )
+}
+
 /// Statements checking `list` at `at`. True when they read the value: some
 /// checks only report that they could not be made.
 fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) -> bool {
@@ -239,6 +247,17 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                             format!("if ![{list}].contains(&{int}) {{ {missed} }}")
                         });
                     }
+                    ValueKind::Decimal => {
+                        // Exactly; a value no decimal holds was an error
+                        // when lowering.
+                        let mut set: Vec<checks::Dec> =
+                            values.iter().filter_map(checks::dec).collect();
+                        set.dedup();
+                        let list = set.iter().map(decimal).collect::<Vec<_>>().join(", ");
+                        out.push(format!(
+                            "if ![{list}].contains({v}) {{ {r}.violation({p}, format!(\"{{}} is not {what}\", {v})); }}"
+                        ));
+                    }
                     ValueKind::Number(FloatWidth::Float) => {
                         // A `float` equal to a value is ambiguous: literals
                         // around it decode to it, as at a bound.
@@ -312,6 +331,32 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                     }
                 }
             }
+            Check::DecAtLeast {
+                bound,
+                exclusive,
+                literal,
+            }
+            | Check::DecAtMost {
+                bound,
+                exclusive,
+                literal,
+            } => {
+                let at_least = matches!(check, Check::DecAtLeast { .. });
+                let (op, keyword, word) = match (at_least, exclusive) {
+                    (true, false) => (">=", "minimum", "below"),
+                    (true, true) => (">", "exclusiveMinimum", "below"),
+                    (false, false) => ("<=", "maximum", "above"),
+                    (false, true) => ("<", "exclusiveMaximum", "above"),
+                };
+                out.push(format!(
+                    "if !(*{v} {op} {}) {{ {r}.violation({p}, format!(\"{{}} is {word} {keyword} {literal}\", {v})); }}",
+                    decimal(bound)
+                ));
+            }
+            Check::DecMultipleOf { divisor, literal } => out.push(format!(
+                "if !{v}.is_multiple_of(&{}) {{ {r}.violation({p}, format!(\"{{}} is not a multiple of {literal}\", {v})); }}",
+                decimal(divisor)
+            )),
             Check::NumMultipleOf { integral, literal } => {
                 let unevaluated = format!(
                     "{r}.unevaluated({p}, \"multipleOf {literal}: a decoded float has lost its literal, so only a fraction against a whole multiple is decided\")"

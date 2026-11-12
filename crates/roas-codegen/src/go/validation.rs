@@ -42,6 +42,20 @@ pub(crate) struct Context<'a> {
     pub needs: Needs,
 }
 
+/// An exact decimal as a `Decimal` literal.
+fn decimal(d: &checks::Dec) -> String {
+    let digits = d.mantissa.unsigned_abs().to_string();
+    if d.mantissa == 0 {
+        "Decimal{}".to_owned()
+    } else {
+        format!(
+            "Decimal{{negative: {}, digits: \"{digits}\", exponent: {}}}",
+            d.mantissa < 0,
+            d.exponent
+        )
+    }
+}
+
 fn lit(text: &str) -> String {
     crate::go::naming::quote(text)
 }
@@ -225,6 +239,18 @@ fn render(
                             format!("switch int64({e}) {{ case {list}: default: {missed} }}")
                         });
                     }
+                    ValueKind::Decimal => {
+                        // Exactly; a value no decimal holds was an error
+                        // when lowering.
+                        let mut set: Vec<checks::Dec> =
+                            values.iter().filter_map(checks::dec).collect();
+                        set.dedup();
+                        let list = set.iter().map(decimal).collect::<Vec<_>>().join(", ");
+                        out.push(format!(
+                            "switch {e} {{ case {list}: default: {r}.violation({p}, fmt.Sprintf({}, {e})) }}",
+                            lit(&format!("%v is not {what}"))
+                        ));
+                    }
                     ValueKind::Number(FloatWidth::Float) => {
                         // A `float` equal to a value is ambiguous: literals
                         // around it decode to it, as at a bound.
@@ -367,6 +393,34 @@ fn render(
                     ));
                 }
             }
+            Check::DecAtLeast {
+                bound,
+                exclusive,
+                literal,
+            }
+            | Check::DecAtMost {
+                bound,
+                exclusive,
+                literal,
+            } => {
+                let at_least = matches!(check, Check::DecAtLeast { .. });
+                let (op, keyword, word) = match (at_least, exclusive) {
+                    (true, false) => (">=", "minimum", "below"),
+                    (true, true) => (">", "exclusiveMinimum", "below"),
+                    (false, false) => ("<=", "maximum", "above"),
+                    (false, true) => ("<", "exclusiveMaximum", "above"),
+                };
+                out.push(format!(
+                    "if !({e}.Cmp({}) {op} 0) {{ {r}.violation({p}, fmt.Sprintf({}, {e})) }}",
+                    decimal(bound),
+                    lit(&format!("%v is {word} {keyword} {literal}"))
+                ));
+            }
+            Check::DecMultipleOf { divisor, literal } => out.push(format!(
+                "if !{e}.IsMultipleOf({}) {{ {r}.violation({p}, fmt.Sprintf({}, {e})) }}",
+                decimal(divisor),
+                lit(&format!("%v is not a multiple of {literal}"))
+            )),
             Check::NumMultipleOf { integral, literal } => {
                 let unevaluated = format!(
                     "{r}.unevaluated({p}, {})",
@@ -399,6 +453,7 @@ fn render(
                     Some(TypeRef::String) => "string",
                     Some(TypeRef::Boolean) => "bool",
                     Some(TypeRef::Integer(IntWidth::Int32)) => "Int32",
+                    Some(TypeRef::Decimal) => "Decimal",
                     _ => "Int64",
                 };
                 out.push(format!(

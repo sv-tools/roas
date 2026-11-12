@@ -1006,7 +1006,11 @@ impl<'a> Lowerer<'a> {
                     };
                     self.warn(DiagnosticKind::NumericEnum, &schema.id, format!("`enum` over numbers is not represented in the type, which stays a number; the values are listed in its documentation{checked}"));
                 }
-                TypeRef::Number(width.unwrap_or(FloatWidth::Double))
+                if self.config.exact_numbers {
+                    TypeRef::Decimal
+                } else {
+                    TypeRef::Number(width.unwrap_or(FloatWidth::Double))
+                }
             }
             Kind::Boolean => TypeRef::Boolean,
             Kind::Null => TypeRef::Null,
@@ -1781,6 +1785,38 @@ impl<'a> Lowerer<'a> {
 
     fn number_diagnostics(&mut self, schema: &FrontSchema, integer: bool) {
         let c = &schema.constraints;
+        // Held exactly, a number loses nothing to its type; only a literal
+        // the decimal cannot hold is an error, since no check on it can be
+        // generated.
+        if !integer && self.config.exact_numbers {
+            let literals = [
+                ("minimum", &c.minimum),
+                ("exclusiveMinimum", &c.exclusive_minimum),
+                ("maximum", &c.maximum),
+                ("exclusiveMaximum", &c.exclusive_maximum),
+                ("multipleOf", &c.multiple_of),
+                ("const", &c.const_number),
+            ]
+            .into_iter()
+            .filter_map(|(keyword, n)| n.as_ref().map(|n| (keyword, n)))
+            .chain(c.enum_numbers.iter().flatten().map(|n| ("enum", n)));
+            let unheld: Vec<String> = literals
+                .filter(|(_, n)| crate::checks::dec(n).is_none())
+                .map(|(keyword, n)| format!("`{keyword}` {n}"))
+                .collect();
+            if !unheld.is_empty() {
+                self.error(
+                    DiagnosticKind::LossyNumber,
+                    &schema.id,
+                    format!(
+                        "{} has more than {} significant digits, or an exponent past the 32-bit range, which an exact decimal cannot hold",
+                        unheld.join(", "),
+                        crate::checks::MAX_DIGITS
+                    ),
+                );
+            }
+            return;
+        }
         if integer {
             let (lo, hi): (i128, i128) = match &schema.kind {
                 Kind::Integer {

@@ -23,6 +23,8 @@ pub(crate) enum TypeRef {
     String,
     Integer(IntWidth),
     Number(FloatWidth),
+    /// A `number` held exactly, under `exact_numbers`.
+    Decimal,
     Boolean,
     Null,
     /// Any JSON value.

@@ -346,14 +346,97 @@ fn unsupported_configuration_is_refused_up_front() {
     )
     .unwrap_err();
     assert!(matches!(error, GenerateError::Unsupported(_)), "{error}");
+}
+
+#[cfg(not(feature = "exact-numbers"))]
+#[test]
+fn exact_numbers_need_the_feature() {
     let error = generate(&document(pet()), &rust_config("exact_numbers = true\n")).unwrap_err();
-    assert!(
-        matches!(
-            error,
-            GenerateError::Config(_) | GenerateError::Fidelity(_) | GenerateError::Unsupported(_)
-        ),
-        "{error}"
-    );
+    assert!(matches!(error, GenerateError::Config(_)), "{error}");
+}
+
+#[cfg(feature = "exact-numbers")]
+#[test]
+fn exact_numbers_need_json_text() {
+    let yaml = "openapi: 3.2.0\ninfo: {title: t, version: '1'}\npaths: {}\ncomponents:\n  schemas:\n    N: {type: number}\n";
+    let doc = SourceDocument::parse(
+        Input::Yaml(yaml.as_bytes().to_vec()),
+        Url::parse("file:///t.yaml").unwrap(),
+    )
+    .unwrap();
+    let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
+    let error = generate(&doc, &rust_config("exact_numbers = true\n")).unwrap_err();
+    assert!(matches!(error, GenerateError::Fidelity(_)), "{error}");
+}
+
+#[cfg(feature = "exact-numbers")]
+#[test]
+fn exact_numbers_hold_every_number_as_a_decimal() {
+    let components = serde_json::json!({
+        "Decimal": {"type": "object", "properties": {
+            "a": {"type": "number", "format": "float"},
+            "b": {"type": "number", "multipleOf": 0.1},
+            "n": {"type": "integer", "minimum": 0, "maximum": 9}
+        }},
+        "Holder": {"type": "object", "properties": {"t": {"$ref": "#/components/schemas/TooLong"}}}
+    });
+    let mut components = components;
+    // 39 significant digits: no exact decimal holds the bound. Read from
+    // text, as `json!` would read the literal as a float.
+    components["TooLong"] = serde_json::from_str(
+        r#"{"type": "number", "maximum": 1.00000000000000000000000000000000000001}"#,
+    )
+    .unwrap();
+    for (language, field, int) in [
+        (Target::Rust, "pub a: Option<Decimal>", "Option<Int64>"),
+        (Target::Go, "A *Decimal", "*Int64"),
+    ] {
+        let config =
+            ConfigFile::from_toml("exact_numbers = true\nvalidation = true\n", Path::new("/"))
+                .unwrap()
+                .merge(target(language))
+                .build()
+                .unwrap();
+        let g = generate(&document(components.clone()), &config).unwrap();
+        let text = g
+            .files
+            .iter()
+            .map(|f| f.contents.as_str())
+            .collect::<String>();
+        // Integers stay integers; the component takes another name.
+        assert!(
+            text.contains(field) && text.contains(int) && text.contains("Decimal2"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("TooLong") && !text.contains("Holder"),
+            "{text}"
+        );
+        let errors: Vec<_> = g
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.len() == 1
+                && errors[0].pointer == "/components/schemas/TooLong"
+                && errors[0]
+                    .message
+                    .contains("more than 38 significant digits"),
+            "{:?}",
+            g.diagnostics
+        );
+        // Held exactly, nothing about a number is lossy.
+        assert!(
+            !g.diagnostics.iter().any(|d| d
+                .pointer
+                .starts_with("/components/schemas/Decimal/properties/a")
+                || d.pointer
+                    .starts_with("/components/schemas/Decimal/properties/b")),
+            "{:?}",
+            g.diagnostics
+        );
+    }
 }
 
 #[test]

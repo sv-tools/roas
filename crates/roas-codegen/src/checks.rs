@@ -18,6 +18,8 @@ pub(crate) enum ValueKind {
     String,
     Integer(IntWidth),
     Number(FloatWidth),
+    /// A `number` held exactly, under `exact_numbers`.
+    Decimal,
     Array,
     Map,
     /// Anything else: a generated type, a substitution, raw JSON.
@@ -80,6 +82,22 @@ pub(crate) enum Check {
         integral: bool,
         literal: String,
     },
+    /// `value >= bound` (or `>` when exclusive), on an exact decimal.
+    DecAtLeast {
+        bound: Dec,
+        exclusive: bool,
+        literal: String,
+    },
+    DecAtMost {
+        bound: Dec,
+        exclusive: bool,
+        literal: String,
+    },
+    /// `multipleOf` on an exact decimal.
+    DecMultipleOf {
+        divisor: Dec,
+        literal: String,
+    },
     /// A number's `enum` or `const`: the values it may be. `literal` is
     /// how they are written in a message.
     NumberIn {
@@ -128,6 +146,7 @@ pub(crate) fn kind_of(ty: &TypeRef) -> ValueKind {
         TypeRef::String => ValueKind::String,
         TypeRef::Integer(width) => ValueKind::Integer(*width),
         TypeRef::Number(width) => ValueKind::Number(*width),
+        TypeRef::Decimal => ValueKind::Decimal,
         TypeRef::Array(_) => ValueKind::Array,
         TypeRef::Map(_) => ValueKind::Map,
         _ => ValueKind::Other,
@@ -296,6 +315,46 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                 });
             }
         }
+        ValueKind::Decimal => {
+            // A literal the decimal cannot hold is an error when lowering,
+            // which leaves the type out: unevaluated only for the record.
+            let unheld = |keyword: &'static str, n: &Number| Check::Unevaluated {
+                keyword,
+                reason: format!("{n} has more digits than an exact decimal holds"),
+            };
+            for (n, keyword, exclusive, at_least) in [
+                (&c.minimum, "minimum", false, true),
+                (&c.exclusive_minimum, "exclusiveMinimum", true, true),
+                (&c.maximum, "maximum", false, false),
+                (&c.exclusive_maximum, "exclusiveMaximum", true, false),
+            ] {
+                let Some(n) = n else { continue };
+                let literal = n.to_string();
+                out.push(match dec(n) {
+                    Some(bound) if at_least => Check::DecAtLeast {
+                        bound,
+                        exclusive,
+                        literal,
+                    },
+                    Some(bound) => Check::DecAtMost {
+                        bound,
+                        exclusive,
+                        literal,
+                    },
+                    None => unheld(keyword, n),
+                });
+            }
+            out.extend(number_in(c));
+            if let Some(n) = &c.multiple_of {
+                out.push(match dec(n).filter(|d| d.mantissa > 0) {
+                    Some(divisor) => Check::DecMultipleOf {
+                        divisor,
+                        literal: n.to_string(),
+                    },
+                    None => unheld("multipleOf", n),
+                });
+            }
+        }
         ValueKind::Array => {
             out.extend(c.min_items.filter(|n| *n > 0).map(Check::MinItems));
             out.extend(c.max_items.filter(|n| *n < u64::MAX).map(Check::MaxItems));
@@ -305,7 +364,9 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                     _ => unreachable!("an array kind is an array"),
                 };
                 out.push(Check::UniqueItems(match item {
-                    TypeRef::String | TypeRef::Boolean | TypeRef::Integer(_) => Unique::Exact,
+                    TypeRef::String | TypeRef::Boolean | TypeRef::Integer(_) | TypeRef::Decimal => {
+                        Unique::Exact
+                    }
                     TypeRef::Number(_) => Unique::Float,
                     _ => Unique::Unknown,
                 }));
@@ -891,7 +952,10 @@ pub(crate) fn unchecked_keywords(ty: &TypeRef, c: &Constraints) -> Vec<&'static 
     let kind = kind_of(ty);
     let mut out = Vec::new();
     let string = matches!(kind, ValueKind::String);
-    let number = matches!(kind, ValueKind::Integer(_) | ValueKind::Number(_));
+    let number = matches!(
+        kind,
+        ValueKind::Integer(_) | ValueKind::Number(_) | ValueKind::Decimal
+    );
     let array = matches!(kind, ValueKind::Array);
     let map = matches!(kind, ValueKind::Map);
     for (present, keyword, applies) in [
@@ -1362,6 +1426,39 @@ fn gcd(mut a: i128, mut b: i128) -> i128 {
         (a, b) = (b, a % b);
     }
     a
+}
+
+/// The most significant digits an exact decimal holds: an `i128` holds
+/// every 38-digit mantissa.
+pub(crate) const MAX_DIGITS: usize = 38;
+
+/// A number as generated code holds it exactly: `mantissa * 10^exponent`,
+/// canonical — no trailing zero in the mantissa, zero as `0 * 10^0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Dec {
+    pub mantissa: i128,
+    pub exponent: i32,
+}
+
+/// `n` as an exact decimal, as written. `None` past [`MAX_DIGITS`]
+/// significant digits or an `i32` exponent: what the generated decoder
+/// refuses too.
+pub(crate) fn dec(n: &Number) -> Option<Dec> {
+    let d = parse_decimal(n)?;
+    if d.digits.is_empty() {
+        return Some(Dec {
+            mantissa: 0,
+            exponent: 0,
+        });
+    }
+    if d.digits.len() > MAX_DIGITS {
+        return None;
+    }
+    let magnitude: i128 = d.digits.parse().ok()?;
+    Some(Dec {
+        mantissa: if d.negative { -magnitude } else { magnitude },
+        exponent: i32::try_from(d.exponent).ok()?,
+    })
 }
 
 /// A number's magnitude as `digits / 10^scale`, exactly as written. `None`

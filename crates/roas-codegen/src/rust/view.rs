@@ -19,6 +19,8 @@ pub(crate) struct SupportView {
     pub require_present: bool,
     pub int64: bool,
     pub int32: bool,
+    /// A `number` held exactly, under `exact_numbers`: `Decimal`.
+    pub decimal: bool,
     pub raw_holder: bool,
     /// A closed struct reads through `ObjectOnly`.
     pub object_only: bool,
@@ -351,6 +353,9 @@ impl Builder<'_> {
         let mut allocator = Allocator::default();
         // Names the generated code itself uses unqualified: its own
         // helpers, the prelude types it spells, and its imports.
+        if self.config.exact_numbers {
+            allocator.reserve("Decimal");
+        }
         for reserved in [
             "Int64",
             "Int32",
@@ -535,6 +540,10 @@ impl Builder<'_> {
             }
             TypeRef::Number(FloatWidth::Double) => "f64".into(),
             TypeRef::Number(FloatWidth::Float) => "f32".into(),
+            TypeRef::Decimal => {
+                self.support.decimal = true;
+                "Decimal".into()
+            }
             TypeRef::Boolean => "bool".into(),
             TypeRef::Null => "()".into(),
             TypeRef::Any => "serde_json::Value".into(),
