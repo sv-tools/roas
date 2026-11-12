@@ -3,6 +3,7 @@
 use crate::common::helpers::{validate_not_visited, validate_required_string};
 use crate::common::reference::ResolveReference;
 use crate::common::reference::{RefOr, resolve_in_map, resolved_in_map};
+use crate::common::schema_pointer::{Hop, follow_schema};
 use crate::loader::Loader;
 use crate::v3_0::callback::Callback;
 use crate::v3_0::components::Components;
@@ -729,16 +730,30 @@ impl ResolveReference<Header> for Spec {
     }
 }
 
+/// Schemas, through `#/components/schemas/<name>` and any subschema
+/// below one (`…/properties/<name>`, `…/items`, `…/allOf/<i>`, …).
 impl ResolveReference<Schema> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Schema> {
-        self.components
-            .as_ref()
-            .and_then(|x| resolve_in_map(self, reference, "#/components/schemas/", &x.schemas))
+        self.follow_schema(reference).0
     }
 
     fn resolved_reference<'a>(&'a self, reference: &'a str) -> &'a str {
-        self.components.as_ref().map_or(reference, |x| {
-            resolved_in_map(self, reference, "#/components/schemas/", &x.schemas)
+        self.follow_schema(reference).1
+    }
+}
+
+impl Spec {
+    fn follow_schema<'a, 'r>(&'a self, reference: &'r str) -> (Option<&'a Schema>, &'r str)
+    where
+        'a: 'r,
+    {
+        follow_schema(reference, "#/components/schemas/", |name| {
+            self.components
+                .as_ref()?
+                .schemas
+                .as_ref()?
+                .get(name)
+                .map(Hop::from)
         })
     }
 }
@@ -929,6 +944,99 @@ impl ValidateWithContext<Spec> for TagGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_refs_reach_into_subschemas() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": { "title": "T", "version": "1" },
+            "paths": {},
+            "components": { "schemas": {
+                "Pet": {
+                    "type": "object",
+                    "properties": {
+                        "owner": { "$ref": "#/components/schemas/Owner" },
+                        "a/b": { "type": "string" },
+                        "tags": { "type": "array", "items": { "type": "boolean" } }
+                    },
+                    "additionalProperties": { "type": "integer" }
+                },
+                "Owner": { "type": "object", "properties": { "name": { "type": "string" } } },
+                "Combined": { "allOf": [ { "$ref": "#/components/schemas/Pet" }, { "type": "number" } ] },
+                "Alias": { "$ref": "#/components/schemas/Pet/properties/owner" },
+                "Loop": { "$ref": "#/components/schemas/Loop" }
+            } }
+        }))
+        .unwrap();
+        let schema_type = |reference: &str| {
+            RefOr::<Schema>::new_ref(reference)
+                .get_item(&spec)
+                .ok()
+                .map(|s| serde_json::to_value(s).unwrap()["type"].clone())
+        };
+        let resolved = |reference: &str| {
+            RefOr::<Schema>::new_ref(reference)
+                .resolved_ref(&spec)
+                .map(str::to_owned)
+        };
+
+        assert_eq!(
+            schema_type("#/components/schemas/Pet/properties/owner"),
+            Some("object".into())
+        );
+        assert_eq!(
+            resolved("#/components/schemas/Pet/properties/owner").as_deref(),
+            Some("#/components/schemas/Owner")
+        );
+        assert_eq!(
+            schema_type("#/components/schemas/Owner/properties/name"),
+            Some("string".into())
+        );
+        assert_eq!(
+            schema_type("#/components/schemas/Pet/properties/a~1b"),
+            Some("string".into())
+        );
+        assert_eq!(
+            schema_type("#/components/schemas/Pet/properties/tags/items"),
+            Some("boolean".into())
+        );
+        assert_eq!(
+            schema_type("#/components/schemas/Pet/additionalProperties"),
+            Some("integer".into())
+        );
+        assert_eq!(
+            schema_type("#/components/schemas/Combined/allOf/1"),
+            Some("number".into())
+        );
+        assert_eq!(
+            schema_type("#/components/schemas/Alias"),
+            Some("object".into())
+        );
+        assert_eq!(
+            resolved("#/components/schemas/Alias").as_deref(),
+            Some("#/components/schemas/Owner")
+        );
+
+        // A pointer walks the document as written: not through a `$ref`.
+        assert_eq!(
+            schema_type("#/components/schemas/Combined/allOf/0/properties/owner"),
+            None
+        );
+        assert_eq!(
+            schema_type("#/components/schemas/Pet/properties/missing"),
+            None
+        );
+        assert_eq!(schema_type("#/components/schemas/Combined/allOf/01"), None);
+        assert_eq!(schema_type("#/components/schemas/Pet/items"), None);
+        assert_eq!(schema_type("#/components/schemas/Loop"), None);
+        assert_eq!(
+            resolved("#/components/schemas/Loop").as_deref(),
+            Some("#/components/schemas/Loop")
+        );
+        assert_eq!(schema_type("#/components/schemas/Missing"), None);
+        assert_eq!(schema_type("#/components/schemas/"), None);
+        assert_eq!(schema_type("#/elsewhere/Pet"), None);
+    }
     use crate::validation::IGNORE_UNUSED;
     use crate::validation::ValidationErrorsExt;
 

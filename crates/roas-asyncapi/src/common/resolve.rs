@@ -12,7 +12,7 @@
 //! module is about what the pointers *mean*.
 
 use crate::common::pointer;
-use crate::common::reference::{RefOr, Reference};
+use crate::common::reference::RefOr;
 use crate::validation::Context;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -118,24 +118,6 @@ impl<T> Clone for Resolution<'_, T> {
 }
 
 impl<'a, T> Resolution<'a, T> {
-    /// What a reference into another document resolves to here:
-    /// [`Opaque`](Resolution::Opaque), unless its fragment is not a
-    /// usable JSON Pointer — which shows without fetching anything.
-    ///
-    /// The same judgement [`follow_tracked`] makes, for the v2.6
-    /// resolvers that walk their own chains.
-    #[cfg(feature = "v2_6")]
-    pub(crate) fn external(reference: &str) -> Self {
-        match Terminus::parse(reference) {
-            Some(_) => Resolution::Opaque,
-            None => Resolution::Unrecognized,
-        }
-    }
-
-    /// The object, if the reference resolved inside this document.
-    ///
-    /// Takes `self` so the borrow is the document's, not this
-    /// `Resolution`'s — callers routinely resolve into a temporary.
     #[must_use]
     pub fn found(self) -> Option<&'a T> {
         match self {
@@ -557,60 +539,187 @@ fn follow_json<'v>(
 /// Everything else — external termini, cycles, malformed pointers, and
 /// the fallback for unmodeled locations — is the same everywhere and
 /// lives here.
-/// (v2.6 resolves this way; v3 keys everything off [`follow_tracked`],
-/// which reports where a chain ended as well as what it found.)
-#[cfg(any(feature = "v2_6", test))]
-pub(crate) fn follow<'a, D, T, F>(
+pub(crate) fn follow<'a, D, T, S, F>(
     document: &D,
-    start: &'a RefOr<T>,
+    start: impl Into<Step<'a, T>>,
     expected_kind: &str,
     lookup: F,
 ) -> Resolution<'a, T>
 where
     D: Serialize,
-    T: DeserializeOwned,
-    F: Fn(&[String]) -> Option<&'a RefOr<T>>,
+    T: DeserializeOwned + 'a,
+    S: Into<Step<'a, T>>,
+    F: Fn(&[String]) -> Option<S>,
 {
     follow_tracked(document, Vec::new(), start, expected_kind, lookup).1
 }
 
-/// The last `$ref` a chain starting at `entry` follows, for
-/// [`ResolveReference::resolved_reference`](crate::common::reference::ResolveReference::resolved_reference).
+/// One place a chain can land, as a kind's lookup reports it.
 ///
-/// `lookup` is the one the kind resolves with. The walk stops at the
-/// first reference that does not lead to another reference — whether
-/// it found an object, names nothing, leaves the document, or is not a
-/// pointer — or that it has already followed.
-pub(crate) fn last_reference<'a, T, F>(entry: &'a RefOr<T>, lookup: F) -> Option<&'a str>
-where
-    T: 'a,
-    F: Fn(&[String]) -> Option<&'a RefOr<T>>,
-{
-    match entry {
-        RefOr::Item(_) => None,
-        RefOr::Reference(reference) => Some(last_reference_from(reference, lookup)),
+/// Most lookups hand back a `&RefOr<T>`, which converts. The others
+/// are where the model holds something else at a place a pointer can
+/// name: a v2.6 channel item carries its `$ref` as a field, and a v3
+/// schema component may be a boolean or another format's schema.
+pub(crate) enum Step<'a, T> {
+    /// An object of this kind: the chain ends here.
+    Item(&'a T),
+    /// A `$ref`, as written, to follow.
+    Reference(&'a str),
+    /// Something the resolver for this kind does not hand back an
+    /// object from: the chain ends here with
+    /// [`Opaque`](Resolution::Opaque).
+    #[cfg_attr(
+        not(any(feature = "v3_0", feature = "v3_1", feature = "v2_6")),
+        allow(dead_code)
+    )]
+    Opaque,
+}
+
+impl<'a, T> From<&'a RefOr<T>> for Step<'a, T> {
+    fn from(entry: &'a RefOr<T>) -> Self {
+        match entry {
+            RefOr::Item(item) => Step::Item(item),
+            RefOr::Reference(reference) => Step::Reference(&reference.reference),
+        }
     }
 }
 
-/// [`last_reference`], starting from a bare reference.
-pub(crate) fn last_reference_from<'a, T, F>(start: &'a Reference, lookup: F) -> &'a str
+/// How a chain ended, before anything is judged about the document.
+enum End<'a, T> {
+    Found(&'a T),
+    Opaque,
+    Unrecognized,
+    Cycle,
+    /// A local pointer that the lookup has nothing for.
+    Unresolved(&'a str),
+}
+
+/// A walked chain: where it ended, how, and the last `$ref` followed.
+struct Chain<'a, T> {
+    at: Terminus,
+    end: End<'a, T>,
+    last: Option<&'a str>,
+}
+
+/// The one walk every resolver here is built on.
+///
+/// [`follow_tracked`] turns the ending into a [`Resolution`], judging
+/// an unresolved pointer against the document only then;
+/// [`last_reference`] reads off the last `$ref` and judges nothing.
+fn chain<'a, T, S, F>(start_path: Vec<String>, start: Step<'a, T>, lookup: F) -> Chain<'a, T>
 where
     T: 'a,
-    F: Fn(&[String]) -> Option<&'a RefOr<T>>,
+    S: Into<Step<'a, T>>,
+    F: Fn(&[String]) -> Option<S>,
 {
-    let mut reference = start;
+    let mut step = start;
+    let mut at = Terminus {
+        resource: String::new(),
+        at: start_path,
+    };
+    let mut last = None;
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     loop {
-        let next = reference
-            .local_pointer()
-            .filter(|local| seen.insert(local))
-            .and_then(pointer::tokens)
-            .and_then(|path| lookup(&path));
+        let reference = match step {
+            Step::Item(item) => {
+                return Chain {
+                    at,
+                    end: End::Found(item),
+                    last,
+                };
+            }
+            Step::Opaque => {
+                return Chain {
+                    at,
+                    end: End::Opaque,
+                    last,
+                };
+            }
+            Step::Reference(reference) => reference,
+        };
+        last = Some(reference);
+        let Some(local) = reference.strip_prefix('#') else {
+            // The chain ends in another document, and *that* is the
+            // identity of what it found. An empty reference is no
+            // pointer at all.
+            return match Terminus::parse(reference).filter(|_| !reference.is_empty()) {
+                Some(terminus) => Chain {
+                    at: terminus,
+                    end: End::Opaque,
+                    last,
+                },
+                None => Chain {
+                    at,
+                    end: End::Unrecognized,
+                    last,
+                },
+            };
+        };
+        if !seen.insert(local) {
+            return Chain {
+                at,
+                end: End::Cycle,
+                last,
+            };
+        }
+        let Some(path) = pointer::tokens(local) else {
+            return Chain {
+                at,
+                end: End::Unrecognized,
+                last,
+            };
+        };
+        let next = lookup(&path);
+        at = Terminus {
+            resource: String::new(),
+            at: path,
+        };
         match next {
-            Some(RefOr::Reference(next)) => reference = next,
-            _ => return &reference.reference,
+            Some(next) => step = next.into(),
+            None => {
+                return Chain {
+                    at,
+                    end: End::Unresolved(local),
+                    last,
+                };
+            }
         }
     }
+}
+
+/// The last `$ref` a chain starting at `entry` follows, for
+/// [`ResolveReference::resolved_reference`](crate::common::reference::ResolveReference::resolved_reference):
+/// `None` for an inline item.
+///
+/// The same walk as [`follow_tracked`], with the same lookup, so the
+/// two cannot disagree; nothing about the document is judged, so it
+/// costs no serialization.
+pub(crate) fn last_reference<'a, T, S, F>(
+    entry: impl Into<Step<'a, T>>,
+    lookup: F,
+) -> Option<&'a str>
+where
+    T: 'a,
+    S: Into<Step<'a, T>>,
+    F: Fn(&[String]) -> Option<S>,
+{
+    chain(Vec::new(), entry.into(), lookup).last
+}
+
+/// [`last_reference`], starting from a bare reference.
+#[cfg(any(feature = "v3_0", feature = "v3_1"))]
+pub(crate) fn last_reference_from<'a, T, S, F>(
+    start: &'a crate::common::reference::Reference,
+    lookup: F,
+) -> &'a str
+where
+    T: 'a,
+    S: Into<Step<'a, T>>,
+    F: Fn(&[String]) -> Option<S>,
+{
+    chain(Vec::new(), Step::Reference(&start.reference), lookup)
+        .last
+        .unwrap_or(&start.reference)
 }
 
 /// Where a chain ended, as an identity two references can be compared
@@ -826,67 +935,28 @@ fn remove_dot_segments(reference: &str) -> String {
 ///
 /// `start_path` is where `start` itself was found, and is the answer
 /// when the chain does not move.
-pub(crate) fn follow_tracked<'a, D, T, F>(
+pub(crate) fn follow_tracked<'a, D, T, S, F>(
     document: &D,
     start_path: Vec<String>,
-    start: &'a RefOr<T>,
+    start: impl Into<Step<'a, T>>,
     expected_kind: &str,
     lookup: F,
 ) -> (Terminus, Resolution<'a, T>)
 where
     D: Serialize,
-    T: DeserializeOwned,
-    F: Fn(&[String]) -> Option<&'a RefOr<T>>,
+    T: DeserializeOwned + 'a,
+    S: Into<Step<'a, T>>,
+    F: Fn(&[String]) -> Option<S>,
 {
-    let mut current = start;
-    let mut at = Terminus {
-        resource: String::new(),
-        at: start_path,
+    let Chain { at, end, .. } = chain(start_path, start.into(), lookup);
+    let resolution = match end {
+        End::Found(item) => Resolution::Found(item),
+        End::Opaque => Resolution::Opaque,
+        End::Unrecognized => Resolution::Unrecognized,
+        End::Cycle => Resolution::Cycle,
+        End::Unresolved(local) => classify_unresolved(document, local, expected_kind),
     };
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    loop {
-        let reference = match current {
-            RefOr::Item(item) => return (at, Resolution::Found(item)),
-            RefOr::Reference(reference) => reference,
-        };
-        if reference.is_external() {
-            // The chain ends in another document, and *that* is the
-            // identity of what it found.
-            let terminus = Terminus::parse(&reference.reference);
-            return match terminus {
-                Some(terminus) => (terminus, Resolution::Opaque),
-                None => (at, Resolution::Unrecognized),
-            };
-        }
-        let Some(local) = reference.local_pointer() else {
-            return (at, Resolution::Unrecognized);
-        };
-        if !seen.insert(local) {
-            return (at, Resolution::Cycle);
-        }
-        let Some(path) = pointer::tokens(local) else {
-            return (at, Resolution::Unrecognized);
-        };
-        match lookup(&path) {
-            Some(next) => {
-                current = next;
-                at = Terminus {
-                    resource: String::new(),
-                    at: path,
-                };
-            }
-            None => {
-                let terminus = Terminus {
-                    resource: String::new(),
-                    at: path,
-                };
-                return (
-                    terminus,
-                    classify_unresolved(document, local, expected_kind),
-                );
-            }
-        }
-    }
+    (at, resolution)
 }
 
 /// Check that a reference names something, wherever it sits.
@@ -1093,8 +1163,6 @@ mod tests {
                 Resolution::Unrecognized
             };
             assert_eq!(resolution, expected, "`{target}`");
-            #[cfg(feature = "v2_6")]
-            assert_eq!(Resolution::<Demo>::external(target), expected, "`{target}`");
         }
     }
 
@@ -1287,7 +1355,9 @@ mod tests {
 
         // An entry that is already an object ends where it started.
         let start = pointer::tokens("/entries/real").expect("a pointer");
-        let (terminal, _) = follow_tracked(&doc, start, &doc.entries["real"], "entries", |_| None);
+        let (terminal, _) = follow_tracked(&doc, start, &doc.entries["real"], "entries", |_| {
+            None::<&RefOr<Demo>>
+        });
         assert_eq!(terminal.to_string(), "#/entries/real");
     }
 

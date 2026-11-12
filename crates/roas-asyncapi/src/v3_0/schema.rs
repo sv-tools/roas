@@ -691,6 +691,8 @@ fn check_bounds(
     }
 }
 
+crate::common::schema_pointer::schema_pointer!();
+
 #[cfg(test)]
 mod tests {
     use super::*;

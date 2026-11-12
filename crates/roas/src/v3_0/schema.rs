@@ -1188,6 +1188,42 @@ impl ValidateWithContext<Spec> for NullSchema {
     }
 }
 
+/// The subschemas a pointer can step into: `allOf`/`anyOf`/`oneOf/<i>`,
+/// `not`, an array's `items`, and an object's `properties/<name>` and
+/// `additionalProperties`.
+impl crate::common::schema_pointer::SchemaPointer for Schema {
+    type Ref = crate::common::reference::Ref;
+
+    fn child<'a>(&'a self, tokens: &[String]) -> Option<(&'a RefOr<Schema>, usize)> {
+        use crate::common::schema_pointer::{indexed, keyed, single};
+        match self {
+            Schema::AllOf(s) => indexed(tokens, "allOf", Some(&s.all_of)),
+            Schema::AnyOf(s) => indexed(tokens, "anyOf", Some(&s.any_of)),
+            Schema::OneOf(s) => indexed(tokens, "oneOf", Some(&s.one_of)),
+            Schema::Not(s) => single(tokens, "not", Some(&s.not)),
+            Schema::Single(s) => match s.as_ref() {
+                SingleSchema::Array(a) => single(tokens, "items", a.items.as_ref()),
+                SingleSchema::Object(o) => keyed(tokens, "properties", o.properties.as_ref())
+                    .or_else(|| {
+                        single(
+                            tokens,
+                            "additionalProperties",
+                            bool_item(o.additional_properties.as_ref()),
+                        )
+                    }),
+                _ => None,
+            },
+        }
+    }
+}
+
+fn bool_item<S, R>(b: Option<&BoolOr<RefOr<S, R>>>) -> Option<&RefOr<S, R>> {
+    match b? {
+        BoolOr::Item(item) => Some(item),
+        BoolOr::Bool(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

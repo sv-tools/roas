@@ -155,8 +155,8 @@ impl<T> RefOr<T> {
     ///
     /// | Version | `T` |
     /// |---|---|
-    /// | `v3_0`, `v3_1` | `Server`, `Channel`, `Operation`, `Message`, `OperationReply` |
-    /// | `v2_6` | `Server`, `Message`, `SecurityScheme` |
+    /// | `v3_0`, `v3_1` | `Server`, `Channel`, `Operation`, `Message`, `OperationReply`, `Schema`, `SchemaOrMultiFormat` |
+    /// | `v2_6` | `Server`, `Message`, `SecurityScheme`, `Schema` |
     ///
     /// Where the model holds a bare [`Reference`] rather than a
     /// `RefOr` — a v3 operation's `channel` and `messages`, a v3

@@ -1851,6 +1851,53 @@ mod extensions {
     }
 }
 
+/// The subschemas a pointer can step into: `allOf`/`anyOf`/`oneOf/<i>`,
+/// `not`, an array's `items`, and an object's `properties/<name>`,
+/// `patternProperties/<pattern>`, `additionalProperties`,
+/// `unevaluatedProperties` and `propertyNames`.
+impl crate::common::schema_pointer::SchemaPointer for Schema {
+    type Ref = SchemaRef;
+
+    fn child<'a>(&'a self, tokens: &[String]) -> Option<(&'a RefOr<Schema, SchemaRef>, usize)> {
+        use crate::common::schema_pointer::{indexed, keyed, single};
+        match self {
+            Schema::AllOf(s) => indexed(tokens, "allOf", Some(&s.all_of)),
+            Schema::AnyOf(s) => indexed(tokens, "anyOf", Some(&s.any_of)),
+            Schema::OneOf(s) => indexed(tokens, "oneOf", Some(&s.one_of)),
+            Schema::Not(s) => single(tokens, "not", Some(&s.not)),
+            Schema::Single(s) => match s.as_ref() {
+                SingleSchema::Array(a) => single(tokens, "items", bool_item(a.items.as_ref())),
+                SingleSchema::Object(o) => keyed(tokens, "properties", o.properties.as_ref())
+                    .or_else(|| keyed(tokens, "patternProperties", o.pattern_properties.as_ref()))
+                    .or_else(|| {
+                        single(
+                            tokens,
+                            "additionalProperties",
+                            bool_item(o.additional_properties.as_ref()),
+                        )
+                    })
+                    .or_else(|| {
+                        single(
+                            tokens,
+                            "unevaluatedProperties",
+                            bool_item(o.unevaluated_properties.as_ref()),
+                        )
+                    })
+                    .or_else(|| single(tokens, "propertyNames", o.property_names.as_ref())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+fn bool_item<S, R>(b: Option<&BoolOr<RefOr<S, R>>>) -> Option<&RefOr<S, R>> {
+    match b? {
+        BoolOr::Item(item) => Some(item),
+        BoolOr::Bool(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
