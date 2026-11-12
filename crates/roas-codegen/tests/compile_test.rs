@@ -123,6 +123,12 @@ fn main() {
     assert!(matches!(&pets[0], BaseUnion::Doggo(d) if d.bark.as_deref() == Some("woof")));
     assert!(matches!(&pets[1], BaseUnion::Base(b) if b.name.as_deref() == Some("b")));
     assert!(matches!(&pets[2], BaseUnion::Base(b) if b.kind == "other"));
+    // `mapping` gives the parent's name to `MDog`: the parent is read only
+    // as the fallback, its made-up tag selecting nothing.
+    let held: MHolder = serde_json::from_str(r#"{"m":{"kind":"MPet","bark":"b"}}"#).unwrap();
+    assert!(matches!(held.m, Some(MPetUnion::MDog(_))));
+    let held: MHolder = serde_json::from_str(r#"{"m":{"kind":"MPet~"}}"#).unwrap();
+    assert!(matches!(held.m, Some(MPetUnion::MPet(_))));
     // A null tag is read as a missing one.
     let held: NHolder = serde_json::from_str(r#"{"n":{"kind":null}}"#).unwrap();
     assert!(matches!(held.n, Some(NBaseUnion::NBase(_))));
@@ -216,6 +222,11 @@ fn description() -> serde_json::Value {
             "NCat": {"allOf": [{"$ref": "#/components/schemas/NBase"},
                 {"type": "object", "properties": {"lives": {"type": "integer"}}}]},
             "NHolder": {"type": "object", "properties": {"n": {"$ref": "#/components/schemas/NBase"}}},
+            "MPet": {"type": "object", "required": ["kind"], "properties": {"kind": {"type": "string"}},
+                "discriminator": {"propertyName": "kind", "mapping": {"MPet": "#/components/schemas/MDog"}}},
+            "MDog": {"allOf": [{"$ref": "#/components/schemas/MPet"},
+                {"type": "object", "properties": {"bark": {"type": "string"}}}]},
+            "MHolder": {"type": "object", "properties": {"m": {"$ref": "#/components/schemas/MPet"}}},
             "Shelter": {"type": "object", "properties": {
                 "pets": {"type": "array", "items": {"$ref": "#/components/schemas/Base"}},
                 "first": {"$ref": "#/components/schemas/Base"}}},
@@ -506,6 +517,14 @@ func main() {
 		panic(fmt.Sprintf("pets[2]: %+v", pets[2]))
 	}
 	check(roundTrip[api.Shelter](`{"first":{"kind":"meow","lives":9}}`), `{"first":{"kind":"meow","lives":9}}`)
+	// `mapping` gives the parent's name to MDog: the parent is read only as
+	// the fallback, its made-up tag selecting nothing.
+	if _, ok := decode[api.MHolder](`{"m":{"kind":"MPet","bark":"b"}}`).M.AsMDog(); !ok {
+		panic("MPet is mapped to MDog")
+	}
+	if _, ok := decode[api.MHolder](`{"m":{"kind":"MPet~"}}`).M.AsMPet(); !ok {
+		panic("a made-up tag is read as the fallback")
+	}
 	// A null tag is read as a missing one.
 	if _, ok := decode[api.NHolder](`{"n":{"kind":null}}`).N.AsNBase(); !ok {
 		panic("a null tag is read as the parent")

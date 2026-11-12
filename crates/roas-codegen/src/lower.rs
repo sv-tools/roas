@@ -189,16 +189,22 @@ impl<'a> Lowerer<'a> {
                 None => parent.clone(),
             };
             let mut variants: Vec<(String, String)> = Vec::new();
+            // Tags `mapping` gives to no member: read as the fallback, so
+            // no member takes them by name.
+            let mut taken = BTreeSet::new();
             for (value, reference) in discriminator.mapping.iter().flatten() {
                 match target(reference) {
                     Some(name) => variants.push((value.clone(), name)),
-                    None => self.warn(
+                    None => {
+                        taken.insert(value.clone());
+                        self.warn(
                         DiagnosticKind::UnsupportedKeyword { keyword: "discriminator".into() },
                         &schema.id,
                         format!(
                             "the discriminator maps `{value}` to `{reference}`, which is neither this schema nor one building on it; the value is read as `{fallback_name}`"
                         ),
-                    ),
+                    );
+                    }
                 }
             }
             // By name, unless `mapping` has the schema already or uses the
@@ -208,7 +214,9 @@ impl<'a> Lowerer<'a> {
                 .map(|s| s.as_str())
                 .chain(std::iter::once(parent.as_str()))
             {
-                if !variants.iter().any(|(value, n)| n == name || value == name) {
+                if !taken.contains(name)
+                    && !variants.iter().any(|(value, n)| n == name || value == name)
+                {
                     variants.push((name.to_owned(), name.to_owned()));
                 }
             }
@@ -221,7 +229,7 @@ impl<'a> Lowerer<'a> {
             for name in [parent.clone(), fallback_name.clone()] {
                 if !variants.iter().any(|(_, n)| *n == name) {
                     let mut value = name.clone();
-                    while variants.iter().any(|(v, _)| *v == value) {
+                    while taken.contains(&value) || variants.iter().any(|(v, _)| *v == value) {
                         value.push('~');
                     }
                     if value != name {

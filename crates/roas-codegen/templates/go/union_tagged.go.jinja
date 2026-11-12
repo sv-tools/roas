@@ -9,19 +9,22 @@
 	value any
 }
 
-// Tag is the discriminator of the variant held, empty for the zero value.
+// Tag is the tag of the variant held, empty for the zero value. It is the
+// tag that selects the variant, not always the one on the wire: an unknown
+// or missing tag is read as the fallback variant, and a variant no tag
+// selects has a made-up tag of its own.
 func (u {{ t.name }}) Tag() string { return u.tag }
 
 // Value is the variant held, nil for the zero value.
 func (u {{ t.name }}) Value() any { return u.value }
 {% block variants %}{% for v in t.variants %}
-// {{ v.accessor }} returns the variant when it is the {{ v.literal }} one.
+// {{ v.accessor }} returns the variant when it is the {% if v.synthetic %}{{ v.name }} one, which no tag selects{% else %}{{ v.literal }} one{% endif %}.
 func (u {{ t.name }}) {{ v.accessor }}() ({{ v.ty }}, bool) {
 	v, ok := u.value.({{ v.ty }})
 	return v, ok && u.tag == {{ v.literal }}
 }
 
-// {{ v.constructor }} holds v as the {{ v.literal }} variant.
+// {{ v.constructor }} holds v as the {% if v.synthetic %}{{ v.name }}{% else %}{{ v.literal }}{% endif %} variant.
 func {{ v.constructor }}(v {{ v.ty }}) {{ t.name }} {
 	return {{ t.name }}{tag: {{ v.literal }}, value: v}
 }
@@ -63,7 +66,7 @@ func (u *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 			return nil
 {% endif %}{% endfor %}		}
 	}
-	// An unknown or missing tag is read as the {{ fallback.literal }} variant.
+	// An unknown or missing tag is read as the {% if fallback.synthetic %}{{ fallback.name }}{% else %}{{ fallback.literal }}{% endif %} variant.
 	var v {{ fallback.ty }}
 	if err := json.Unmarshal(raw, &v, decodeOptions); err != nil {
 		return err
