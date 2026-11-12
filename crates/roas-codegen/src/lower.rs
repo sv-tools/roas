@@ -72,8 +72,9 @@ pub(crate) fn lower(front: &Front, config: &Config) -> Ir {
     }
     lowerer.polymorphic();
     lowerer.mark_cycles();
-    lowerer.suppress();
-    lowerer.prune_unions();
+    for (parent, value) in lowerer.ir.suppress() {
+        lowerer.ir.diagnostics.push(pruned(&parent, &value));
+    }
     lowerer.mark_opted_out_branches();
     lowerer.ir
 }
@@ -195,6 +196,16 @@ impl<'a> Lowerer<'a> {
                 .as_deref()
                 .and_then(target)
                 .unwrap_or_else(|| parent.clone());
+            // What an unknown tag is read as is always a variant: when its
+            // name is a tag `mapping` gives to another schema, under a tag
+            // of its own, which any unknown tag reads it as anyway.
+            if !variants.iter().any(|(_, n)| *n == fallback_name) {
+                let mut value = fallback_name.clone();
+                while variants.iter().any(|(v, _)| *v == value) {
+                    value.push('~');
+                }
+                variants.push((value, fallback_name.clone()));
+            }
             let fallback = variants.iter().position(|(_, n)| *n == fallback_name);
             let parent_id = self.component_ids[parent].clone();
             let Some(parent_def) = self.ir.types.get(&parent_id) else {
@@ -1894,81 +1905,20 @@ impl<'a> Lowerer<'a> {
             }
         }
     }
+}
 
-    /// A type with an error, and every type that holds it, is not
-    /// emitted; the rest still is.
-    /// A schema building on a parent that is not generated is left out of
-    /// the parent's union, rather than taking every holder of the parent
-    /// with it: a value it would be read as is read as the parent.
-    fn prune_unions(&mut self) {
-        let suppressed = self.ir.suppressed.clone();
-        let mut pruned = false;
-        let mut notes = Vec::new();
-        for def in self.ir.types.values_mut() {
-            let TypeKind::UnionTagged(u) = &mut def.kind else {
-                continue;
-            };
-            let Some(parent) = u.parent.clone() else {
-                continue;
-            };
-            if suppressed.contains(&parent) || !suppressed.contains(&def.id) {
-                continue;
-            }
-            let fallback = u.fallback.map(|i| u.variants[i].ty.clone());
-            let before = u.variants.len();
-            u.variants.retain(|v| {
-                let gone =
-                    v.ty.direct_named()
-                        .is_some_and(|id| suppressed.contains(id));
-                if gone {
-                    notes.push((parent.clone(), v.value.clone()));
-                }
-                !gone
-            });
-            if u.variants.len() == before {
-                continue;
-            }
-            pruned = true;
-            let parent_ty = TypeRef::Named(parent.clone());
-            u.fallback = fallback
-                .and_then(|ty| u.variants.iter().position(|v| v.ty == ty))
-                .or_else(|| u.variants.iter().position(|v| v.ty == parent_ty));
-        }
-        for (parent, value) in notes {
-            self.warn(
-                DiagnosticKind::UnsupportedKeyword { keyword: "discriminator".into() },
-                &parent,
-                format!("the schema the discriminator reads `{value}` as is not generated; such a value is read as this schema"),
-            );
-        }
-        if pruned {
-            self.suppress();
-        }
-    }
-
-    fn suppress(&mut self) {
-        let mut suppressed: BTreeSet<SchemaId> = self
-            .ir
-            .types
-            .values()
-            .filter(|d| d.has_error)
-            .map(|d| d.id.clone())
-            .collect();
-        loop {
-            let before = suppressed.len();
-            for def in self.ir.types.values() {
-                if suppressed.contains(&def.id) {
-                    continue;
-                }
-                if Ir::all_edges(def).iter().any(|e| suppressed.contains(e)) {
-                    suppressed.insert(def.id.clone());
-                }
-            }
-            if suppressed.len() == before {
-                break;
-            }
-        }
-        self.ir.suppressed = suppressed;
+/// The warning for a schema left out of its parent's union.
+pub(crate) fn pruned(parent: &SchemaId, value: &str) -> Diagnostic {
+    Diagnostic {
+        severity: Severity::Warning,
+        kind: DiagnosticKind::UnsupportedKeyword {
+            keyword: "discriminator".into(),
+        },
+        schema_id: parent.clone(),
+        pointer: source_of(&parent.pointer),
+        message: format!(
+            "the schema the discriminator reads `{value}` as is not generated; such a value is read as this schema"
+        ),
     }
 }
 

@@ -1821,11 +1821,91 @@ fn a_parent_union_is_gated_and_named_as_its_parent_is() {
     let union = text
         .find("pub enum AnimalUnion")
         .expect("named after the rename");
+    let head = &text[text[..union].rfind("\n\n").unwrap()..union];
+    assert!(head.contains("#[cfg(any())]"), "{head}");
+}
+
+#[test]
+fn a_parent_holding_itself_keeps_its_family_beside_a_broken_one() {
+    let mut components = parent_family();
+    components["Pet"]["properties"]["mother"] =
+        serde_json::json!({"$ref": "#/components/schemas/Pet"});
+    components["Cat"]["allOf"][1]["properties"]["friend"] =
+        serde_json::json!({"$ref": "#/components/schemas/Pet"});
+    components["Broken"] = serde_json::json!({"allOf": [{"$ref": "#/components/schemas/Pet"},
+        {"type": "object", "properties": {"x": {"not": {}}}}]});
+    let g = generate(&document(components), &rust_config("")).unwrap();
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    for want in [
+        "pub struct Pet ",
+        "pub struct Cat ",
+        "pub struct Shelter ",
+        "Cat(Box<Cat>)",
+        "Dog(Box<Dog>)",
+        "Pet(Box<Pet>)",
+    ] {
+        assert!(text.contains(want), "{want}: {text}");
+    }
+    assert!(!text.contains("Broken"), "{text}");
+}
+
+#[test]
+fn a_reference_error_in_a_schema_building_on_a_parent_leaves_it_out() {
+    let mut components = parent_family();
+    components["Dog"]["allOf"][1]["properties"]["toy"] =
+        serde_json::json!({"$id": "https://example.com/toy", "type": "string"});
+    let g = generate(&document(components), &rust_config("")).unwrap();
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
     assert!(
-        text[..union].trim_end().ends_with("#[serde(untagged)]")
-            || text[..union].contains("#[cfg(any())]"),
+        text.contains("pub struct Shelter ") && text.contains("pub enum PetUnion"),
         "{text}"
     );
+    assert!(!text.contains("Dog(Dog)"), "{text}");
+}
+
+#[test]
+fn the_parent_stays_the_fallback_when_mapping_takes_its_name() {
+    let mut components = parent_family();
+    components["Pet"]["discriminator"]["mapping"] =
+        serde_json::json!({"Pet": "#/components/schemas/Cat"});
+    let g = generate(&document(components), &rust_config("")).unwrap();
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    // Any other tag is still read as `Pet`.
+    let squeezed: String = text.split_whitespace().collect();
+    assert!(
+        squeezed.contains("Pet(Pet)")
+            && squeezed.contains("_=>serde_json::from_str(raw.get()).map(Self::Pet)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_described_gate_on_a_schema_building_on_a_parent_gates_its_union() {
+    let mut components = parent_family();
+    components["Cat"]["x-rust-attrs"] = serde_json::json!("#[cfg(any())]");
+    let g = generate(
+        &document(components),
+        &rust_config("allow_codegen_extensions = true"),
+    )
+    .unwrap();
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    let union = text.find("pub enum PetUnion").expect("a union");
     let head = &text[text[..union].rfind("\n\n").unwrap()..union];
     assert!(head.contains("#[cfg(any())]"), "{head}");
 }

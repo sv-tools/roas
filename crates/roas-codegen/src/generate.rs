@@ -356,23 +356,9 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
             }
         }
         // Re-run suppression with the extra errors.
-        let mut suppressed = ir.suppressed.clone();
-        loop {
-            let before = suppressed.len();
-            for def in ir.types.values() {
-                if def.has_error
-                    || crate::ir::Ir::all_edges(def)
-                        .iter()
-                        .any(|e| suppressed.contains(e))
-                {
-                    suppressed.insert(def.id.clone());
-                }
-            }
-            if suppressed.len() == before {
-                break;
-            }
+        for (parent, value) in ir.suppress() {
+            ir.diagnostics.push(crate::lower::pruned(&parent, &value));
         }
-        ir.suppressed = suppressed;
     }
     point_into_source(&mut ir.diagnostics, document.version());
     diagnostics.append(&mut ir.diagnostics);

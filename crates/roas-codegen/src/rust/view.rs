@@ -663,10 +663,25 @@ impl Builder<'_> {
                     .direct_named()
                     .and_then(|id| self.ir.types.get(id))
                 {
-                    let configured: Vec<String> = self
+                    let mut configured: Vec<String> = self
                         .type_config(variant_def)
                         .map(|t| t.attrs.clone())
                         .unwrap_or_default();
+                    // And those from the description the variant applied.
+                    if self.config.allow_codegen_extensions {
+                        let described: Vec<String> =
+                            match variant_def.extensions.get("x-rust-attrs") {
+                                Some(serde_json::Value::String(a)) => vec![a.clone()],
+                                Some(serde_json::Value::Array(items)) => items
+                                    .iter()
+                                    .filter_map(|v| v.as_str().map(str::to_owned))
+                                    .collect(),
+                                _ => Vec::new(),
+                            };
+                        configured.extend(described.into_iter().filter(|a| {
+                            check_container_attrs(std::slice::from_ref(a), "").is_ok()
+                        }));
+                    }
                     gates.extend(cfg_gates(&configured, &raw_name)?);
                 }
             }
