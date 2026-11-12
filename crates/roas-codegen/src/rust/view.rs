@@ -191,7 +191,7 @@ pub(crate) fn constraint_notes(c: &Constraints) -> Vec<String> {
         push("maxLength", v.to_string());
     }
     if let Some(v) = &c.pattern {
-        push("pattern", format!("`{}`", v.escape_debug()));
+        push("pattern", code_span(&v.escape_debug().to_string()));
     }
     if let Some(v) = &c.minimum {
         push("minimum", v.to_string());
@@ -977,7 +977,7 @@ impl Builder<'_> {
                 view.derives.push("Serialize".to_owned());
                 view.tag = u.tag.clone();
                 view.tag_literal = format!("{:?}", u.tag);
-                view.tag_doc = u.tag.escape_debug().to_string();
+                view.tag_doc = code_span(&u.tag.escape_debug().to_string());
                 view.fallback = u.fallback;
                 view.parent_variant = u.parent.as_ref().and_then(|p| {
                     u.variants
@@ -985,7 +985,7 @@ impl Builder<'_> {
                         .position(|v| v.ty.direct_named() == Some(p))
                 });
                 let mut allocator = Allocator::default();
-                for variant in &u.variants {
+                for (index, variant) in u.variants.iter().enumerate() {
                     let name = allocator.allocate(legal(pascal(&variant.suggested_name)));
                     let ty = self.spell(&variant.ty)?;
                     // Beside a parent, a variant gated out leaves its tag to
@@ -1003,13 +1003,12 @@ impl Builder<'_> {
                         name,
                         value: variant.value.clone(),
                         ty,
-                        doc: vec![if variant.synthetic {
-                            format!(
-                                "Read when `{}` names no other variant.",
-                                u.tag.escape_debug()
-                            )
+                        doc: vec![if !variant.synthetic {
+                            code_span(&format!("{}: {:?}", u.tag.escape_debug(), variant.value))
+                        } else if u.fallback == Some(index) {
+                            format!("Read when {} names no other variant.", view.tag_doc)
                         } else {
-                            format!("`{}: {:?}`", u.tag.escape_debug(), variant.value)
+                            "No tag selects this variant: it is read only when the fallback is not available.".to_owned()
                         }],
                         attrs: cfg.clone(),
                         cfg,
@@ -1082,4 +1081,17 @@ impl Builder<'_> {
         }
         Ok(out)
     }
+}
+
+/// `text` as a Markdown code span, fenced by more backticks than any run
+/// in it.
+fn code_span(text: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest + 1);
+    let pad = if text.starts_with('`') || text.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
+    format!("{fence}{pad}{text}{pad}{fence}")
 }

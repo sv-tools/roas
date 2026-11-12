@@ -1910,6 +1910,42 @@ fn a_union_warning_names_what_a_tag_is_finally_read_as() {
 }
 
 #[test]
+fn a_left_out_default_is_warned_about_as_the_default() {
+    let mut components = parent_family();
+    components["Cat"]["allOf"][1]["properties"]["lives"] = serde_json::json!({"not": {}});
+    components["Pet"]["discriminator"]["defaultMapping"] =
+        serde_json::json!("#/components/schemas/Cat");
+    let g = generate(&document(components), &rust_config("")).unwrap();
+    let warned = |text: &str| g.diagnostics.iter().any(|d| d.message.starts_with(text));
+    assert!(
+        warned("the schema the discriminator reads `Cat` as is not generated")
+            && warned("the discriminator's default `Cat` is not generated"),
+        "{:?}",
+        g.diagnostics
+    );
+}
+
+#[test]
+fn a_made_up_tag_not_the_fallback_is_not_documented_as_it() {
+    let mut components = parent_family();
+    components["Pet"]["discriminator"] = serde_json::json!({"propertyName": "kind",
+        "mapping": {"Pet": "#/components/schemas/Dog", "we`ird": "#/components/schemas/Cat"},
+        "defaultMapping": "#/components/schemas/Dog"});
+    let g = generate(&document(components), &rust_config("")).unwrap();
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    assert!(
+        text.contains("No tag selects this variant") && !text.contains("names no other variant"),
+        "{text}"
+    );
+    // A backtick in a tag does not end the code span early.
+    assert!(text.contains(r#"``kind: "we`ird"``"#), "{text}");
+}
+
+#[test]
 fn a_made_up_tag_selects_nothing() {
     // `mapping` gives the parent's name to `Dog`: the parent is kept under
     // `Pet~`, which a value tagged `Pet~` must not select over `Dog`.

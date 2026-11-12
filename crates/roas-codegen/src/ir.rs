@@ -393,14 +393,26 @@ impl Ir {
             }
             let fallback = u.fallback.map(|i| u.variants[i].ty.clone());
             let mut gone = Vec::new();
+            let mut index = 0;
             u.variants.retain(|v| {
                 let left_out = v.ty.direct_named().is_some_and(|id| alone.contains(id));
                 if left_out {
-                    gone.push(UnionNote::Pruned {
-                        tag: v.value.clone(),
-                        default: v.synthetic.then(|| v.suggested_name.join("")),
-                    });
+                    // A tag of its own reads it no more; being the default,
+                    // neither does an unknown or missing one.
+                    if !v.synthetic {
+                        gone.push(UnionNote::Pruned {
+                            tag: v.value.clone(),
+                            default: None,
+                        });
+                    }
+                    if v.synthetic || u.fallback == Some(index) {
+                        gone.push(UnionNote::Pruned {
+                            tag: v.value.clone(),
+                            default: Some(v.suggested_name.join("")),
+                        });
+                    }
                 }
+                index += 1;
                 !left_out
             });
             // By name: a variant in a cycle is boxed.

@@ -1,7 +1,7 @@
 {% block doc %}{% for line in t.doc %}/// {{ line }}
-{% endfor %}/// Selected by `{{ t.tag_doc }}`. Serialization writes the variant as it is;
-/// deserialization reads `{{ t.tag_doc }}` first and then decodes the whole
-/// value as that variant, so the variant type keeps its own `{{ t.tag_doc }}`.
+{% endfor %}/// Selected by {{ t.tag_doc }}. Serialization writes the variant as it is;
+/// deserialization reads {{ t.tag_doc }} first and then decodes the whole
+/// value as that variant, so the variant type keeps its own {{ t.tag_doc }}.
 {% endblock %}{% block derives %}#[derive({{ t.derives | join(", ") }})]
 {% endblock %}{% block attrs %}#[serde(untagged)]
 {% for a in t.attrs %}{{ a }}
