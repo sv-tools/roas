@@ -72,8 +72,11 @@ pub(crate) fn lower(front: &Front, config: &Config) -> Ir {
     }
     lowerer.polymorphic();
     lowerer.mark_cycles();
-    for (parent, value) in lowerer.ir.suppress() {
-        lowerer.ir.diagnostics.push(pruned(&parent, &value));
+    for (parent, value, read_as) in lowerer.ir.suppress() {
+        lowerer
+            .ir
+            .diagnostics
+            .push(pruned(&parent, &value, read_as.as_deref()));
     }
     lowerer.mark_opted_out_branches();
     lowerer.ir
@@ -1908,7 +1911,7 @@ impl<'a> Lowerer<'a> {
 }
 
 /// The warning for a schema left out of its parent's union.
-pub(crate) fn pruned(parent: &SchemaId, value: &str) -> Diagnostic {
+pub(crate) fn pruned(parent: &SchemaId, value: &str, read_as: Option<&str>) -> Diagnostic {
     Diagnostic {
         severity: Severity::Warning,
         kind: DiagnosticKind::UnsupportedKeyword {
@@ -1917,7 +1920,8 @@ pub(crate) fn pruned(parent: &SchemaId, value: &str) -> Diagnostic {
         schema_id: parent.clone(),
         pointer: source_of(&parent.pointer),
         message: format!(
-            "the schema the discriminator reads `{value}` as is not generated; such a value is read as this schema"
+            "the schema the discriminator reads `{value}` as is not generated; such a value is read as {}",
+            read_as.map_or("this schema".to_owned(), |name| format!("`{name}`"))
         ),
     }
 }

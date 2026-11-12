@@ -718,6 +718,11 @@ fn validated_description() -> serde_json::Value {
             "VKitty": {"allOf": [{"$ref": "#/components/schemas/VBase"},
                 {"type": "object", "properties": {"lives": {"type": "integer", "maximum": 9}}}]},
             "VShelter": {"type": "object", "properties": {"first": {"$ref": "#/components/schemas/VBase"}}},
+            "GBase": {"type": "object", "required": ["kind"], "properties": {"kind": {"type": "string"}},
+                "discriminator": {"propertyName": "kind"}},
+            "GCat": {"allOf": [{"$ref": "#/components/schemas/GBase"},
+                {"type": "object", "properties": {"lives": {"type": "integer", "maximum": 9}}}]},
+            "GHolder": {"type": "object", "properties": {"g": {"$ref": "#/components/schemas/GBase"}}},
             "FloatEnum": {"type": "number", "format": "float", "enum": [0.5, 1.25]},
             "DoubleEnum": {"type": "number", "enum": [0.1, 2]},
             "IntConst": {"type": "integer", "const": 7},
@@ -1008,7 +1013,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
-        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedInt": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedClosed": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "SubAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "ShortAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "FreeAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "ClosedAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "RequiredAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesAliased": {"fields": {"ab": {"attrs": ["#[serde(alias = \"b\")]"]}}}, "ReqFreeAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesTrueAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesEmptyAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "IntCatch": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
+        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GCat": {"attrs": ["#[cfg(any())]"]}, "GatedInt": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedClosed": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "SubAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "ShortAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "FreeAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "ClosedAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "RequiredAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesAliased": {"fields": {"ab": {"attrs": ["#[serde(alias = \"b\")]"]}}}, "ReqFreeAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesTrueAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesEmptyAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "IntCatch": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
@@ -1229,6 +1234,8 @@ fn main() {
     assert_eq!(report::<VShelter>(r#"{"first":{"kind":"VKitty","lives":10}}"#), vec![v("/first/lives")]);
     assert_eq!(report::<VShelter>(r#"{"first":{"kind":"x","name":"long"}}"#), vec![v("/first/name")]);
     assert_eq!(report::<VShelter>(r#"{"first":{"kind":"VKitty","lives":9,"name":"ab"}}"#), vec![]);
+    // A subtype compiled out leaves its tag to the parent: the holder stays.
+    assert_eq!(report::<GHolder>(r#"{"g":{"kind":"GCat","lives":10}}"#), vec![]);
     assert_eq!(report::<Ni>("2"), vec![]);
     assert_eq!(report::<Ni>("2.0"), vec![]);
     assert_eq!(report::<Pins>(r#"{"n":3}"#), vec![v("/n")]);
@@ -1797,6 +1804,8 @@ func main() {
 	check(`{"first":{"kind":"VKitty","lives":10}}`, report[api.VShelter](`{"first":{"kind":"VKitty","lives":10}}`), v("/first/lives"))
 	check(`{"first":{"kind":"x","name":"long"}}`, report[api.VShelter](`{"first":{"kind":"x","name":"long"}}`), v("/first/name"))
 	check(`{"first":{"kind":"VKitty","lives":9,"name":"ab"}}`, report[api.VShelter](`{"first":{"kind":"VKitty","lives":9,"name":"ab"}}`))
+	// Go has no gates: the subtype is read as itself.
+	check(`{"g":{"kind":"GCat","lives":10}}`, report[api.GHolder](`{"g":{"kind":"GCat","lives":10}}`), v("/g/lives"))
 	check(`2`, report[api.Ni](`2`))
 	check(`2.0`, report[api.Ni](`2.0`))
 	check(`{"n":3}`, report[api.Pins](`{"n":3}`), v("/n"))

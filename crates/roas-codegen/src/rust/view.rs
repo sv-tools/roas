@@ -77,6 +77,9 @@ pub(crate) struct VariantView {
     pub ty: String,
     pub doc: Vec<String>,
     pub attrs: Vec<String>,
+    /// The variant's conditional-compilation gates, repeated on every
+    /// match arm naming it.
+    pub cfg: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -418,6 +421,34 @@ impl Builder<'_> {
         }
     }
 
+    /// The cfg gates a generated type carries: configured, or from the
+    /// description's `x-rust-attrs` as applied.
+    fn type_gates(&self, id: &SchemaId, at: &str) -> Result<Vec<String>, GenerateError> {
+        let Some(def) = self.ir.types.get(id) else {
+            return Ok(Vec::new());
+        };
+        let mut attrs: Vec<String> = self
+            .type_config(def)
+            .map(|t| t.attrs.clone())
+            .unwrap_or_default();
+        if self.config.allow_codegen_extensions {
+            let described: Vec<String> = match def.extensions.get("x-rust-attrs") {
+                Some(serde_json::Value::String(a)) => vec![a.clone()],
+                Some(serde_json::Value::Array(items)) => items
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            attrs.extend(
+                described
+                    .into_iter()
+                    .filter(|a| check_container_attrs(std::slice::from_ref(a), "").is_ok()),
+            );
+        }
+        cfg_gates(&attrs, at)
+    }
+
     fn type_config(&self, def: &TypeDef) -> Option<&TypeConfig> {
         def.component
             .as_ref()
@@ -651,41 +682,14 @@ impl Builder<'_> {
         check_container_attrs(&user_attrs, &raw_name)?;
         attrs.extend(user_attrs);
         attrs.extend(self.codegen_attrs(&def.extensions, &def.id, false));
-        // A union read by a parent's discriminator exists only where its
-        // parent and every schema it reads do.
+        // A union read by a parent's discriminator exists only where what
+        // it reads an unknown tag as does; each other variant is gated on
+        // its own.
         if let TypeKind::UnionTagged(u) = &def.kind
             && u.parent.is_some()
+            && let Some(fallback) = u.fallback.and_then(|i| u.variants[i].ty.direct_named())
         {
-            let mut gates = Vec::new();
-            for variant in &u.variants {
-                if let Some(variant_def) = variant
-                    .ty
-                    .direct_named()
-                    .and_then(|id| self.ir.types.get(id))
-                {
-                    let mut configured: Vec<String> = self
-                        .type_config(variant_def)
-                        .map(|t| t.attrs.clone())
-                        .unwrap_or_default();
-                    // And those from the description the variant applied.
-                    if self.config.allow_codegen_extensions {
-                        let described: Vec<String> =
-                            match variant_def.extensions.get("x-rust-attrs") {
-                                Some(serde_json::Value::String(a)) => vec![a.clone()],
-                                Some(serde_json::Value::Array(items)) => items
-                                    .iter()
-                                    .filter_map(|v| v.as_str().map(str::to_owned))
-                                    .collect(),
-                                _ => Vec::new(),
-                            };
-                        configured.extend(described.into_iter().filter(|a| {
-                            check_container_attrs(std::slice::from_ref(a), "").is_ok()
-                        }));
-                    }
-                    gates.extend(cfg_gates(&configured, &raw_name)?);
-                }
-            }
-            for gate in gates {
+            for gate in self.type_gates(fallback, &raw_name)? {
                 if !attrs.contains(&gate) {
                     attrs.push(gate);
                 }
@@ -950,6 +954,7 @@ impl Builder<'_> {
                         ty: String::new(),
                         doc: Vec::new(),
                         attrs: vec![format!("#[serde(rename = {value:?})]")],
+                        cfg: Vec::new(),
                     });
                 }
             }
@@ -962,12 +967,24 @@ impl Builder<'_> {
                 for variant in &u.variants {
                     let name = allocator.allocate(legal(pascal(&variant.suggested_name)));
                     let ty = self.spell(&variant.ty)?;
+                    // Beside a parent, a variant gated out leaves its tag to
+                    // the fallback; the union itself carries the fallback's
+                    // gates.
+                    let cfg = match variant.ty.direct_named() {
+                        Some(id) if u.parent.is_some() => self
+                            .type_gates(id, &view.raw_name)?
+                            .into_iter()
+                            .filter(|g| !view.cfg.contains(g))
+                            .collect(),
+                        _ => Vec::new(),
+                    };
                     view.variants.push(VariantView {
                         name,
                         value: variant.value.clone(),
                         ty,
                         doc: vec![format!("`{}: {:?}`", u.tag, variant.value)],
-                        attrs: Vec::new(),
+                        attrs: cfg.clone(),
+                        cfg,
                     });
                 }
             }

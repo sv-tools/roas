@@ -1198,11 +1198,13 @@ pub(crate) fn body(
                 .iter()
                 .zip(&view.variants)
                 .map(|(variant, variant_view)| {
+                    let gates = variant_view.cfg.join(" ");
+                    let arm = |text: String| format!("{gates} {text}").trim_start().to_owned();
                     if generated(&variant.ty) {
-                        return format!(
+                        return arm(format!(
                             "Self::{}(v) => v.validate_into(pointer, report),",
                             variant_view.name
-                        );
+                        ));
                     }
                     // A substituted variant is not checked against what
                     // it declares.
@@ -1219,9 +1221,13 @@ pub(crate) fn body(
                         &mut body,
                     );
                     if body.is_empty() {
-                        format!("Self::{}(_) => {{}}", variant_view.name)
+                        arm(format!("Self::{}(_) => {{}}", variant_view.name))
                     } else {
-                        format!("Self::{}(_) => {{ {} }}", variant_view.name, body.join(" "))
+                        arm(format!(
+                            "Self::{}(_) => {{ {} }}",
+                            variant_view.name,
+                            body.join(" ")
+                        ))
                     }
                 })
                 .collect();

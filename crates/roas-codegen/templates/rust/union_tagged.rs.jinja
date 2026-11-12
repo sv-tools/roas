@@ -20,7 +20,8 @@
         let tag: Tag<'_> = serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
 {% if t.fallback is not none %}{% set fallback = t.variants[t.fallback] %}        // An unknown or missing tag is read as `{{ fallback.name }}`.
         match tag.tag.as_deref() {
-{% for v in t.variants %}            Some({{ v.value | tojson }}) => serde_json::from_str(raw.get()).map(Self::{{ v.name }}).map_err(serde::de::Error::custom),
+{% for v in t.variants %}{% for a in v.cfg %}            {{ a }}
+{% endfor %}            Some({{ v.value | tojson }}) => serde_json::from_str(raw.get()).map(Self::{{ v.name }}).map_err(serde::de::Error::custom),
 {% endfor %}            _ => serde_json::from_str(raw.get()).map(Self::{{ fallback.name }}).map_err(serde::de::Error::custom),
         }{% else %}        match tag.tag.as_ref() {
 {% for v in t.variants %}            {{ v.value | tojson }} => serde_json::from_str(raw.get()).map(Self::{{ v.name }}).map_err(serde::de::Error::custom),

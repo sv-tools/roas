@@ -356,8 +356,9 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
             }
         }
         // Re-run suppression with the extra errors.
-        for (parent, value) in ir.suppress() {
-            ir.diagnostics.push(crate::lower::pruned(&parent, &value));
+        for (parent, value, read_as) in ir.suppress() {
+            ir.diagnostics
+                .push(crate::lower::pruned(&parent, &value, read_as.as_deref()));
         }
     }
     point_into_source(&mut ir.diagnostics, document.version());

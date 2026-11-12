@@ -310,7 +310,7 @@ impl Ir {
     /// on their own account — judged with every such union set aside — so
     /// that they do not take every holder of the parent with them. Returns
     /// each left out, as its parent and the tag it was read by.
-    pub(crate) fn suppress(&mut self) -> Vec<(SchemaId, String)> {
+    pub(crate) fn suppress(&mut self) -> Vec<(SchemaId, String, Option<String>)> {
         fn closure(ir: &Ir, aside: &BTreeSet<SchemaId>) -> BTreeSet<SchemaId> {
             let mut suppressed: BTreeSet<SchemaId> = ir
                 .types
@@ -341,9 +341,26 @@ impl Ir {
             })
             .map(|d| d.id.clone())
             .collect();
-        let alone = closure(self, &unions);
+        // A union whose parent is broken on its own account goes, and with
+        // it what holds it: set aside only the others, until that settles.
+        let mut aside = unions;
+        let alone = loop {
+            let alone = closure(self, &aside);
+            let kept: BTreeSet<SchemaId> = aside
+                .iter()
+                .filter(|id| {
+                    !matches!(self.types.get(*id).map(|d| &d.kind),
+                        Some(TypeKind::UnionTagged(u)) if u.parent.as_ref().is_some_and(|p| alone.contains(p)))
+                })
+                .cloned()
+                .collect();
+            if kept.len() == aside.len() {
+                break alone;
+            }
+            aside = kept;
+        };
         let mut notes = Vec::new();
-        for id in &unions {
+        for id in &aside {
             let Some(TypeKind::UnionTagged(u)) = self.types.get_mut(id).map(|d| &mut d.kind) else {
                 continue;
             };
@@ -355,10 +372,11 @@ impl Ir {
                 continue;
             }
             let fallback = u.fallback.map(|i| u.variants[i].ty.clone());
+            let mut gone_values = Vec::new();
             u.variants.retain(|v| {
                 let gone = v.ty.direct_named().is_some_and(|id| alone.contains(id));
                 if gone {
-                    notes.push((parent.clone(), v.value.clone()));
+                    gone_values.push(v.value.clone());
                 }
                 !gone
             });
@@ -366,6 +384,14 @@ impl Ir {
             u.fallback = fallback
                 .and_then(|ty| u.variants.iter().position(|v| v.ty == ty))
                 .or_else(|| u.variants.iter().position(|v| v.ty == parent_ty));
+            let read_as = u
+                .fallback
+                .and_then(|i| u.variants[i].suggested_name.first().cloned());
+            notes.extend(
+                gone_values
+                    .into_iter()
+                    .map(|v| (parent.clone(), v, read_as.clone())),
+            );
         }
         self.suppressed = closure(self, &BTreeSet::new());
         notes
