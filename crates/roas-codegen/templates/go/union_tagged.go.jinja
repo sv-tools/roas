@@ -53,14 +53,14 @@ func (u *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 			return fmt.Errorf("%s: discriminator %q must be a string, got %s", {{ t.name_literal }}, {{ t.tag_literal }}, member)
 		}
 		switch tag {
-{% for v in t.variants %}		case {{ v.literal }}:
+{% for v in t.variants %}{% if not v.synthetic %}		case {{ v.literal }}:
 			var v {{ v.ty }}
 			if err := json.Unmarshal(raw, &v, decodeOptions); err != nil {
 				return err
 			}
 			*u = {{ t.name }}{tag: tag, value: v}
 			return nil
-{% endfor %}		}
+{% endif %}{% endfor %}		}
 	}
 	// An unknown or missing tag is read as the {{ fallback.literal }} variant.
 	var v {{ fallback.ty }}

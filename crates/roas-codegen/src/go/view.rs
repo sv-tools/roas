@@ -154,6 +154,8 @@ pub(crate) struct VariantView {
     pub ty: String,
     pub accessor: String,
     pub constructor: String,
+    /// The value is made up: no tag selects the variant.
+    pub synthetic: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -887,6 +889,7 @@ impl Builder<'_> {
                         ty: String::new(),
                         accessor: String::new(),
                         constructor: String::new(),
+                        synthetic: false,
                     });
                 }
             }
@@ -916,6 +919,7 @@ impl Builder<'_> {
                         ty: self.spell(&variant.ty)?,
                         accessor,
                         constructor,
+                        synthetic: variant.synthetic,
                     });
                 }
             }

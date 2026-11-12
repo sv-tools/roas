@@ -82,6 +82,8 @@ pub(crate) struct VariantView {
     pub cfg: Vec<String>,
     /// The wire value as a Rust string literal.
     pub literal: String,
+    /// The value is made up: no tag selects the variant.
+    pub synthetic: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -963,6 +965,7 @@ impl Builder<'_> {
                         attrs: vec![format!("#[serde(rename = {value:?})]")],
                         cfg: Vec::new(),
                         literal: format!("{value:?}"),
+                        synthetic: false,
                     });
                 }
             }
@@ -996,10 +999,18 @@ impl Builder<'_> {
                         name,
                         value: variant.value.clone(),
                         ty,
-                        doc: vec![format!("`{}: {:?}`", u.tag.escape_debug(), variant.value)],
+                        doc: vec![if variant.synthetic {
+                            format!(
+                                "Read when `{}` names no other variant.",
+                                u.tag.escape_debug()
+                            )
+                        } else {
+                            format!("`{}: {:?}`", u.tag.escape_debug(), variant.value)
+                        }],
                         attrs: cfg.clone(),
                         cfg,
                         literal: format!("{:?}", variant.value),
+                        synthetic: variant.synthetic,
                     });
                 }
             }

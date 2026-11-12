@@ -1807,6 +1807,33 @@ fn a_broken_schema_building_on_a_parent_is_left_out_of_its_union() {
 }
 
 #[test]
+fn a_made_up_tag_selects_nothing() {
+    // `mapping` gives the parent's name to `Dog`: the parent is kept under
+    // `Pet~`, which a value tagged `Pet~` must not select over `Dog`.
+    let mut components = parent_family();
+    components["Pet"]["discriminator"] = serde_json::json!({"propertyName": "kind",
+        "mapping": {"cat": "#/components/schemas/Cat", "Pet": "#/components/schemas/Dog"},
+        "defaultMapping": "#/components/schemas/Dog"});
+    for (language, arm) in [
+        (Target::Rust, "Some(\"Pet~\")"),
+        (Target::Go, "case \"Pet~\""),
+    ] {
+        let config = ConfigFile::from_toml("", Path::new("/"))
+            .unwrap()
+            .merge(target(language))
+            .build()
+            .unwrap();
+        let g = generate(&document(components.clone()), &config).unwrap();
+        let text = g
+            .files
+            .iter()
+            .map(|f| f.contents.as_str())
+            .collect::<String>();
+        assert!(text.contains("PetUnion") && !text.contains(arm), "{text}");
+    }
+}
+
+#[test]
 fn a_parent_union_is_gated_and_named_as_its_parent_is() {
     let gate = "attrs = ['#[cfg(any())]']";
     let config = rust_config(&format!(

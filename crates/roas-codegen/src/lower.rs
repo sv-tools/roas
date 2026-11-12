@@ -209,11 +209,15 @@ impl<'a> Lowerer<'a> {
             // schema, under a tag of its own, which any unknown tag reads
             // it as anyway. The parent is what a tag is read as once the
             // schema it names is not generated or compiled out.
+            let mut synthetic = BTreeSet::new();
             for name in [parent.clone(), fallback_name.clone()] {
                 if !variants.iter().any(|(_, n)| *n == name) {
                     let mut value = name.clone();
                     while variants.iter().any(|(v, _)| *v == value) {
                         value.push('~');
+                    }
+                    if value != name {
+                        synthetic.insert(value.clone());
                     }
                     variants.push((value, name));
                 }
@@ -256,6 +260,7 @@ impl<'a> Lowerer<'a> {
                             value: value.clone(),
                             ty: TypeRef::Named(self.component_ids[name].clone()),
                             suggested_name: vec![name.clone()],
+                            synthetic: synthetic.contains(value),
                         })
                         .collect(),
                     fallback,
@@ -1535,6 +1540,7 @@ impl<'a> Lowerer<'a> {
                     value,
                     ty: lowered.ty,
                     suggested_name,
+                    synthetic: false,
                 });
             }
             return TypeKind::UnionTagged(TaggedUnion {

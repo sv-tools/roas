@@ -211,6 +211,9 @@ pub(crate) struct Variant {
     pub value: String,
     pub ty: TypeRef,
     pub suggested_name: Vec<String>,
+    /// `value` is made up, no tag on the wire: the variant is read only
+    /// as the fallback, never by its tag.
+    pub synthetic: bool,
 }
 
 #[derive(Debug, Clone)]
