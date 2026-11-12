@@ -1827,7 +1827,7 @@ fn a_discriminator_default_or_mapping_off_the_family_is_warned_about() {
         warned
             .iter()
             .any(|m| m.contains("default is `#/components/schemas/Other`")
-                && m.ends_with("read as this schema")),
+                && m.ends_with("read as `Pet`")),
         "{warned:?}"
     );
     let warned = messages(serde_json::json!({"propertyName": "kind",
@@ -2150,11 +2150,18 @@ fn no_left_out_warning_for_a_parent_not_generated() {
     components["Pet"]["properties"]["x"] =
         serde_json::json!({"$id": "https://example.com/x", "type": "string"});
     components["Cat"]["allOf"][1]["properties"]["lives"] = serde_json::json!({"not": {}});
+    components["Other"] = serde_json::json!({"type": "object"});
+    components["Pet"]["discriminator"]["mapping"] =
+        serde_json::json!({"zz": "#/components/schemas/Other"});
+    components["Pet"]["discriminator"]["defaultMapping"] =
+        serde_json::json!("#/components/schemas/Other");
     let g = generate(&document(components), &rust_config("")).unwrap();
     assert!(
         !g.diagnostics
             .iter()
-            .any(|d| d.message.contains("is not generated; such a value")),
+            .any(|d| d.message.contains("is not generated; such a value")
+                || d.message
+                    .contains("neither this schema nor one building on it")),
         "{:?}",
         g.diagnostics
     );

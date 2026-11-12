@@ -121,6 +121,8 @@ pub(crate) struct TypeView {
     pub parent_variant: Option<usize>,
     /// The discriminator property as a Rust string literal.
     pub tag_literal: String,
+    /// The tag as it reads in a doc comment.
+    pub tag_doc: String,
     /// `oneOf` rather than `anyOf`, for an open union's documentation.
     pub exclusive: bool,
     /// The statements of `Validate::validate_into`, with validation on;
@@ -723,6 +725,7 @@ impl Builder<'_> {
             fallback: None,
             parent_variant: None,
             tag_literal: String::new(),
+            tag_doc: String::new(),
             exclusive: false,
             validate: None,
             validate_null: Vec::new(),
@@ -974,6 +977,7 @@ impl Builder<'_> {
                 view.derives.push("Serialize".to_owned());
                 view.tag = u.tag.clone();
                 view.tag_literal = format!("{:?}", u.tag);
+                view.tag_doc = u.tag.escape_debug().to_string();
                 view.fallback = u.fallback;
                 view.parent_variant = u.parent.as_ref().and_then(|p| {
                     u.variants
@@ -985,7 +989,7 @@ impl Builder<'_> {
                     let name = allocator.allocate(legal(pascal(&variant.suggested_name)));
                     let ty = self.spell(&variant.ty)?;
                     // Beside a parent, a variant gated out leaves its tag to
-                    // the fallback; the union itself carries the fallback's
+                    // the fallback; the union itself carries the parent's
                     // gates.
                     let cfg = match variant.ty.direct_named() {
                         Some(id) if u.parent.is_some() => self

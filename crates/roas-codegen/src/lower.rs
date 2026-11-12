@@ -177,13 +177,13 @@ impl<'a> Lowerer<'a> {
             };
             let fallback_name = match discriminator.default_mapping.as_deref() {
                 Some(reference) => target(reference).unwrap_or_else(|| {
-                    self.warn(
-                        DiagnosticKind::UnsupportedKeyword { keyword: "discriminator".into() },
-                        &schema.id,
-                        format!(
-                            "the discriminator's default is `{reference}`, which is neither this schema nor one building on it; an unknown or missing value is read as this schema"
-                        ),
-                    );
+                    // Warned about once it is settled the parent is generated.
+                    self.ir.union_notes.push((
+                        schema.id.clone(),
+                        UnionNote::OffFamilyDefault {
+                            reference: reference.to_owned(),
+                        },
+                    ));
                     parent.clone()
                 }),
                 None => parent.clone(),
@@ -1963,6 +1963,9 @@ pub(crate) fn union_note(parent: &SchemaId, note: &UnionNote, read_as: Option<&s
             ),
             UnionNote::Pruned { tag, default: None } => format!(
                 "the schema the discriminator reads `{tag}` as is not generated; such a value is read as {read_as}"
+            ),
+            UnionNote::OffFamilyDefault { reference } => format!(
+                "the discriminator's default is `{reference}`, which is neither this schema nor one building on it; an unknown or missing value is read as {read_as}"
             ),
             UnionNote::OffFamily { tag, reference } => format!(
                 "the discriminator maps `{tag}` to `{reference}`, which is neither this schema nor one building on it; the value is read as {read_as}"

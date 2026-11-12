@@ -320,6 +320,8 @@ pub(crate) enum UnionNote {
     },
     /// A `mapping` entry naming a schema off the family.
     OffFamily { tag: String, reference: String },
+    /// A `defaultMapping` naming a schema off the family.
+    OffFamilyDefault { reference: String },
 }
 
 impl Ir {
