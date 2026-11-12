@@ -165,7 +165,7 @@ impl<'a> Lowerer<'a> {
             let fallback_name = discriminator
                 .default_mapping
                 .as_deref()
-                .and_then(&target)
+                .and_then(target)
                 .unwrap_or_else(|| parent.clone());
             let fallback = variants.iter().position(|(_, n)| *n == fallback_name);
             let parent_id = self.component_ids[parent].clone();
