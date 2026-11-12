@@ -10,13 +10,14 @@
 
 use crate::common::pointer;
 use crate::common::reference::{RefOr, Reference, ResolveReference};
-use crate::common::resolve::{Resolution, classify_unresolved, follow, last_reference};
+use crate::common::resolve::{Resolution, Step, follow, last_reference};
 use crate::v2_6::channel_item::ChannelItem;
 use crate::v2_6::components::Components;
 use crate::v2_6::external_documentation::ExternalDocumentation;
 use crate::v2_6::info::Info;
 use crate::v2_6::message::{Message, OperationMessage};
 use crate::v2_6::operation::{Operation, OperationKind};
+use crate::v2_6::schema::Schema;
 use crate::v2_6::security_scheme::{SecurityRequirement, SecurityScheme};
 use crate::v2_6::server::Server;
 use crate::v2_6::tag::Tag;
@@ -113,29 +114,7 @@ impl Document {
     /// assert_eq!(channel.description.as_deref(), Some("A user signed up"));
     /// ```
     pub fn resolve_channel<'a>(&'a self, channel: &'a ChannelItem) -> Resolution<'a, ChannelItem> {
-        let mut current = channel;
-        let mut seen: BTreeSet<&str> = BTreeSet::new();
-        loop {
-            let Some(reference) = current.reference.as_deref() else {
-                return Resolution::Found(current);
-            };
-            let reference = Reference {
-                reference: reference.to_owned(),
-            };
-            if reference.is_external() {
-                return Resolution::external(&reference.reference);
-            }
-            let Some(pointer) = reference.local_pointer() else {
-                return Resolution::Unrecognized;
-            };
-            if !seen.insert(current.reference.as_deref().unwrap_or_default()) {
-                return Resolution::Cycle;
-            }
-            match self.channel_at(pointer) {
-                Some(next) => current = next,
-                None => return classify_unresolved(self, pointer, "channels"),
-            }
-        }
+        follow(self, channel, "channels", |path| self.channel_at(path))
     }
 
     /// The last `$ref` the chain from a channel item follows, as
@@ -163,25 +142,12 @@ impl Document {
     /// ```
     #[must_use]
     pub fn resolved_channel_ref<'a>(&'a self, channel: &'a ChannelItem) -> Option<&'a str> {
-        let mut reference = channel.reference.as_deref()?;
-        let mut seen: BTreeSet<&str> = BTreeSet::new();
-        loop {
-            let next = reference
-                .strip_prefix('#')
-                .filter(|_| seen.insert(reference))
-                .and_then(|pointer| self.channel_at(pointer))
-                .and_then(|item| item.reference.as_deref());
-            match next {
-                Some(next) => reference = next,
-                None => return Some(reference),
-            }
-        }
+        last_reference(channel, |path| self.channel_at(path))
     }
 
     /// The channel a document-local pointer names, in either map.
-    fn channel_at<'a>(&'a self, pointer: &str) -> Option<&'a ChannelItem> {
-        let tokens = pointer::tokens(pointer)?;
-        let (map, key) = self.channel_map_for(&tokens)?;
+    fn channel_at<'a>(&'a self, tokens: &[String]) -> Option<&'a ChannelItem> {
+        let (map, key) = self.channel_map_for(tokens)?;
         (key.len() == 1).then(|| map.get(&key[0]))?
     }
 
@@ -237,25 +203,13 @@ impl Document {
 
     /// Resolve a message `$ref`, following component aliases and
     /// pointers into a channel's operations.
-    fn resolve_message(&self, reference: &Reference) -> Resolution<'_, Message> {
-        let mut current = reference.clone();
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        loop {
-            if current.is_external() {
-                return Resolution::external(&current.reference);
-            }
-            let Some(pointer) = current.local_pointer() else {
-                return Resolution::Unrecognized;
-            };
-            if !seen.insert(current.reference.clone()) {
-                return Resolution::Cycle;
-            }
-            match self.message_at(pointer) {
-                Some(RefOr::Item(message)) => return Resolution::Found(message),
-                Some(RefOr::Reference(next)) => current = next.clone(),
-                None => return classify_unresolved(self, pointer, "messages"),
-            }
-        }
+    fn resolve_message<'a>(&'a self, reference: &'a Reference) -> Resolution<'a, Message> {
+        follow(
+            self,
+            Step::Reference(&reference.reference),
+            "messages",
+            |path| self.message_at(path),
+        )
     }
 
     /// The message entry a document-local pointer names — either a
@@ -265,13 +219,7 @@ impl Document {
     /// steps through is the item at that key, not whatever that item's
     /// `$ref` resolves to, so a message declared beside a `$ref` is
     /// reachable and one on the target is not (through this pointer).
-    fn message_at<'a>(&'a self, pointer: &str) -> Option<&'a RefOr<Message>> {
-        self.message_at_tokens(&pointer::tokens(pointer)?)
-    }
-
-    /// [`message_at`](Self::message_at), for a pointer already split
-    /// into decoded tokens.
-    fn message_at_tokens<'a>(&'a self, tokens: &[String]) -> Option<&'a RefOr<Message>> {
+    fn message_at<'a>(&'a self, tokens: &[String]) -> Option<&'a RefOr<Message>> {
         if let [components, messages, key] = tokens
             && components == "components"
             && messages == "messages"
@@ -346,14 +294,11 @@ impl Document {
             if !seen.insert(reference) {
                 break;
             }
-            let Some(pointer) = Reference {
-                reference: reference.to_owned(),
-            }
-            .local_pointer()
-            .map(str::to_owned) else {
-                break;
-            };
-            let Some(next) = self.channel_at(&pointer) else {
+            let Some(next) = reference
+                .strip_prefix('#')
+                .and_then(pointer::tokens)
+                .and_then(|tokens| self.channel_at(&tokens))
+            else {
                 break;
             };
             chain.push(next);
@@ -649,6 +594,17 @@ impl Validate for Document {
     }
 }
 
+/// A channel item carries its `$ref` as a field: one with a `$ref`
+/// is followed, beside whatever else it declares.
+impl<'a> From<&'a ChannelItem> for Step<'a, ChannelItem> {
+    fn from(channel: &'a ChannelItem) -> Self {
+        match channel.reference.as_deref() {
+            Some(reference) => Step::Reference(reference),
+            None => Step::Item(channel),
+        }
+    }
+}
+
 /// Security schemes, through `#/components/securitySchemes/…`.
 impl ResolveReference<SecurityScheme> for Document {
     fn resolve_reference<'a>(
@@ -703,7 +659,41 @@ impl ResolveReference<Message> for Document {
     }
 
     fn resolved_reference<'a>(&'a self, entry: &'a RefOr<Message>) -> Option<&'a str> {
-        last_reference(entry, |path| self.message_at_tokens(path))
+        last_reference(entry, |path| self.message_at(path))
+    }
+}
+
+/// Schemas, through `#/components/schemas/<name>` and any subschema
+/// below one (`…/properties/<name>`, `…/items`, `…/allOf/<i>`, …).
+///
+/// A pointer at a boolean schema, or at a schema somewhere other than
+/// `components.schemas` (a message's `payload`, say), is
+/// [`Resolution::Opaque`].
+impl ResolveReference<Schema> for Document {
+    fn resolve_reference<'a>(&'a self, entry: &'a RefOr<Schema>) -> Resolution<'a, Schema> {
+        follow(self, entry, "schemas", |path| self.schema_at(path))
+    }
+
+    fn resolved_reference<'a>(&'a self, entry: &'a RefOr<Schema>) -> Option<&'a str> {
+        last_reference(entry, |path| self.schema_at(path))
+    }
+}
+
+impl Document {
+    /// The schema a pointer's decoded tokens name under
+    /// `#/components/schemas`, walked as written.
+    fn schema_at<'a>(&'a self, tokens: &[String]) -> Option<Step<'a, Schema>> {
+        let [components, schemas, name, rest @ ..] = tokens else {
+            return None;
+        };
+        if components != "components" || schemas != "schemas" {
+            return None;
+        }
+        match Step::from(self.components.as_ref()?.schemas.get(name)?) {
+            Step::Item(schema) => schema.step_at(rest),
+            step if rest.is_empty() => Some(step),
+            _ => None,
+        }
     }
 }
 
@@ -711,6 +701,135 @@ impl ResolveReference<Message> for Document {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn schema_refs_reach_into_subschemas() {
+        let doc: Document = serde_json::from_value(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": {
+                "schemas": {
+                    "User": {
+                        "type": "object",
+                        "properties": {
+                            "address": { "$ref": "#/components/schemas/Address" },
+                            "a/b": { "type": "string" },
+                            "tags": { "type": "array", "items": { "type": "boolean" } },
+                            "pair": {
+                                "type": "array",
+                                "items": [ { "type": "string" }, { "type": "integer" } ],
+                                "additionalItems": { "type": "null" },
+                                "contains": { "type": "string" }
+                            },
+                            "flag": true
+                        },
+                        "patternProperties": { "^x-": { "type": "number" } },
+                        "additionalProperties": { "type": "integer" },
+                        "propertyNames": { "type": "string" },
+                        "definitions": { "Local": { "type": "null" } },
+                        "dependencies": { "a": { "type": "object" }, "b": [ "a" ] },
+                        "allOf": [ { "$ref": "#/components/schemas/Address" }, { "type": "object" } ],
+                        "anyOf": [ { "type": "object" } ],
+                        "oneOf": [ { "type": "object" } ],
+                        "not": { "type": "string" },
+                        "if": { "type": "object" },
+                        "then": { "type": "object" },
+                        "else": { "type": "null" }
+                    },
+                    "Address": { "type": "object", "properties": { "city": { "type": "string" } } },
+                    "Alias": { "$ref": "#/components/schemas/User/properties/address" },
+                    "Copy": { "$ref": "#/components/schemas/User" },
+                    "Flag": true,
+                    "Loop": { "$ref": "#/components/schemas/Loop" }
+                }
+            }
+        }))
+        .unwrap();
+        let entry = |r: &str| {
+            RefOr::<Schema>::Reference(Reference {
+                reference: r.to_owned(),
+            })
+        };
+        let resolve = |r: &str| match entry(r).get_item(&doc) {
+            Resolution::Found(_) => "Found",
+            Resolution::Opaque => "Opaque",
+            Resolution::Missing => "Missing",
+            Resolution::Cycle => "Cycle",
+            Resolution::Unrecognized => "Unrecognized",
+            Resolution::WrongKind => "WrongKind",
+        };
+        let schema_type = |r: &str| {
+            let found = entry(r).get_item(&doc).found()?.clone();
+            Some(serde_json::to_value(found).unwrap()["type"].clone())
+        };
+        let at = |p: &str| format!("#/components/schemas/User/{p}");
+
+        for (pointer, expected) in [
+            ("properties/address", "object"),
+            ("properties/a~1b", "string"),
+            ("properties/tags/items", "boolean"),
+            ("properties/pair/items/1", "integer"),
+            ("properties/pair/additionalItems", "null"),
+            ("properties/pair/contains", "string"),
+            ("patternProperties/^x-", "number"),
+            ("additionalProperties", "integer"),
+            ("propertyNames", "string"),
+            ("definitions/Local", "null"),
+            ("dependencies/a", "object"),
+            ("allOf/0", "object"),
+            ("allOf/1", "object"),
+            ("anyOf/0", "object"),
+            ("oneOf/0", "object"),
+            ("not", "string"),
+            ("if", "object"),
+            ("then", "object"),
+            ("else", "null"),
+        ] {
+            assert_eq!(
+                schema_type(&at(pointer)),
+                Some(json!(expected)),
+                "{pointer}"
+            );
+        }
+        assert_eq!(
+            entry(&at("properties/address")).resolved_ref(&doc),
+            Some("#/components/schemas/Address")
+        );
+        assert_eq!(
+            schema_type("#/components/schemas/Alias"),
+            Some(json!("object"))
+        );
+        assert_eq!(
+            entry("#/components/schemas/Alias").resolved_ref(&doc),
+            Some("#/components/schemas/Address")
+        );
+        assert_eq!(
+            schema_type("#/components/schemas/Address/properties/city"),
+            Some(json!("string"))
+        );
+
+        // A boolean schema is a schema, but not a `Schema` object.
+        assert_eq!(resolve("#/components/schemas/Flag"), "Opaque");
+        assert_eq!(resolve(&at("properties/flag")), "Opaque");
+        // A pointer walks the document as written: not through a `$ref`.
+        assert_eq!(resolve(&at("allOf/0/properties/city")), "Missing");
+        assert_eq!(resolve(&at("properties/missing")), "Missing");
+        assert_eq!(resolve(&at("allOf/01")), "Missing");
+        assert_eq!(resolve(&at("dependencies/b")), "WrongKind");
+        assert_eq!(resolve("#/components/schemas/Loop"), "Cycle");
+        assert_eq!(
+            entry("#/components/schemas/Loop").resolved_ref(&doc),
+            Some("#/components/schemas/Loop")
+        );
+        assert_eq!(resolve("#/components/schemas/Missing"), "Missing");
+        assert_eq!(resolve("other.yaml#/User"), "Opaque");
+        assert_eq!(
+            entry("other.yaml#/User").resolved_ref(&doc),
+            Some("other.yaml#/User")
+        );
+        assert_eq!(resolve("#/info"), "WrongKind");
+    }
 
     #[test]
     fn resolved_ref_reports_where_each_kind_of_chain_ends() {

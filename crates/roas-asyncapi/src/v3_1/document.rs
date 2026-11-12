@@ -15,13 +15,15 @@
 use crate::common::pointer;
 use crate::common::reference::{RefOr, Reference, ResolveReference};
 use crate::common::resolve::{
-    Resolution, Terminus, classify_unresolved, follow_tracked, last_reference, last_reference_from,
+    Resolution, Step, Terminus, classify_unresolved, follow, follow_tracked, last_reference,
+    last_reference_from,
 };
 use crate::v3_1::channel::Channel;
 use crate::v3_1::components::Components;
 use crate::v3_1::info::Info;
 use crate::v3_1::message::Message;
 use crate::v3_1::operation::{Operation, OperationReply};
+use crate::v3_1::schema::{Schema, SchemaOrMultiFormat};
 use crate::v3_1::server::Server;
 use crate::v3_1::version::Version;
 use crate::validation::{Context, Error, Validate, ValidateWithContext, ValidationOptions};
@@ -767,10 +769,241 @@ impl ResolveReference<Message> for Document {
     }
 }
 
+/// Schemas, through `#/components/schemas/<name>` and any subschema
+/// below one (`…/properties/<name>`, `…/items`, `…/allOf/<i>`, …).
+///
+/// A pointer at a boolean schema, at a schema in another format, or at
+/// a schema somewhere other than `components.schemas` (a message's
+/// `payload`, say) is [`Resolution::Opaque`].
+impl ResolveReference<Schema> for Document {
+    fn resolve_reference<'a>(&'a self, entry: &'a RefOr<Schema>) -> Resolution<'a, Schema> {
+        follow(self, entry, "schemas", |path| self.schema_at(path))
+    }
+
+    fn resolved_reference<'a>(&'a self, entry: &'a RefOr<Schema>) -> Option<&'a str> {
+        last_reference(entry, |path| self.schema_at(path))
+    }
+}
+
+/// Schema components as declared — an AsyncAPI schema, a boolean, or a
+/// schema in another format — through `#/components/schemas/<name>`.
+///
+/// What a message's `payload` holds. A pointer below a component
+/// (`…/properties/<name>`) names an AsyncAPI schema, not one of these:
+/// resolve it as a [`Schema`].
+impl ResolveReference<SchemaOrMultiFormat> for Document {
+    fn resolve_reference<'a>(
+        &'a self,
+        entry: &'a RefOr<SchemaOrMultiFormat>,
+    ) -> Resolution<'a, SchemaOrMultiFormat> {
+        follow(self, entry, "schemas", |path| {
+            self.schema_component_at(path)
+        })
+    }
+
+    fn resolved_reference<'a>(&'a self, entry: &'a RefOr<SchemaOrMultiFormat>) -> Option<&'a str> {
+        last_reference(entry, |path| self.schema_component_at(path))
+    }
+}
+
+impl Document {
+    /// The schema component a pointer's decoded tokens name.
+    fn schema_component_at<'a>(
+        &'a self,
+        tokens: &[String],
+    ) -> Option<&'a RefOr<SchemaOrMultiFormat>> {
+        match tokens {
+            [components, schemas, name] if components == "components" && schemas == "schemas" => {
+                self.components.as_ref()?.schemas.get(name)
+            }
+            _ => None,
+        }
+    }
+
+    /// The schema a pointer's decoded tokens name under
+    /// `#/components/schemas`, walked as written.
+    fn schema_at<'a>(&'a self, tokens: &[String]) -> Option<Step<'a, Schema>> {
+        let (rest, entry) = match tokens {
+            [components, schemas, name, rest @ ..]
+                if components == "components" && schemas == "schemas" =>
+            {
+                (rest, self.components.as_ref()?.schemas.get(name)?)
+            }
+            _ => return None,
+        };
+        match entry {
+            RefOr::Item(SchemaOrMultiFormat::Schema(schema)) => schema.step_at(rest),
+            _ if !rest.is_empty() => None,
+            RefOr::Item(_) => Some(Step::Opaque),
+            RefOr::Reference(reference) => Some(Step::Reference(&reference.reference)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn schema_refs_reach_into_subschemas() {
+        let doc: Document = serde_json::from_value(json!({
+            "asyncapi": "3.1.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": {
+                "schemas": {
+                    "User": {
+                        "type": "object",
+                        "properties": {
+                            "address": { "$ref": "#/components/schemas/Address" },
+                            "a/b": { "type": "string" },
+                            "tags": { "type": "array", "items": { "type": "boolean" } },
+                            "pair": {
+                                "type": "array",
+                                "items": [ { "type": "string" }, { "type": "integer" } ],
+                                "additionalItems": { "type": "null" },
+                                "contains": { "type": "string" }
+                            },
+                            "flag": true
+                        },
+                        "patternProperties": { "^x-": { "type": "number" } },
+                        "additionalProperties": { "type": "integer" },
+                        "propertyNames": { "type": "string" },
+                        "definitions": { "Local": { "type": "null" } },
+                        "dependencies": { "a": { "type": "object" }, "b": [ "a" ] },
+                        "allOf": [ { "$ref": "#/components/schemas/Address" }, { "type": "object" } ],
+                        "anyOf": [ { "type": "object" } ],
+                        "oneOf": [ { "type": "object" } ],
+                        "not": { "type": "string" },
+                        "if": { "type": "object" },
+                        "then": { "type": "object" },
+                        "else": { "type": "null" }
+                    },
+                    "Address": { "type": "object", "properties": { "city": { "type": "string" } } },
+                    "Alias": { "$ref": "#/components/schemas/User/properties/address" },
+                    "Copy": { "$ref": "#/components/schemas/User" },
+                    "Flag": true,
+                    "Loop": { "$ref": "#/components/schemas/Loop" },
+                    "Avro": {
+                        "schemaFormat": "application/vnd.apache.avro+json;version=1.9.0",
+                        "schema": { "type": "record" }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let entry = |r: &str| {
+            RefOr::<Schema>::Reference(Reference {
+                reference: r.to_owned(),
+            })
+        };
+        let resolve = |r: &str| match entry(r).get_item(&doc) {
+            Resolution::Found(_) => "Found",
+            Resolution::Opaque => "Opaque",
+            Resolution::Missing => "Missing",
+            Resolution::Cycle => "Cycle",
+            Resolution::Unrecognized => "Unrecognized",
+            Resolution::WrongKind => "WrongKind",
+        };
+        let schema_type = |r: &str| {
+            let found = entry(r).get_item(&doc).found()?.clone();
+            Some(serde_json::to_value(found).unwrap()["type"].clone())
+        };
+        let at = |p: &str| format!("#/components/schemas/User/{p}");
+
+        for (pointer, expected) in [
+            ("properties/address", "object"),
+            ("properties/a~1b", "string"),
+            ("properties/tags/items", "boolean"),
+            ("properties/pair/items/1", "integer"),
+            ("properties/pair/additionalItems", "null"),
+            ("properties/pair/contains", "string"),
+            ("patternProperties/^x-", "number"),
+            ("additionalProperties", "integer"),
+            ("propertyNames", "string"),
+            ("definitions/Local", "null"),
+            ("dependencies/a", "object"),
+            ("allOf/0", "object"),
+            ("allOf/1", "object"),
+            ("anyOf/0", "object"),
+            ("oneOf/0", "object"),
+            ("not", "string"),
+            ("if", "object"),
+            ("then", "object"),
+            ("else", "null"),
+        ] {
+            assert_eq!(
+                schema_type(&at(pointer)),
+                Some(json!(expected)),
+                "{pointer}"
+            );
+        }
+        assert_eq!(
+            entry(&at("properties/address")).resolved_ref(&doc),
+            Some("#/components/schemas/Address")
+        );
+        assert_eq!(
+            schema_type("#/components/schemas/Alias"),
+            Some(json!("object"))
+        );
+        assert_eq!(
+            entry("#/components/schemas/Alias").resolved_ref(&doc),
+            Some("#/components/schemas/Address")
+        );
+        assert_eq!(
+            schema_type("#/components/schemas/Address/properties/city"),
+            Some(json!("string"))
+        );
+
+        // A boolean schema is a schema, but not a `Schema` object.
+        assert_eq!(resolve("#/components/schemas/Flag"), "Opaque");
+        assert_eq!(resolve(&at("properties/flag")), "Opaque");
+        // A pointer walks the document as written: not through a `$ref`.
+        assert_eq!(resolve(&at("allOf/0/properties/city")), "Missing");
+        assert_eq!(resolve(&at("properties/missing")), "Missing");
+        assert_eq!(resolve(&at("allOf/01")), "Missing");
+        assert_eq!(resolve(&at("dependencies/b")), "WrongKind");
+        assert_eq!(resolve("#/components/schemas/Loop"), "Cycle");
+        assert_eq!(
+            entry("#/components/schemas/Loop").resolved_ref(&doc),
+            Some("#/components/schemas/Loop")
+        );
+        assert_eq!(resolve("#/components/schemas/Missing"), "Missing");
+        assert_eq!(resolve("other.yaml#/User"), "Opaque");
+        assert_eq!(
+            entry("other.yaml#/User").resolved_ref(&doc),
+            Some("other.yaml#/User")
+        );
+        assert_eq!(resolve("#/info"), "WrongKind");
+        assert_eq!(resolve("#/components/schemas/Avro"), "Opaque");
+
+        // The component as declared, which is what a payload holds.
+        let component = |r: &str| {
+            RefOr::<SchemaOrMultiFormat>::Reference(Reference {
+                reference: r.to_owned(),
+            })
+        };
+        let avro = component("#/components/schemas/Avro");
+        assert!(matches!(
+            avro.get_item(&doc),
+            Resolution::Found(SchemaOrMultiFormat::MultiFormat(_))
+        ));
+        assert_eq!(avro.resolved_ref(&doc), Some("#/components/schemas/Avro"));
+        assert!(matches!(
+            component("#/components/schemas/Copy").get_item(&doc),
+            Resolution::Found(SchemaOrMultiFormat::Schema(_))
+        ));
+        assert_eq!(
+            component("#/components/schemas/Copy").resolved_ref(&doc),
+            Some("#/components/schemas/User")
+        );
+        // Below a component is an AsyncAPI schema, not one of these.
+        assert_eq!(
+            component("#/components/schemas/User/properties/address").get_item(&doc),
+            Resolution::Opaque
+        );
+    }
 
     #[test]
     fn resolved_ref_reports_where_each_kind_of_chain_ends() {

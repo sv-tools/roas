@@ -44,6 +44,8 @@ pub struct Components {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
+crate::common::input_schema::impl_input_schema_refs!(v1_1);
+
 crate::common::reusable::impl_resolve_reusable! {
     Components, crate::v1_1::description::Description;
     Parameter => "parameters", parameters;

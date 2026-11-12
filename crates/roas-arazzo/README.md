@@ -70,6 +70,8 @@ YAML descriptions work the same way — parse with `serde-saphyr` (or any other 
 
 A parameter or action list holds `ReusableOr<T>`: the object itself, or a `Reusable` naming one in `components` (`$components.parameters.page`). `ReusableOr::get_item(&description)` returns the object either way, and takes a `Components` just as well; a reference of another kind and a name the components have not got are separate `ResolveError`s. A `Reusable`'s `value` is not applied — read it with `value_override()`. `ReusableOr::resolved_ref(&description)` gives the `Reusable`'s reference, or `None` for an inline object.
 
+Input schemas are plain JSON Schema. `resolve_input_ref("#/components/inputs/pet/properties/id")` on a `Description` or `Components` follows such a `$ref`, into a component or any schema below one, through a chain of them; `resolved_input_ref` gives the last `$ref` the chain followed.
+
 ## Unknown members
 
 An Arazzo object holds the fields its specification defines and, except for a Reusable Object, `x-` extensions; deserializing drops anything else without a word, so a misspelt `sucessCriteria` simply vanishes. `Description::unknown_members(&raw)` lists what was dropped from the value the description was deserialized from, each with a model-style `path` (`#.workflows[0].steps[1].sucessCriteria`) that a `SourceMap` locates with `locate_key`. A member whose value is `null`, `[]` or `{}` is not listed: a known optional field left empty is dropped the same way, so the two cannot be told apart. List a v1.0 description's members before upconverting it; `UnknownMembers::version` keeps the version it declared.

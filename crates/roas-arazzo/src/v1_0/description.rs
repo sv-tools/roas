@@ -125,6 +125,31 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn input_refs_resolve_through_the_components() {
+        let mut value = minimal();
+        let bare: Description = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(bare.resolve_input_ref("#/components/inputs/pet"), None);
+        assert_eq!(
+            bare.resolved_input_ref("#/components/inputs/pet"),
+            "#/components/inputs/pet"
+        );
+
+        value["components"] = json!({
+            "inputs": {
+                "pet": { "type": "object" },
+                "alias": { "$ref": "#/components/inputs/pet" }
+            }
+        });
+        let description: Description = serde_json::from_value(value).unwrap();
+        let pet = description.resolve_input_ref("#/components/inputs/alias");
+        assert_eq!(pet, Some(&json!({ "type": "object" })));
+        assert_eq!(
+            description.resolved_input_ref("#/components/inputs/alias"),
+            "#/components/inputs/pet"
+        );
+    }
+
     fn minimal() -> serde_json::Value {
         json!({
             "arazzo": "1.0.1",

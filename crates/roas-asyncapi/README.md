@@ -121,10 +121,12 @@ assert_eq!(message.name.as_deref(), Some("LightMeasured"));
 
 | Version | `RefOr<T>::get_item(&doc)` for `T` | `Document` methods |
 |---|---|---|
-| 3.0 / 3.1 | `Server`, `Channel`, `Operation`, `Message`, `OperationReply` | `resolve_server(&Reference)` (a channel's `servers`), `resolve_channel(&Reference)` (an operation's or reply's `channel`), `resolve_message(&Reference)` (an operation's or reply's `messages`) |
-| 2.6 | `Server`, `Message`, `SecurityScheme` | `resolve_channel(&ChannelItem)` (a channel item carries its own `$ref`) |
+| 3.0 / 3.1 | `Server`, `Channel`, `Operation`, `Message`, `OperationReply`, `Schema`, `SchemaOrMultiFormat` | `resolve_server(&Reference)` (a channel's `servers`), `resolve_channel(&Reference)` (an operation's or reply's `channel`), `resolve_message(&Reference)` (an operation's or reply's `messages`) |
+| 2.6 | `Server`, `Message`, `SecurityScheme`, `Schema` | `resolve_channel(&ChannelItem)` (a channel item carries its own `$ref`) |
 
 Every other kind has no resolver. That includes `SecurityScheme` in 3.x, which only 2.6 covers.
+
+A `Schema` reference may point into a schema as well as at one: `#/components/schemas/User/properties/address`, `…/items`, `…/allOf/0`, and every other draft-07 keyword that holds a subschema. The pointer is walked as written, so it names nothing through a schema that is itself only a `$ref`. A boolean schema, a schema in another format, or a schema outside `components.schemas` (a message's `payload`, say) is `Opaque`. `SchemaOrMultiFormat` — what a 3.x payload holds — resolves only the components themselves.
 
 `RefOr::resolved_ref(&doc)` returns where the item was found: `None` for an inline item, otherwise the last `$ref` the chain followed — the target of an alias, the reference into another document when the chain leaves it, or the last reference reached when the chain dangles or loops. It takes the same documents and kinds as `get_item`. For the references the model holds outside a `RefOr`, the 3.x `Document` has `resolved_server_ref`, `resolved_channel_ref` and `resolved_message_ref`, each taking a bare `Reference`; the 2.6 `Document` has `resolved_channel_ref`, taking a `ChannelItem`.
 

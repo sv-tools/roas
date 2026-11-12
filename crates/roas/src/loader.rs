@@ -664,7 +664,7 @@ fn split_url_fragment(mut url: Url) -> (Url, String) {
     (url, fragment)
 }
 
-fn decode_fragment(fragment: &str) -> Result<String, ()> {
+pub(crate) fn decode_fragment(fragment: &str) -> Result<String, ()> {
     if fragment.is_empty() {
         return Ok(String::new());
     }
