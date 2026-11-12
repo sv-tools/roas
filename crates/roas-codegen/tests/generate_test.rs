@@ -2037,3 +2037,40 @@ fn a_tag_value_any_string_may_be_is_a_rust_literal() {
         serde_json::json!({"a<b>&'\u{1}": "#/components/schemas/Cat"});
     generate(&document(components), &rust_config("")).expect("valid Rust");
 }
+
+#[test]
+fn a_left_out_warning_names_what_the_union_reads_the_tag_as_at_the_end() {
+    let mut components = parent_family();
+    components["Pet"]["discriminator"]["defaultMapping"] =
+        serde_json::json!("#/components/schemas/Dog");
+    components["Cat"]["allOf"][1]["properties"]["lives"] = serde_json::json!({"not": {}});
+    // Broken only by the reference report, after lowering.
+    components["Dog"]["allOf"][1]["properties"]["toy"] =
+        serde_json::json!({"$id": "https://example.com/toy", "type": "string"});
+    let g = generate(&document(components), &rust_config("")).unwrap();
+    let left_out: Vec<&str> = g
+        .diagnostics
+        .iter()
+        .filter(|d| d.message.contains("is not generated; such a value"))
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(left_out.len(), 2, "{left_out:?}");
+    assert!(
+        left_out.iter().all(|m| m.ends_with("read as `Pet`")),
+        "{left_out:?}"
+    );
+}
+
+#[test]
+fn a_discriminator_named_with_a_newline_is_valid_rust() {
+    let g = generate(
+        &document(serde_json::json!({
+            "Pet": {"type": "object", "required": ["pet\nkind"],
+                "properties": {"pet\nkind": {"type": "string"}},
+                "discriminator": {"propertyName": "pet\nkind"}},
+            "Cat": {"allOf": [{"$ref": "#/components/schemas/Pet"}, {"type": "object"}]}
+        })),
+        &rust_config(""),
+    );
+    assert!(g.is_ok(), "{:?}", g.err());
+}

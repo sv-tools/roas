@@ -360,11 +360,19 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
     }
     // What was left out of a parent's union, once it is settled whether
     // the parent is generated at all.
-    for (parent, value, read_as) in std::mem::take(&mut ir.pruned) {
-        if !ir.suppressed.contains(&parent) {
-            ir.diagnostics
-                .push(crate::lower::pruned(&parent, &value, read_as.as_deref()));
+    for (parent, value) in std::mem::take(&mut ir.pruned) {
+        if ir.suppressed.contains(&parent) {
+            continue;
         }
+        // What the union reads the tag as now, once every pass is done.
+        let read_as = ir.types.values().find_map(|def| match &def.kind {
+            crate::ir::TypeKind::UnionTagged(u) if u.parent.as_ref() == Some(&parent) => u
+                .fallback
+                .and_then(|i| u.variants[i].suggested_name.first().cloned()),
+            _ => None,
+        });
+        ir.diagnostics
+            .push(crate::lower::pruned(&parent, &value, read_as.as_deref()));
     }
     point_into_source(&mut ir.diagnostics, document.version());
     diagnostics.append(&mut ir.diagnostics);

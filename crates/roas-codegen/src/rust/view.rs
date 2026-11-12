@@ -996,7 +996,7 @@ impl Builder<'_> {
                         name,
                         value: variant.value.clone(),
                         ty,
-                        doc: vec![format!("`{}: {:?}`", u.tag, variant.value)],
+                        doc: vec![format!("`{}: {:?}`", u.tag.escape_debug(), variant.value)],
                         attrs: cfg.clone(),
                         cfg,
                         literal: format!("{:?}", variant.value),

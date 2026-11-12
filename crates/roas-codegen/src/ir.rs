@@ -302,9 +302,8 @@ pub(crate) struct Ir {
     pub diagnostics: Vec<Diagnostic>,
     /// Types not emitted: their own error, or a dependency's.
     pub suppressed: BTreeSet<SchemaId>,
-    /// Schemas left out of their parent's union: the parent, the tag, and
-    /// what the tag is read as instead.
-    pub pruned: Vec<(SchemaId, String, Option<String>)>,
+    /// Schemas left out of their parent's union: the parent and the tag.
+    pub pruned: Vec<(SchemaId, String)>,
 }
 
 impl Ir {
@@ -387,14 +386,7 @@ impl Ir {
             u.fallback = fallback
                 .and_then(|ty| u.variants.iter().position(|v| v.ty == ty))
                 .or_else(|| u.variants.iter().position(|v| v.ty == parent_ty));
-            let read_as = u
-                .fallback
-                .and_then(|i| u.variants[i].suggested_name.first().cloned());
-            notes.extend(
-                gone_values
-                    .into_iter()
-                    .map(|v| (parent.clone(), v, read_as.clone())),
-            );
+            notes.extend(gone_values.into_iter().map(|v| (parent.clone(), v)));
         }
         self.suppressed = closure(self, &BTreeSet::new());
         self.pruned.extend(notes);
