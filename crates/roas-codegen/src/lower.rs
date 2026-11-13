@@ -52,7 +52,10 @@ pub(crate) fn lower(front: &Front, config: &Config) -> Ir {
     let mut lowerer = Lowerer {
         front,
         config,
-        ir: Ir::default(),
+        ir: Ir {
+            exact_numbers: config.exact_numbers,
+            ..Ir::default()
+        },
         owners: Vec::new(),
         proven_tags: BTreeSet::new(),
         component_ids: front
@@ -1006,7 +1009,11 @@ impl<'a> Lowerer<'a> {
                     };
                     self.warn(DiagnosticKind::NumericEnum, &schema.id, format!("`enum` over numbers is not represented in the type, which stays a number; the values are listed in its documentation{checked}"));
                 }
-                TypeRef::Number(width.unwrap_or(FloatWidth::Double))
+                if self.config.exact_numbers {
+                    TypeRef::Decimal
+                } else {
+                    TypeRef::Number(width.unwrap_or(FloatWidth::Double))
+                }
             }
             Kind::Boolean => TypeRef::Boolean,
             Kind::Null => TypeRef::Null,
@@ -1781,6 +1788,26 @@ impl<'a> Lowerer<'a> {
 
     fn number_diagnostics(&mut self, schema: &FrontSchema, integer: bool) {
         let c = &schema.constraints;
+        // Held exactly, a number loses nothing to its type. A bound no
+        // decimal holds still decides every value, and a listed value no
+        // decimal holds is no value's; only a `multipleOf` no decimal holds
+        // leaves values unevaluated — said only where validation hears it.
+        if !integer && self.config.exact_numbers {
+            if let Some(n) = &c.multiple_of
+                && crate::checks::dec(n).is_none()
+                && self.config.validation
+            {
+                self.warn(
+                    DiagnosticKind::LossyNumber,
+                    &schema.id,
+                    format!(
+                        "`multipleOf` {n} is past the {} significant digits and 32-bit exponent an exact decimal holds; values are reported as unevaluated against it",
+                        crate::checks::MAX_DIGITS
+                    ),
+                );
+            }
+            return;
+        }
         if integer {
             let (lo, hi): (i128, i128) = match &schema.kind {
                 Kind::Integer {

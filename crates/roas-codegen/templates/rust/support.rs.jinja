@@ -109,6 +109,221 @@ impl From<Int32> for i32 {
     }
 }
 
+{% endif %}{% if support.decimal %}/// A `number` on the wire, held exactly: `mantissa × 10^exponent`, with at
+/// most 38 significant digits and an `i32` exponent. Decoded from the
+/// number's own JSON token, so nothing is rounded; written in its shortest
+/// form, so `1.50` is written back as `1.5`. A number past those limits is
+/// refused at decode rather than rounded. Through `serde_json::Value`, as
+/// `to_value` and `from_value` go, it is read as a float and rounded: use
+/// JSON text.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Decimal {
+    // Canonical: no trailing zero in the mantissa, zero as `0 × 10^0`.
+    mantissa: i128,
+    exponent: i32,
+}
+
+impl Decimal {
+    /// The most significant digits a `Decimal` holds.
+    pub const MAX_DIGITS: u32 = 38;
+
+    /// `mantissa × 10^exponent`, or `None` past 38 significant digits or
+    /// an exponent past `i32`.
+    pub fn new(mut mantissa: i128, mut exponent: i32) -> Option<Self> {
+        if mantissa == 0 {
+            return Some(Self::default());
+        }
+        while mantissa % 10 == 0 {
+            mantissa /= 10;
+            exponent = exponent.checked_add(1)?;
+        }
+        (mantissa.unsigned_abs() < 10u128.pow(Self::MAX_DIGITS)).then_some(Self { mantissa, exponent })
+    }
+
+    /// The significant digits, signed, with no trailing zero.
+    pub fn mantissa(&self) -> i128 {
+        self.mantissa
+    }
+
+    /// The power of ten the mantissa is scaled by.
+    pub fn exponent(&self) -> i32 {
+        self.exponent
+    }
+
+    /// The nearest `f64`.
+    pub fn to_f64(self) -> f64 {
+        self.to_string().parse().unwrap_or(f64::NAN)
+    }
+
+    /// Whether `self` is an integer multiple of `divisor`, decided exactly.
+    pub fn is_multiple_of(&self, divisor: &Self) -> bool {
+        if self.mantissa == 0 {
+            return true;
+        }
+        if divisor.mantissa == 0 {
+            return false;
+        }
+        // A canonical mantissa ends in no zero, so it is no multiple of a
+        // mantissa scaled by a further power of ten.
+        let shift = i64::from(self.exponent) - i64::from(divisor.exponent);
+        if shift < 0 {
+            return false;
+        }
+        // `m × 10^shift` is a multiple of `d` exactly when `m` is one of
+        // `d` with the twos and fives `10^shift` supplies taken out.
+        let mut d = divisor.mantissa.unsigned_abs();
+        for p in [2, 5] {
+            let mut taken = 0;
+            while taken < shift && d % p == 0 {
+                d /= p;
+                taken += 1;
+            }
+        }
+        self.mantissa.unsigned_abs() % d == 0
+    }
+
+    /// Parse a JSON number token. `None` for anything else, and past the
+    /// limits a `Decimal` holds.
+    fn token(text: &str) -> Option<Self> {
+        let (negative, rest) = match text.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, text),
+        };
+        let (mantissa, exponent) = match rest.split_once(['e', 'E']) {
+            Some((m, e)) => {
+                // Saturate an exponent too long for `i64`: zero is still
+                // zero, and anything else is out of range either way.
+                let (negative, digits) = match e.strip_prefix('-') {
+                    Some(d) => (true, d),
+                    None => (false, e.strip_prefix('+').unwrap_or(e)),
+                };
+                if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                let magnitude = digits.parse::<i64>().unwrap_or(i64::MAX);
+                (m, if negative { -magnitude } else { magnitude })
+            }
+            None => (rest, 0),
+        };
+        let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+        if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) || !fraction.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let digits = format!("{whole}{fraction}");
+        let digits = digits.trim_start_matches('0');
+        let significant = digits.trim_end_matches('0');
+        if significant.is_empty() {
+            return Some(Self::default());
+        }
+        if significant.len() > Self::MAX_DIGITS as usize {
+            return None;
+        }
+        let exponent = exponent
+            .saturating_sub(i64::try_from(fraction.len()).ok()?)
+            .saturating_add(i64::try_from(digits.len() - significant.len()).ok()?);
+        let magnitude: i128 = significant.parse().ok()?;
+        Some(Self {
+            mantissa: if negative { -magnitude } else { magnitude },
+            exponent: i32::try_from(exponent).ok()?,
+        })
+    }
+}
+
+impl std::str::FromStr for Decimal {
+    type Err = String;
+
+    /// A number as JSON writes one: `-12.5`, `1e-3`, `0.10`.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Self::token(text).ok_or_else(|| format!("`{text}` is not a number with at most 38 significant digits and an exponent in the i32 range"))
+    }
+}
+
+impl From<i64> for Decimal {
+    fn from(value: i64) -> Self {
+        Self::new(i128::from(value), 0).expect("an i64 has at most 19 digits")
+    }
+}
+
+impl std::fmt::Display for Decimal {
+    /// The shortest JSON number for the value: plain unless its point
+    /// lies far from its digits, as JavaScript writes numbers.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sign = if self.mantissa < 0 { "-" } else { "" };
+        let digits = self.mantissa.unsigned_abs().to_string();
+        let count = digits.len() as i64;
+        let exponent = i64::from(self.exponent);
+        // The power of ten of the leading digit.
+        let leading = count - 1 + exponent;
+        let text = if !(-6..21).contains(&leading) {
+            let (first, rest) = digits.split_at(1);
+            let point = if rest.is_empty() { "" } else { "." };
+            format!("{sign}{first}{point}{rest}e{leading}")
+        } else if exponent >= 0 {
+            format!("{sign}{digits}{}", "0".repeat(exponent as usize))
+        } else if count + exponent > 0 {
+            let (whole, fraction) = digits.split_at((count + exponent) as usize);
+            format!("{sign}{whole}.{fraction}")
+        } else {
+            format!("{sign}0.{}{digits}", "0".repeat((-(count + exponent)) as usize))
+        };
+        f.pad(&text)
+    }
+}
+
+impl std::fmt::Debug for Decimal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Decimal({self})")
+    }
+}
+
+impl Ord for Decimal {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let signs = self.mantissa.signum().cmp(&other.mantissa.signum());
+        if signs.is_ne() || self.mantissa == 0 {
+            return signs;
+        }
+        let (a, b) = (self.mantissa.unsigned_abs(), other.mantissa.unsigned_abs());
+        let leading = |m: u128, exponent: i32| i64::from(m.ilog10()) + i64::from(exponent);
+        let magnitude = match leading(a, self.exponent).cmp(&leading(b, other.exponent)) {
+            // The same leading power of ten: the exponents differ by the
+            // digit counts, so the shorter mantissa, scaled to the longer,
+            // still has at most 38 digits.
+            std::cmp::Ordering::Equal => {
+                let shift = i64::from(self.exponent) - i64::from(other.exponent);
+                if shift >= 0 {
+                    (a * 10u128.pow(shift as u32)).cmp(&b)
+                } else {
+                    a.cmp(&(b * 10u128.pow((-shift) as u32)))
+                }
+            }
+            unequal => unequal,
+        };
+        if self.mantissa < 0 { magnitude.reverse() } else { magnitude }
+    }
+}
+
+impl PartialOrd for Decimal {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Serialize for Decimal {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Written as the number token itself, not through a float.
+        serde_json::value::RawValue::from_string(self.to_string())
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Decimal {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw: Box<serde_json::value::RawValue> = Deserialize::deserialize(deserializer)?;
+        Self::token(raw.get().trim()).ok_or_else(|| serde::de::Error::custom(format!("`{}` is not a number with at most 38 significant digits and an exponent in the i32 range", raw.get())))
+    }
+}
+
 {% endif %}{% if support.raw_json %}/// A member held as the JSON text it was read from, so that it can be read
 /// again as each schema it is checked against.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,7 +536,73 @@ mod require_present {
     }
 }
 
-{% endif %}{% if support.validation %}/// Whether `raw` has a number a generated type may fail to decode for its
+{% endif %}{% if support.validation %}{% if support.exact_numbers %}/// Whether `raw` has a number a generated type may fail to decode for its
+/// range rather than its value: a whole number from `int_limit` on, one
+/// past the 32-bit float range when `float32` holds, one no `Decimal`
+/// holds when `decimal` does, or one past `f64` when no `Decimal` is
+/// reachable, or one is and a type reading floats (`float`) is too — or
+/// nests deeper than the decoder reads.
+/// A union branch that fails to decode such a value proves no mismatch.
+#[allow(dead_code)]
+fn wide_number(raw: &str, int_limit: f64, float32: bool, decimal: bool, float: bool) -> bool {
+    let bytes = raw.as_bytes();
+    let (mut i, mut in_string, mut depth) = (0, false, 0usize);
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            match b {
+                // A lone surrogate escape is raw JSON serde_json captures
+                // but will not read as a string.
+                b'\\' if bytes.get(i + 1) == Some(&b'u')
+                    && bytes.get(i + 2).is_some_and(|c| c.eq_ignore_ascii_case(&b'd'))
+                    && bytes.get(i + 3).is_some_and(|c| matches!(c, b'8'..=b'9' | b'a'..=b'f' | b'A'..=b'F')) =>
+                {
+                    return true;
+                }
+                b'\\' => i += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            in_string = true;
+        } else if b == b'[' || b == b'{' {
+            // Nested past serde_json's limit, a branch fails to decode
+            // for the decoder, not the schema.
+            depth += 1;
+            if depth > 120 {
+                return true;
+            }
+        } else if b == b']' || b == b'}' {
+            depth = depth.saturating_sub(1);
+        } else if b == b'-' || b.is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && matches!(bytes[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-') {
+                i += 1;
+            }
+            let f: f64 = raw[start..i].parse().unwrap_or(f64::INFINITY);
+{% if support.decimal %}            if decimal && Decimal::token(&raw[start..i]).is_none() {
+                return true;
+            }
+{% endif %}            if !f.is_finite() {
+                // A `Decimal` holds it: only a type reading it as a float fails.
+                if !decimal || float {
+                    return true;
+                }
+            } else if (f.fract() == 0.0 && f.abs() >= int_limit)
+                || (float32 && f.abs() > f64::from(f32::MAX))
+            {
+                return true;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+{% else %}/// Whether `raw` has a number a generated type may fail to decode for its
 /// range rather than its value: a whole number from `int_limit` on, one
 /// past the 32-bit float range when `float32` holds, or one past `f64` —
 /// or nests deeper than the decoder reads.
@@ -378,7 +659,7 @@ fn wide_number(raw: &str, int_limit: f64, float32: bool) -> bool {
     }
     false
 }
-
+{% endif %}
 /// What [`Validate`] found: every constraint a value breaks, and every one
 /// it could not check. Findings collect rather than stop at the first.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

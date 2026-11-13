@@ -42,6 +42,20 @@ pub(crate) struct Context<'a> {
     pub needs: Needs,
 }
 
+/// An exact decimal as a `Decimal` literal.
+fn decimal(d: &checks::Dec) -> String {
+    let digits = d.mantissa.unsigned_abs().to_string();
+    if d.mantissa == 0 {
+        "Decimal{}".to_owned()
+    } else {
+        format!(
+            "Decimal{{negative: {}, digits: \"{digits}\", exponent: {}}}",
+            d.mantissa < 0,
+            d.exponent
+        )
+    }
+}
+
 fn lit(text: &str) -> String {
     crate::go::naming::quote(text)
 }
@@ -64,6 +78,8 @@ fn render(
     needs: &mut Needs,
 ) -> bool {
     let At { e, p, r } = at;
+    // A named number type has none of `Decimal`'s methods: converted.
+    let x = format!("Decimal({e})");
     // Some checks only report that they could not be made, and a bound
     // beyond every value emits nothing: the value is read only when a
     // check that reads it emitted something.
@@ -225,6 +241,23 @@ fn render(
                             format!("switch int64({e}) {{ case {list}: default: {missed} }}")
                         });
                     }
+                    ValueKind::Decimal => {
+                        // Exactly.
+                        let mut set: Vec<checks::Dec> =
+                            values.iter().filter_map(checks::dec).collect();
+                        set.dedup();
+                        // A listed value no decimal holds is no value's.
+                        let violation = format!(
+                            "{r}.violation({p}, fmt.Sprintf({}, {x}))",
+                            lit(&format!("%v is not {what}"))
+                        );
+                        out.push(if set.is_empty() {
+                            violation
+                        } else {
+                            let list = set.iter().map(decimal).collect::<Vec<_>>().join(", ");
+                            format!("switch {x} {{ case {list}: default: {violation} }}")
+                        });
+                    }
                     ValueKind::Number(FloatWidth::Float) => {
                         // A `float` equal to a value is ambiguous: literals
                         // around it decode to it, as at a bound.
@@ -311,12 +344,7 @@ fn render(
                 literal,
             } => {
                 let at_least = matches!(check, Check::NumAtLeast { .. });
-                let (op, keyword, word) = match (at_least, exclusive) {
-                    (true, false) => (">=", "minimum", "below"),
-                    (true, true) => (">", "exclusiveMinimum", "below"),
-                    (false, false) => ("<=", "maximum", "above"),
-                    (false, true) => ("<", "exclusiveMaximum", "above"),
-                };
+                let (op, keyword, word) = checks::bound_words(at_least, *exclusive);
                 let float = matches!(kind, ValueKind::Number(FloatWidth::Float));
                 // Compared at the value's own width: a float32 bound is the
                 // constant rounded to float32, as the value was.
@@ -367,6 +395,46 @@ fn render(
                     ));
                 }
             }
+            Check::DecAtLeast {
+                bound,
+                exclusive,
+                keyword,
+                literal,
+            }
+            | Check::DecAtMost {
+                bound,
+                exclusive,
+                keyword,
+                literal,
+            } => {
+                let at_least = matches!(check, Check::DecAtLeast { .. });
+                let (op, _, word) = checks::bound_words(at_least, *exclusive);
+                out.push(format!(
+                    "if !({x}.Cmp({}) {op} 0) {{ {r}.violation({p}, fmt.Sprintf({}, {x})) }}",
+                    decimal(bound),
+                    lit(&format!("%v is {word} {keyword} {literal}"))
+                ));
+            }
+            Check::DecOutside {
+                at_least,
+                exclusive,
+                literal,
+            } => {
+                let (_, keyword, word) = checks::bound_words(*at_least, *exclusive);
+                out.push(format!(
+                    "{r}.violation({p}, fmt.Sprintf({}, {x}))",
+                    lit(&format!("%v is {word} {keyword} {literal}"))
+                ));
+            }
+            Check::DecMultipleUnheld { literal } => out.push(format!(
+                "if {x}.sign() != 0 {{ {r}.unevaluated({p}, {}) }}",
+                lit(&format!("multipleOf: {literal} is past what an exact decimal holds"))
+            )),
+            Check::DecMultipleOf { divisor, literal } => out.push(format!(
+                "if !{x}.IsMultipleOf({}) {{ {r}.violation({p}, fmt.Sprintf({}, {x})) }}",
+                decimal(divisor),
+                lit(&format!("%v is not a multiple of {literal}"))
+            )),
             Check::NumMultipleOf { integral, literal } => {
                 let unevaluated = format!(
                     "{r}.unevaluated({p}, {})",
@@ -399,6 +467,7 @@ fn render(
                     Some(TypeRef::String) => "string",
                     Some(TypeRef::Boolean) => "bool",
                     Some(TypeRef::Integer(IntWidth::Int32)) => "Int32",
+                    Some(TypeRef::Decimal) => "Decimal",
                     _ => "Int64",
                 };
                 out.push(format!(
@@ -595,11 +664,14 @@ fn go_wide<'a>(ir: &crate::ir::Ir, tys: impl Iterator<Item = &'a TypeRef>) -> St
 /// [`go_wide`] over the raw JSON `raw`.
 fn go_wide_of<'a>(ir: &crate::ir::Ir, tys: impl Iterator<Item = &'a TypeRef>, raw: &str) -> String {
     let tys: Vec<&TypeRef> = tys.collect();
-    let (limit, float32) = checks::number_range(ir, &tys);
-    format!(
-        "wideNumber({raw}, {}, {float32})",
-        limit.unwrap_or("math.Inf(1)")
-    )
+    let (limit, float32, decimal, float) = checks::number_range(ir, &tys);
+    let limit = limit.unwrap_or("math.Inf(1)");
+    // Spelled as before `exact_numbers` existed when it is off.
+    if ir.exact_numbers {
+        format!("wideNumber({raw}, {limit}, {float32}, {decimal}, {float})")
+    } else {
+        format!("wideNumber({raw}, {limit}, {float32})")
+    }
 }
 
 /// The checks on one member a struct holds raw beside `patternProperties`,

@@ -50,6 +50,14 @@ fn float_bound(bound: f64, width: FloatWidth) -> Result<String, f64> {
     }
 }
 
+/// An exact decimal as a `Decimal` constant.
+fn decimal(d: &checks::Dec) -> String {
+    format!(
+        "Decimal {{ mantissa: {}, exponent: {} }}",
+        d.mantissa, d.exponent
+    )
+}
+
 /// Statements checking `list` at `at`. True when they read the value: some
 /// checks only report that they could not be made.
 fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) -> bool {
@@ -128,12 +136,7 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                 literal,
             } => {
                 let at_least = matches!(check, Check::NumAtLeast { .. });
-                let (op, keyword, word) = match (at_least, exclusive) {
-                    (true, false) => (">=", "minimum", "below"),
-                    (true, true) => (">", "exclusiveMinimum", "below"),
-                    (false, false) => ("<=", "maximum", "above"),
-                    (false, true) => ("<", "exclusiveMaximum", "above"),
-                };
+                let (op, keyword, word) = checks::bound_words(at_least, *exclusive);
                 let width = match kind {
                     ValueKind::Number(width) => width,
                     _ => FloatWidth::Double,
@@ -239,6 +242,22 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                             format!("if ![{list}].contains(&{int}) {{ {missed} }}")
                         });
                     }
+                    ValueKind::Decimal => {
+                        // Exactly.
+                        let mut set: Vec<checks::Dec> =
+                            values.iter().filter_map(checks::dec).collect();
+                        set.dedup();
+                        // A listed value no decimal holds is no value's.
+                        let violation = format!(
+                            "{r}.violation({p}, format!(\"{{}} is not {what}\", {v}));"
+                        );
+                        out.push(if set.is_empty() {
+                            violation
+                        } else {
+                            let list = set.iter().map(decimal).collect::<Vec<_>>().join(", ");
+                            format!("if ![{list}].contains(&*{v}) {{ {violation} }}")
+                        });
+                    }
                     ValueKind::Number(FloatWidth::Float) => {
                         // A `float` equal to a value is ambiguous: literals
                         // around it decode to it, as at a bound.
@@ -312,6 +331,43 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                     }
                 }
             }
+            Check::DecAtLeast {
+                bound,
+                exclusive,
+                keyword,
+                literal,
+            }
+            | Check::DecAtMost {
+                bound,
+                exclusive,
+                keyword,
+                literal,
+            } => {
+                let at_least = matches!(check, Check::DecAtLeast { .. });
+                let (op, _, word) = checks::bound_words(at_least, *exclusive);
+                out.push(format!(
+                    "if !(*{v} {op} {}) {{ {r}.violation({p}, format!(\"{{}} is {word} {keyword} {literal}\", {v})); }}",
+                    decimal(bound)
+                ));
+            }
+            Check::DecOutside {
+                at_least,
+                exclusive,
+                literal,
+            } => {
+                let (_, keyword, word) = checks::bound_words(*at_least, *exclusive);
+                out.push(format!(
+                    "{r}.violation({p}, format!(\"{{}} is {word} {keyword} {literal}\", {v}));"
+                ));
+            }
+            Check::DecMultipleUnheld { literal } => out.push(format!(
+                "if {v}.mantissa() != 0 {{ {r}.unevaluated({p}, {:?}); }}",
+                format!("multipleOf: {literal} is past what an exact decimal holds")
+            )),
+            Check::DecMultipleOf { divisor, literal } => out.push(format!(
+                "if !{v}.is_multiple_of(&{}) {{ {r}.violation({p}, format!(\"{{}} is not a multiple of {literal}\", {v})); }}",
+                decimal(divisor)
+            )),
             Check::NumMultipleOf { integral, literal } => {
                 let unevaluated = format!(
                     "{r}.unevaluated({p}, \"multipleOf {literal}: a decoded float has lost its literal, so only a fraction against a whole multiple is decided\")"
@@ -559,11 +615,14 @@ fn rust_wide_of<'a>(
     raw: &str,
 ) -> String {
     let tys: Vec<&TypeRef> = tys.collect();
-    let (limit, float32) = checks::number_range(ir, &tys);
-    format!(
-        "wide_number({raw}, {}, {float32})",
-        limit.unwrap_or("f64::INFINITY")
-    )
+    let (limit, float32, decimal, float) = checks::number_range(ir, &tys);
+    let limit = limit.unwrap_or("f64::INFINITY");
+    // Spelled as before `exact_numbers` existed when it is off.
+    if ir.exact_numbers {
+        format!("wide_number({raw}, {limit}, {float32}, {decimal}, {float})")
+    } else {
+        format!("wide_number({raw}, {limit}, {float32})")
+    }
 }
 
 /// The checks on one member a struct holds raw beside `patternProperties`,

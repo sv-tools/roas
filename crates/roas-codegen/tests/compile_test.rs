@@ -2125,3 +2125,443 @@ fn generated_go_validation_compiles_and_behaves() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[cfg(feature = "exact-numbers")]
+fn exact_generation(target: Target) -> roas_codegen::Generation {
+    let description = serde_json::json!({
+        "openapi": "3.1.0",
+        "info": {"title": "t", "version": "1"},
+        "paths": {},
+        "components": {"schemas": {
+            "Price": {"type": "object", "required": ["amount"], "properties": {
+                "amount": {"type": "number", "minimum": 0, "exclusiveMaximum": 1000000, "multipleOf": 0.01},
+                "rate": {"type": "number", "format": "float", "minimum": 0.1},
+                "big": {"type": "number"},
+                "tags": {"type": "array", "items": {"type": "number"}, "uniqueItems": true},
+                "code": {"type": "number", "enum": [1.5, 2.50, 1e2]},
+                "half": {"type": "number", "multipleOf": 0.5},
+                "fixed": {"type": "number", "const": -0.25}
+            }},
+            "Rates": {"type": "array", "items": {"type": "number", "maximum": 1}},
+            "Either": {"oneOf": [{"type": "number"}, {"type": "string"}]},
+            "Pat": {"type": "object", "patternProperties": {"^x": {"type": "number"}}},
+            "Neg": {"type": "number", "exclusiveMinimum": -1, "maximum": -0.5},
+            "Nul": {"type": ["number", "null"], "enum": [1.5, null]},
+            "Zero": {"type": "number", "const": 0},
+            "Top": {"type": "number", "multipleOf": 0.25},
+            "Disc": {"oneOf": [
+                {"type": "number", "maximum": 2},
+                {"type": "boolean"},
+                {"type": "array", "items": {"type": "number", "minimum": 0}}
+            ]}
+        }}
+    });
+    let mut description = description;
+    // Literals past what a decimal holds, read from text: `json!` would
+    // read them as floats.
+    description["components"]["schemas"]["Long"] = serde_json::from_str(
+        r#"{"type": "object", "properties": {
+            "lo": {"type": "number", "minimum": 0.10000000000000000000000000000000000000001},
+            "hi": {"type": "number", "exclusiveMaximum": 0.10000000000000000000000000000000000000001},
+            "huge": {"type": "number", "maximum": 1e3000000000},
+            "never": {"type": "number", "minimum": 1e3000000000},
+            "tiny": {"type": "number", "exclusiveMinimum": -1e-3000000000},
+            "pick": {"type": "number", "enum": [1, 1.000000000000000000000000000000000000001]},
+            "only": {"type": "number", "const": 1.000000000000000000000000000000000000001},
+            "odd": {"type": "number", "multipleOf": 1.000000000000000000000000000000000000001},
+            "edge": {"type": "number", "minimum": 1e2147483648}
+        }}"#,
+    )
+    .unwrap();
+    let bytes = serde_json::to_vec(&description).unwrap();
+    let doc =
+        SourceDocument::parse(Input::Json(bytes), Url::parse("file:///x.json").unwrap()).unwrap();
+    let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
+    let mut config = ConfigFile::default();
+    config.target = Some(target);
+    config.validation = Some(true);
+    config.exact_numbers = Some(true);
+    let generation = generate(&doc, &config.build().unwrap()).expect("generates");
+    assert!(!generation.has_errors(), "{:?}", generation.diagnostics);
+    generation
+}
+
+#[cfg(feature = "exact-numbers")]
+const EXACT_MAIN: &str = r##"
+#[allow(dead_code)]
+mod types;
+use types::*;
+
+fn report<T: serde::de::DeserializeOwned + Validate>(json: &str) -> Vec<(String, FindingKind)> {
+    let value: T = serde_json::from_str(json).unwrap_or_else(|e| panic!("{json}: {e}"));
+    let mut found: Vec<_> = value.validate().findings.into_iter().map(|f| (f.pointer, f.kind)).collect();
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found
+}
+
+fn v(pointer: &str) -> (String, FindingKind) {
+    (pointer.to_owned(), FindingKind::Violation)
+}
+
+fn u(pointer: &str) -> (String, FindingKind) {
+    (pointer.to_owned(), FindingKind::Unevaluated)
+}
+
+fn d(text: &str) -> Decimal {
+    text.parse().unwrap()
+}
+
+fn round_trip<T: serde::de::DeserializeOwned + serde::Serialize>(json: &str) -> String {
+    serde_json::to_string(&serde_json::from_str::<T>(json).unwrap()).unwrap()
+}
+
+fn main() {
+    // Held exactly, written in the shortest form.
+    let price: Price = serde_json::from_str(r#"{"amount":12.30}"#).unwrap();
+    assert_eq!(price.amount, d("12.3"));
+    assert_eq!(round_trip::<Price>(r#"{"amount":12.30}"#), r#"{"amount":12.3}"#);
+    let exact = r#"{"amount":0,"big":1.0000000000000000000000000000000000001}"#;
+    assert_eq!(round_trip::<Price>(exact), exact);
+    assert_eq!(
+        round_trip::<Price>(r#"{"amount":0,"big":123456789012345678901234567890123456e100}"#),
+        r#"{"amount":0,"big":1.23456789012345678901234567890123456e135}"#
+    );
+    assert_eq!(round_trip::<Price>(r#"{"amount":0,"big":0.000001}"#), r#"{"amount":0,"big":0.000001}"#);
+    assert_eq!(round_trip::<Price>(r#"{"amount":0,"big":1e-7}"#), r#"{"amount":0,"big":1e-7}"#);
+    assert_eq!(round_trip::<Price>(r#"{"amount":0,"big":-12e-8}"#), r#"{"amount":0,"big":-1.2e-7}"#);
+    assert_eq!(format!("[{:>6}]", d("-1.5")), "[  -1.5]");
+    assert_eq!(round_trip::<Price>(r#"{"amount":0,"big":-1E+21}"#), r#"{"amount":0,"big":-1e21}"#);
+    assert_eq!(round_trip::<Price>(r#"{"amount":-0.0}"#), r#"{"amount":0}"#);
+    // Past 38 digits or an i32 exponent, and anything but a number, is refused.
+    for json in [
+        r#"{"amount":1.000000000000000000000000000000000000001}"#,
+        r#"{"amount":1e2147483648}"#,
+        r#"{"amount":"1.5"}"#,
+        r#"{"amount":null}"#,
+    ] {
+        assert!(serde_json::from_str::<Price>(json).is_err(), "{json}");
+    }
+    assert_eq!(round_trip::<Price>(r#"{"amount":0e999999999999}"#), r#"{"amount":0}"#);
+    // Ordered exactly, and constructed from parts.
+    assert!(d("-1.5") < d("-1.25") && d("1e-30") < d("1e30") && d("0.1") > d("0.09999999999999999999999"));
+    assert_eq!(Decimal::new(1500, -3), Some(d("1.5")));
+    assert_eq!(Decimal::new(1, -1).map(|x| x.to_f64()), Some(0.1));
+    assert!(d("1e30").is_multiple_of(&d("1e-30")) && !d("1e-30").is_multiple_of(&d("0.5")));
+    // Every check decided, exactly.
+    assert_eq!(report::<Price>(r#"{"amount":999999.99}"#), vec![]);
+    assert_eq!(report::<Price>(r#"{"amount":0.015}"#), vec![v("/amount")]);
+    assert_eq!(report::<Price>(r#"{"amount":1000000}"#), vec![v("/amount")]);
+    assert_eq!(report::<Price>(r#"{"amount":-0.01}"#), vec![v("/amount")]);
+    assert_eq!(report::<Price>(r#"{"amount":0,"rate":0.1}"#), vec![]);
+    assert_eq!(report::<Price>(r#"{"amount":0,"rate":0.09999999999999999999}"#), vec![v("/rate")]);
+    assert_eq!(report::<Price>(r#"{"amount":0,"tags":[1,1.0]}"#), vec![v("/tags/1")]);
+    assert_eq!(report::<Price>(r#"{"amount":0,"tags":[0.1,0.10000000000000000001]}"#), vec![]);
+    assert_eq!(report::<Price>(r#"{"amount":0,"code":2.5}"#), vec![]);
+    assert_eq!(report::<Price>(r#"{"amount":0,"code":100}"#), vec![]);
+    assert_eq!(report::<Price>(r#"{"amount":0,"code":2.51}"#), vec![v("/code")]);
+    assert_eq!(report::<Price>(r#"{"amount":0,"half":1e30}"#), vec![]);
+    assert_eq!(report::<Price>(r#"{"amount":0,"half":1e-30}"#), vec![v("/half")]);
+    assert_eq!(report::<Price>(r#"{"amount":0,"fixed":-0.250}"#), vec![]);
+    assert_eq!(report::<Price>(r#"{"amount":0,"fixed":-0.26}"#), vec![v("/fixed")]);
+    assert_eq!(report::<Rates>(r#"[1, 1.0000000000000000000000001]"#), vec![v("/1")]);
+    // A bound with more digits than a decimal holds still decides every value.
+    let long = r#"{"lo":0.1000000000000000000000000000000000001,"hi":0.1,"huge":1e300,"tiny":0,"pick":1}"#;
+    assert_eq!(report::<Long>(long), vec![]);
+    assert_eq!(report::<Long>(r#"{"lo":0.1}"#), vec![v("/lo")]);
+    assert_eq!(report::<Long>(r#"{"hi":0.1000000000000000000000000000000000001}"#), vec![v("/hi")]);
+    assert_eq!(report::<Long>(r#"{"never":1e300}"#), vec![v("/never")]);
+    assert_eq!(report::<Long>(r#"{"tiny":-1e-30}"#), vec![v("/tiny")]);
+    assert_eq!(report::<Long>(r#"{"pick":2}"#), vec![v("/pick")]);
+    assert_eq!(report::<Long>(r#"{"only":1}"#), vec![v("/only")]);
+    assert_eq!(report::<Long>(r#"{"odd":3}"#), vec![u("/odd")]);
+    assert_eq!(report::<Long>(r#"{"odd":0}"#), vec![]);
+    assert_eq!(report::<Long>(r#"{"edge":1.1e2147483648}"#), vec![]);
+    assert_eq!(report::<Long>(r#"{"edge":9e2147483647}"#), vec![v("/edge")]);
+    // A rounded bound is still named by its keyword.
+    let found = serde_json::from_str::<Long>(r#"{"hi":0.1000000000000000000000000000000000001}"#).unwrap().validate();
+    assert!(found.findings[0].message.contains("exclusiveMaximum"), "{found:?}");
+    // A number no decimal holds fails a branch for its representation:
+    // nothing is proven.
+    let wide = "1.000000000000000000000000000000000000001";
+    assert_eq!(report::<Either>(r#""s""#), vec![]);
+    assert_eq!(report::<Either>(wide), vec![u("")]);
+    // Past every f64, but a decimal holds it: decided.
+    assert_eq!(report::<Either>("1e400"), vec![]);
+    assert_eq!(report::<Disc>("1e400"), vec![v("")]);
+    assert_eq!(report::<Disc>("[1e400]"), vec![]);
+    assert_eq!(report::<Pat>(&format!(r#"{{"x1":{wide}}}"#)), vec![u("/x1")]);
+    // A top-level number is checked as one.
+    assert_eq!(report::<Neg>("-0.75"), vec![]);
+    assert_eq!(report::<Neg>("-1"), vec![v("")]);
+    assert_eq!(report::<Neg>("-0.25"), vec![v("")]);
+    assert_eq!(report::<Nul>("1.50"), vec![]);
+    assert_eq!(report::<Nul>("2"), vec![v("")]);
+    assert_eq!(report::<Zero>("0.0"), vec![]);
+    assert_eq!(report::<Zero>("1"), vec![v("")]);
+    assert_eq!(report::<Top>("1.75"), vec![]);
+    assert_eq!(report::<Top>("1.7"), vec![v("")]);
+    let found = serde_json::from_str::<Top>("1.7").unwrap().validate();
+    assert!(found.findings[0].message.starts_with("1.7 is not"), "{found:?}");
+    println!("exact numbers behave");
+}
+"##;
+
+#[cfg(feature = "exact-numbers")]
+#[test]
+fn generated_rust_exact_numbers_compile_and_behave() {
+    if std::env::var_os("ROAS_CODEGEN_SKIP_COMPILE").is_some() {
+        eprintln!("skipped: ROAS_CODEGEN_SKIP_COMPILE is set");
+        return;
+    }
+    let generation = exact_generation(Target::Rust);
+    let dir = std::env::temp_dir().join(format!("roas-codegen-exact-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let deps: String = generation
+        .dependencies
+        .rust
+        .iter()
+        .map(|d| {
+            format!(
+                "{} = {{ version = \"1\", features = {:?} }}\n",
+                d.name, d.features
+            )
+        })
+        .collect();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!("[package]\nname = \"generated\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\n{deps}"),
+    )
+    .unwrap();
+    for file in &generation.files {
+        std::fs::write(dir.join("src").join(&file.path), &file.contents).unwrap();
+    }
+    std::fs::write(dir.join("src/main.rs"), EXACT_MAIN).unwrap();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let output = Command::new(cargo)
+        .args(["run", "--quiet"])
+        .current_dir(&dir)
+        .env("CARGO_TARGET_DIR", dir.join("target"))
+        .env("RUSTFLAGS", "-D warnings")
+        .output()
+        .expect("cargo runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("exact numbers behave"),
+        "generated crate failed\n--- stdout\n{stdout}\n--- stderr\n{stderr}\n--- types.rs\n{}",
+        generation.files[0].contents
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "exact-numbers")]
+const GO_EXACT_MAIN: &str = r##"package main
+
+import (
+	"encoding/json/v2"
+	"fmt"
+	"reflect"
+	"sort"
+	"strings"
+
+	"generated/api"
+)
+
+type found struct {
+	Pointer string
+	Kind    api.FindingKind
+}
+
+func report[T api.Validator](js string) []found {
+	var value T
+	if err := json.Unmarshal([]byte(js), &value); err != nil {
+		panic(fmt.Sprintf("%s: %v", js, err))
+	}
+	out := []found{}
+	for _, f := range value.Validate().Findings {
+		out = append(out, found{f.Pointer, f.Kind})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Pointer < out[j].Pointer })
+	return out
+}
+
+func v(p string) found { return found{p, api.Violation} }
+func u(p string) found { return found{p, api.Unevaluated} }
+
+func check(what string, got []found, want ...found) {
+	if want == nil {
+		want = []found{}
+	}
+	if !reflect.DeepEqual(got, want) {
+		panic(fmt.Sprintf("%s: got %v, want %v", what, got, want))
+	}
+}
+
+func d(text string) api.Decimal {
+	x, err := api.ParseDecimal(text)
+	if err != nil {
+		panic(err)
+	}
+	return x
+}
+
+func roundTrip(js string) string {
+	var p api.Price
+	if err := json.Unmarshal([]byte(js), &p); err != nil {
+		panic(fmt.Sprintf("%s: %v", js, err))
+	}
+	out, err := json.Marshal(p)
+	if err != nil {
+		panic(err)
+	}
+	return string(out)
+}
+
+func same(got, want string) {
+	if got != want {
+		panic(fmt.Sprintf("got %s, want %s", got, want))
+	}
+}
+
+func main() {
+	var price api.Price
+	if err := json.Unmarshal([]byte(`{"amount":12.30}`), &price); err != nil || price.Amount != d("12.3") {
+		panic(fmt.Sprint(price, err))
+	}
+	same(roundTrip(`{"amount":12.30}`), `{"amount":12.3}`)
+	exact := `{"amount":0,"big":1.0000000000000000000000000000000000001}`
+	same(roundTrip(exact), exact)
+	same(roundTrip(`{"amount":0,"big":123456789012345678901234567890123456e100}`), `{"amount":0,"big":1.23456789012345678901234567890123456e135}`)
+	same(roundTrip(`{"amount":0,"big":0.000001}`), `{"amount":0,"big":0.000001}`)
+	same(roundTrip(`{"amount":0,"big":1e-7}`), `{"amount":0,"big":1e-7}`)
+	same(roundTrip(`{"amount":0,"big":-12e-8}`), `{"amount":0,"big":-1.2e-7}`)
+	same(roundTrip(`{"amount":0,"big":-1E+21}`), `{"amount":0,"big":-1e21}`)
+	same(roundTrip(`{"amount":-0.0}`), `{"amount":0}`)
+	for _, js := range []string{
+		`{"amount":1.000000000000000000000000000000000000001}`,
+		`{"amount":1e2147483648}`,
+		`{"amount":"1.5"}`,
+		`{"amount":null}`,
+	} {
+		var p api.Price
+		if json.Unmarshal([]byte(js), &p) == nil {
+			panic("accepted " + js)
+		}
+	}
+	same(roundTrip(`{"amount":0e999999999999}`), `{"amount":0}`)
+	if !(d("-1.5").Cmp(d("-1.25")) < 0 && d("1e-30").Cmp(d("1e30")) < 0 && d("0.1").Cmp(d("0.09999999999999999999999")) > 0) {
+		panic("order")
+	}
+	if d("0.1").Float64() != 0.1 || !d("1e30").IsMultipleOf(d("1e-30")) || d("1e-30").IsMultipleOf(d("0.5")) {
+		panic("arithmetic")
+	}
+	check("in range", report[api.Price](`{"amount":999999.99}`))
+	check("multipleOf", report[api.Price](`{"amount":0.015}`), v("/amount"))
+	check("exclusiveMaximum", report[api.Price](`{"amount":1000000}`), v("/amount"))
+	check("minimum", report[api.Price](`{"amount":-0.01}`), v("/amount"))
+	check("rate", report[api.Price](`{"amount":0,"rate":0.1}`))
+	check("rate below", report[api.Price](`{"amount":0,"rate":0.09999999999999999999}`), v("/rate"))
+	check("unique", report[api.Price](`{"amount":0,"tags":[1,1.0]}`), v("/tags/1"))
+	check("distinct", report[api.Price](`{"amount":0,"tags":[0.1,0.10000000000000000001]}`))
+	check("enum", report[api.Price](`{"amount":0,"code":2.5}`))
+	check("enum 100", report[api.Price](`{"amount":0,"code":100}`))
+	check("not enum", report[api.Price](`{"amount":0,"code":2.51}`), v("/code"))
+	check("half", report[api.Price](`{"amount":0,"half":1e30}`))
+	check("not half", report[api.Price](`{"amount":0,"half":1e-30}`), v("/half"))
+	check("const", report[api.Price](`{"amount":0,"fixed":-0.250}`))
+	check("not const", report[api.Price](`{"amount":0,"fixed":-0.26}`), v("/fixed"))
+	check("items", report[api.Rates](`[1, 1.0000000000000000000000001]`), v("/1"))
+	check("long", report[api.Long](`{"lo":0.1000000000000000000000000000000000001,"hi":0.1,"huge":1e300,"tiny":0,"pick":1}`))
+	check("lo", report[api.Long](`{"lo":0.1}`), v("/lo"))
+	check("hi", report[api.Long](`{"hi":0.1000000000000000000000000000000000001}`), v("/hi"))
+	check("never", report[api.Long](`{"never":1e300}`), v("/never"))
+	check("tiny", report[api.Long](`{"tiny":-1e-30}`), v("/tiny"))
+	check("pick", report[api.Long](`{"pick":2}`), v("/pick"))
+	check("only", report[api.Long](`{"only":1}`), v("/only"))
+	check("odd", report[api.Long](`{"odd":3}`), u("/odd"))
+	check("odd zero", report[api.Long](`{"odd":0}`))
+	check("edge", report[api.Long](`{"edge":1.1e2147483648}`))
+	check("below edge", report[api.Long](`{"edge":9e2147483647}`), v("/edge"))
+	var hi api.Long
+	if err := json.Unmarshal([]byte(`{"hi":0.1000000000000000000000000000000000001}`), &hi); err != nil {
+		panic(err)
+	}
+	if got := hi.Validate().Findings; len(got) != 1 || !strings.Contains(got[0].Message, "exclusiveMaximum") {
+		panic(fmt.Sprint(got))
+	}
+	wide := "1.000000000000000000000000000000000000001"
+	check("either", report[api.Either](`"s"`))
+	check("either wide", report[api.Either](wide), u(""))
+	check("either huge", report[api.Either](`1e400`))
+	check("disc huge", report[api.Disc](`1e400`), v(""))
+	check("disc huge item", report[api.Disc](`[1e400]`))
+	check("pattern wide", report[api.Pat](`{"x1":`+wide+`}`), u("/x1"))
+	check("neg", report[api.Neg](`-0.75`))
+	check("neg low", report[api.Neg](`-1`), v(""))
+	check("neg high", report[api.Neg](`-0.25`), v(""))
+	check("nul", report[api.Nul](`1.50`))
+	check("nul off", report[api.Nul](`2`), v(""))
+	check("zero", report[api.Zero](`0.0`))
+	check("zero off", report[api.Zero](`1`), v(""))
+	check("top", report[api.Top](`1.75`))
+	check("top off", report[api.Top](`1.7`), v(""))
+	var top api.Top
+	if err := json.Unmarshal([]byte(`1.7`), &top); err != nil {
+		panic(err)
+	}
+	if got := top.Validate().Findings; len(got) != 1 || !strings.HasPrefix(got[0].Message, "1.7 is not") {
+		panic(fmt.Sprint(got))
+	}
+	fmt.Println("exact numbers behave")
+}
+"##;
+
+#[cfg(feature = "exact-numbers")]
+#[test]
+fn generated_go_exact_numbers_compile_and_behave() {
+    let required = std::env::var_os("ROAS_CODEGEN_REQUIRE_GO").is_some();
+    if std::env::var_os("ROAS_CODEGEN_SKIP_COMPILE").is_some() && !required {
+        eprintln!("skipped: ROAS_CODEGEN_SKIP_COMPILE is set");
+        return;
+    }
+    if let Err(reason) = go_toolchain() {
+        assert!(!required, "ROAS_CODEGEN_REQUIRE_GO is set: {reason}");
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let generation = exact_generation(Target::Go);
+    let dir = std::env::temp_dir().join(format!("roas-codegen-go-exact-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("api")).unwrap();
+    std::fs::write(dir.join("go.mod"), "module generated\n\ngo 1.27\n").unwrap();
+    for file in &generation.files {
+        std::fs::write(dir.join("api").join(&file.path), &file.contents).unwrap();
+    }
+    std::fs::write(dir.join("main.go"), GO_EXACT_MAIN).unwrap();
+    let run = |args: &[&str]| {
+        Command::new("go")
+            .args(args)
+            .current_dir(&dir)
+            .env("GOTOOLCHAIN", "local")
+            .env("GOWORK", "off")
+            .output()
+            .expect("go runs")
+    };
+    let output = run(&["run", "."]);
+    let vet = run(&["vet", "./..."]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("exact numbers behave"),
+        "generated Go failed\n--- stdout\n{stdout}\n--- stderr\n{stderr}\n--- {}\n{}",
+        generation.files[0].path.display(),
+        generation.files[0].contents
+    );
+    assert!(
+        vet.status.success(),
+        "go vet\n{}",
+        String::from_utf8_lossy(&vet.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -18,6 +18,8 @@ pub(crate) enum ValueKind {
     String,
     Integer(IntWidth),
     Number(FloatWidth),
+    /// A `number` held exactly, under `exact_numbers`.
+    Decimal,
     Array,
     Map,
     /// Anything else: a generated type, a substitution, raw JSON.
@@ -80,6 +82,37 @@ pub(crate) enum Check {
         integral: bool,
         literal: String,
     },
+    /// `value >= bound` (or `>` when exclusive), on an exact decimal; the
+    /// keyword it comes from, which a bound rounded to the values it
+    /// decides no longer says.
+    DecAtLeast {
+        bound: Dec,
+        exclusive: bool,
+        keyword: &'static str,
+        literal: String,
+    },
+    DecAtMost {
+        bound: Dec,
+        exclusive: bool,
+        keyword: &'static str,
+        literal: String,
+    },
+    /// A bound on an exact decimal no value it holds meets.
+    DecOutside {
+        at_least: bool,
+        exclusive: bool,
+        literal: String,
+    },
+    /// `multipleOf` on an exact decimal, by a divisor no decimal holds:
+    /// decided only for zero, a multiple of anything.
+    DecMultipleUnheld {
+        literal: String,
+    },
+    /// `multipleOf` on an exact decimal.
+    DecMultipleOf {
+        divisor: Dec,
+        literal: String,
+    },
     /// A number's `enum` or `const`: the values it may be. `literal` is
     /// how they are written in a message.
     NumberIn {
@@ -128,6 +161,7 @@ pub(crate) fn kind_of(ty: &TypeRef) -> ValueKind {
         TypeRef::String => ValueKind::String,
         TypeRef::Integer(width) => ValueKind::Integer(*width),
         TypeRef::Number(width) => ValueKind::Number(*width),
+        TypeRef::Decimal => ValueKind::Decimal,
         TypeRef::Array(_) => ValueKind::Array,
         TypeRef::Map(_) => ValueKind::Map,
         _ => ValueKind::Other,
@@ -296,6 +330,50 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                 });
             }
         }
+        ValueKind::Decimal => {
+            for (n, keyword, exclusive, at_least) in [
+                (&c.minimum, "minimum", false, true),
+                (&c.exclusive_minimum, "exclusiveMinimum", true, true),
+                (&c.maximum, "maximum", false, false),
+                (&c.exclusive_maximum, "exclusiveMaximum", true, false),
+            ] {
+                let Some(n) = n else { continue };
+                let literal = n.to_string();
+                out.push(match held_bound(n, exclusive, at_least) {
+                    HeldBound::Dec(bound, exclusive) if at_least => Check::DecAtLeast {
+                        bound,
+                        exclusive,
+                        keyword,
+                        literal,
+                    },
+                    HeldBound::Dec(bound, exclusive) => Check::DecAtMost {
+                        bound,
+                        exclusive,
+                        keyword,
+                        literal,
+                    },
+                    HeldBound::Never => Check::DecOutside {
+                        at_least,
+                        exclusive,
+                        literal,
+                    },
+                    HeldBound::Always => continue,
+                });
+            }
+            out.extend(number_in(c));
+            if let Some(n) = &c.multiple_of {
+                out.push(match dec(n).filter(|d| d.mantissa > 0) {
+                    Some(divisor) => Check::DecMultipleOf {
+                        divisor,
+                        literal: n.to_string(),
+                    },
+                    // Warned about when lowering.
+                    None => Check::DecMultipleUnheld {
+                        literal: n.to_string(),
+                    },
+                });
+            }
+        }
         ValueKind::Array => {
             out.extend(c.min_items.filter(|n| *n > 0).map(Check::MinItems));
             out.extend(c.max_items.filter(|n| *n < u64::MAX).map(Check::MaxItems));
@@ -305,7 +383,9 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                     _ => unreachable!("an array kind is an array"),
                 };
                 out.push(Check::UniqueItems(match item {
-                    TypeRef::String | TypeRef::Boolean | TypeRef::Integer(_) => Unique::Exact,
+                    TypeRef::String | TypeRef::Boolean | TypeRef::Integer(_) | TypeRef::Decimal => {
+                        Unique::Exact
+                    }
                     TypeRef::Number(_) => Unique::Float,
                     _ => Unique::Unknown,
                 }));
@@ -628,11 +708,17 @@ mod neighbours {
 /// The ranges the types of a holder's branches can hold, found through
 /// fields, items, values and references: the whole-number magnitude from
 /// which the narrowest integer among them overflows (`None` with no
-/// integer), and whether a 32-bit float is among them. A number past
-/// either fails a branch's decoding for the representation, not because
-/// the value is not one the branch's schema allows. A substituted type is
-/// assumed to be as narrow as any.
-pub(crate) fn number_range(ir: &crate::ir::Ir, tys: &[&TypeRef]) -> (Option<&'static str>, bool) {
+/// integer), whether a 32-bit float is among them, whether an exact
+/// decimal is, and whether anything reading a number as a float is — an
+/// integer, a float, raw JSON, a substitution — which a number past `f64`
+/// fails. A number past any of these fails a branch's decoding for the
+/// representation, not because the value is not one the branch's schema
+/// allows. A substituted type is assumed to be as narrow as any.
+pub(crate) fn number_range(
+    ir: &crate::ir::Ir,
+    tys: &[&TypeRef],
+) -> (Option<&'static str>, bool, bool, bool) {
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         ir: &crate::ir::Ir,
         ty: &TypeRef,
@@ -640,19 +726,33 @@ pub(crate) fn number_range(ir: &crate::ir::Ir, tys: &[&TypeRef]) -> (Option<&'st
         int32: &mut bool,
         int64: &mut bool,
         float32: &mut bool,
+        decimal: &mut bool,
+        float: &mut bool,
     ) {
         match ty {
-            TypeRef::Integer(IntWidth::Int32) => *int32 = true,
-            TypeRef::Integer(_) => *int64 = true,
-            TypeRef::Number(FloatWidth::Float) => *float32 = true,
+            TypeRef::Integer(IntWidth::Int32) => {
+                *int32 = true;
+                *float = true;
+            }
+            TypeRef::Integer(_) => {
+                *int64 = true;
+                *float = true;
+            }
+            TypeRef::Number(width) => {
+                *float32 |= *width == FloatWidth::Float;
+                *float = true;
+            }
+            TypeRef::Decimal => *decimal = true,
+            TypeRef::Any => *float = true,
             TypeRef::Extern(_) => {
                 *int32 = true;
                 *float32 = true;
+                *float = true;
             }
             TypeRef::Boxed(inner)
             | TypeRef::Nullable(inner)
             | TypeRef::Array(inner)
-            | TypeRef::Map(inner) => walk(ir, inner, seen, int32, int64, float32),
+            | TypeRef::Map(inner) => walk(ir, inner, seen, int32, int64, float32, decimal, float),
             TypeRef::Named(id) => {
                 if !seen.insert(id.clone()) {
                     return;
@@ -675,20 +775,31 @@ pub(crate) fn number_range(ir: &crate::ir::Ir, tys: &[&TypeRef]) -> (Option<&'st
                     TypeKind::Extern => {
                         *int32 = true;
                         *float32 = true;
+                        *float = true;
                     }
                     TypeKind::StringEnum(_) => {}
                 }
                 for ty in inner {
-                    walk(ir, ty, seen, int32, int64, float32);
+                    walk(ir, ty, seen, int32, int64, float32, decimal, float);
                 }
             }
             _ => {}
         }
     }
-    let (mut int32, mut int64, mut float32) = (false, false, false);
+    let (mut int32, mut int64, mut float32, mut decimal, mut float) =
+        (false, false, false, false, false);
     let mut seen = std::collections::BTreeSet::new();
     for ty in tys {
-        walk(ir, ty, &mut seen, &mut int32, &mut int64, &mut float32);
+        walk(
+            ir,
+            ty,
+            &mut seen,
+            &mut int32,
+            &mut int64,
+            &mut float32,
+            &mut decimal,
+            &mut float,
+        );
     }
     let limit = if int32 {
         Some("2147483648.0")
@@ -697,7 +808,7 @@ pub(crate) fn number_range(ir: &crate::ir::Ir, tys: &[&TypeRef]) -> (Option<&'st
     } else {
         None
     };
-    (limit, float32)
+    (limit, float32, decimal, float)
 }
 
 /// Whether `ty` reaches a substituted type, whose decoding is the user's:
@@ -891,7 +1002,10 @@ pub(crate) fn unchecked_keywords(ty: &TypeRef, c: &Constraints) -> Vec<&'static 
     let kind = kind_of(ty);
     let mut out = Vec::new();
     let string = matches!(kind, ValueKind::String);
-    let number = matches!(kind, ValueKind::Integer(_) | ValueKind::Number(_));
+    let number = matches!(
+        kind,
+        ValueKind::Integer(_) | ValueKind::Number(_) | ValueKind::Decimal
+    );
     let array = matches!(kind, ValueKind::Array);
     let map = matches!(kind, ValueKind::Map);
     for (present, keyword, applies) in [
@@ -1364,6 +1478,154 @@ fn gcd(mut a: i128, mut b: i128) -> i128 {
     a
 }
 
+/// A bound's comparison, the keyword it comes from, and where a value
+/// failing it lies.
+pub(crate) fn bound_words(
+    at_least: bool,
+    exclusive: bool,
+) -> (&'static str, &'static str, &'static str) {
+    match (at_least, exclusive) {
+        (true, false) => (">=", "minimum", "below"),
+        (true, true) => (">", "exclusiveMinimum", "below"),
+        (false, false) => ("<=", "maximum", "above"),
+        (false, true) => ("<", "exclusiveMaximum", "above"),
+    }
+}
+
+/// The most significant digits an exact decimal holds: an `i128` holds
+/// every 38-digit mantissa.
+pub(crate) const MAX_DIGITS: usize = 38;
+
+/// A number as generated code holds it exactly: `mantissa * 10^exponent`,
+/// canonical — no trailing zero in the mantissa, zero as `0 * 10^0` — but
+/// for a bound past the largest exponent, which only compares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Dec {
+    pub mantissa: i128,
+    pub exponent: i32,
+}
+
+/// `n` as an exact decimal, as written. `None` past [`MAX_DIGITS`]
+/// significant digits or an `i32` exponent: what the generated decoder
+/// refuses too.
+pub(crate) fn dec(n: &Number) -> Option<Dec> {
+    let d = parse_decimal(n)?;
+    if d.digits.is_empty() {
+        return Some(Dec {
+            mantissa: 0,
+            exponent: 0,
+        });
+    }
+    if d.digits.len() > MAX_DIGITS {
+        return None;
+    }
+    let magnitude: i128 = d.digits.parse().ok()?;
+    Some(Dec {
+        mantissa: if d.negative { -magnitude } else { magnitude },
+        exponent: i32::try_from(d.exponent).ok()?,
+    })
+}
+
+/// A bound on an exact decimal, as one deciding the same for every value
+/// a decimal holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeldBound {
+    /// Compared with this decimal, exclusively or not.
+    Dec(Dec, bool),
+    /// Every value meets it.
+    Always,
+    /// No value meets it.
+    Never,
+}
+
+/// `value >= n` (`at_least`) or `value <= n`, exclusive or not, for the
+/// values an exact decimal holds — at most [`MAX_DIGITS`] significant
+/// digits times a power of ten in the `i32` range. A bound with more
+/// digits is rounded to that many towards the values meeting it, which is
+/// the nearest of them: no value lies between it and the bound.
+pub(crate) fn held_bound(n: &Number, exclusive: bool, at_least: bool) -> HeldBound {
+    if let Some(d) = dec(n) {
+        return HeldBound::Dec(d, exclusive);
+    }
+    let p = parse_decimal(n).expect("a JSON number reads as a decimal");
+    let zero = Dec {
+        mantissa: 0,
+        exponent: 0,
+    };
+    let count = p.digits.len() as i64;
+    // The power of ten of the bound's leading digit.
+    let leading = p.exponent.saturating_add(count - 1);
+    // Past every value: the largest held is below `10^(i32::MAX + 38)`.
+    if leading > i64::from(i32::MAX) + MAX_DIGITS as i64 - 1 {
+        return if p.negative == at_least {
+            HeldBound::Always
+        } else {
+            HeldBound::Never
+        };
+    }
+    // Between zero and every other value: the smallest positive held is
+    // `10^i32::MIN`.
+    if leading < i64::from(i32::MIN) {
+        return HeldBound::Dec(zero, p.negative != at_least);
+    }
+    // A held value with leading power `L` is a multiple of
+    // `10^max(L - 37, i32::MIN)`: rounded to that step at the bound's own
+    // magnitude, towards the values meeting it, the bound is the nearest
+    // of them, with none in between.
+    let step = (leading - (MAX_DIGITS as i64 - 1)).max(i64::from(i32::MIN));
+    let dropped = step - p.exponent;
+    let (mut mantissa, mut exponent) = if dropped > 0 {
+        // `step <= leading`, so the leading digit is kept; the digits cut
+        // off end in a non-zero one.
+        let keep = (count - dropped) as usize;
+        let mut mantissa: i128 = p.digits[..keep].parse().expect("at most 38 digits");
+        if at_least != p.negative {
+            mantissa += 1;
+        }
+        (mantissa, step)
+    } else {
+        // Few enough digits, past the largest exponent.
+        let mantissa: i128 = p.digits.parse().expect("at most 38 digits");
+        (mantissa, p.exponent)
+    };
+    while mantissa % 10 == 0 {
+        mantissa /= 10;
+        exponent += 1;
+    }
+    let sign = |m: i128| if p.negative { -m } else { m };
+    // The bound is no value, so a value meets it exclusively exactly when
+    // it meets the rounded one inclusively.
+    if let Ok(exponent) = i32::try_from(exponent) {
+        return HeldBound::Dec(
+            Dec {
+                mantissa: sign(mantissa),
+                exponent,
+            },
+            false,
+        );
+    }
+    // Past the largest exponent, spelled at it with the zeros it takes —
+    // which compares as the number it is — unless that has more digits
+    // than any value, when it is past them all.
+    let shift = exponent - i64::from(i32::MAX);
+    match u32::try_from(shift)
+        .ok()
+        .and_then(|shift| 10i128.checked_pow(shift))
+        .and_then(|scale| mantissa.checked_mul(scale))
+        .filter(|m| *m < 10i128.pow(MAX_DIGITS as u32))
+    {
+        Some(mantissa) => HeldBound::Dec(
+            Dec {
+                mantissa: sign(mantissa),
+                exponent: i32::MAX,
+            },
+            false,
+        ),
+        None if p.negative == at_least => HeldBound::Always,
+        None => HeldBound::Never,
+    }
+}
+
 /// A number's magnitude as `digits / 10^scale`, exactly as written. `None`
 /// when it does not fit the `i128` arithmetic the check is done in.
 pub(crate) fn decimal(n: &Number) -> Option<(i128, u32)> {
@@ -1438,6 +1700,55 @@ mod tests {
 
     fn n(text: &str) -> Number {
         serde_json::from_str(text).unwrap()
+    }
+
+    // Only an exact build keeps such literals as written.
+    #[cfg(feature = "exact-numbers")]
+    #[test]
+    fn a_bound_no_decimal_holds_is_rounded_to_the_nearest_value() {
+        let d = |mantissa: i128, exponent: i32| Dec { mantissa, exponent };
+        let held = |text: &str, at_least: bool| held_bound(&n(text), true, at_least);
+        // Held as written: kept, exclusive as it was.
+        assert_eq!(held("1.5", true), HeldBound::Dec(d(15, -1), true));
+        // 39 digits: rounded towards the values meeting it, inclusive.
+        let long = "1.00000000000000000000000000000000000001";
+        assert_eq!(
+            held(long, true),
+            HeldBound::Dec(d(10i128.pow(37) + 1, -37), false)
+        );
+        assert_eq!(held(long, false), HeldBound::Dec(d(1, 0), false));
+        assert_eq!(
+            held(&format!("-{long}"), true),
+            HeldBound::Dec(d(-1, 0), false)
+        );
+        // A carry to the next power of ten.
+        let nines = "9".repeat(39);
+        assert_eq!(held(&nines, true), HeldBound::Dec(d(1, 39), false));
+        // At the smallest exponent the step is `10^i32::MIN`.
+        assert_eq!(
+            held("1.5e-2147483648", true),
+            HeldBound::Dec(d(2, i32::MIN), false)
+        );
+        assert_eq!(
+            held("1.5e-2147483648", false),
+            HeldBound::Dec(d(1, i32::MIN), false)
+        );
+        // Below every positive value: compared with zero.
+        assert_eq!(held("1e-2147483649", true), HeldBound::Dec(d(0, 0), true));
+        assert_eq!(held("-1e-2147483649", false), HeldBound::Dec(d(0, 0), true));
+        // Past the largest exponent but among the values: spelled at it.
+        assert_eq!(
+            held("1e2147483648", true),
+            HeldBound::Dec(d(10, i32::MAX), false)
+        );
+        // Above the largest value, before or after rounding.
+        let top = format!("{}e2147483645", "9".repeat(40));
+        assert_eq!(held(&top, true), HeldBound::Never);
+        // Below it, the largest value, which every value meets.
+        let largest = HeldBound::Dec(d(10i128.pow(38) - 1, i32::MAX), false);
+        assert_eq!(held(&top, false), largest);
+        assert_eq!(held(&format!("-{top}"), false), HeldBound::Never);
+        assert_eq!(held("1e2147483685", true), HeldBound::Never);
     }
 
     #[test]

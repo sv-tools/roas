@@ -23,6 +23,8 @@ pub(crate) enum TypeRef {
     String,
     Integer(IntWidth),
     Number(FloatWidth),
+    /// A `number` held exactly, under `exact_numbers`.
+    Decimal,
     Boolean,
     Null,
     /// Any JSON value.
@@ -311,6 +313,8 @@ pub(crate) struct Ir {
     /// What to warn about a parent's union once every pass is done, and
     /// so what an unknown tag is finally read as.
     pub union_notes: Vec<(SchemaId, UnionNote)>,
+    /// Lowered under `exact_numbers`: a `number` is a `Decimal`.
+    pub exact_numbers: bool,
 }
 
 #[derive(Debug, Clone)]

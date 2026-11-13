@@ -290,9 +290,6 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
                 document.fidelity()
             )));
         }
-        return Err(GenerateError::Unsupported(
-            "`exact_numbers` decimal wrappers".into(),
-        ));
     }
     // Settings the configuration accepts but this release cannot honour
     // are refused, never silently ignored.

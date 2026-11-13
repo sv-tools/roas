@@ -53,6 +53,35 @@ const VALIDATION_NAMES: &[&str] = &[
 /// when it is generated.
 const PATTERN_NAMES: &[&str] = &["matchPattern", "patterns"];
 
+/// The names the `Decimal` support declares, at package level or locally,
+/// reserved only when it is generated.
+const DECIMAL_NAMES: &[&str] = &[
+    "decimalToken",
+    "decimalDigits",
+    "power",
+    "all",
+    "start",
+    "end",
+    "count",
+    "leading",
+    "sx",
+    "sy",
+    "lx",
+    "ly",
+    "dx",
+    "dy",
+    "c",
+    "b",
+    "shift",
+    "quotient",
+    "remainder",
+    "prime",
+    "taken",
+    "m",
+    "y",
+    "divisor",
+];
+
 const TEMPLATE_NAMES: &[&str] = &[
     "decodeOptions",
     "noUnmarshalers",
@@ -100,6 +129,10 @@ pub(crate) struct SupportView {
     pub nullable: bool,
     pub int64: bool,
     pub int32: bool,
+    /// A `number` held exactly, under `exact_numbers`: `Decimal`.
+    pub decimal: bool,
+    /// `exact_numbers` is on: the support reads numbers as decimals may.
+    pub exact_numbers: bool,
     pub null: bool,
     pub tagged: bool,
     /// A self-writing struct has a catch-all, written in key order.
@@ -292,7 +325,10 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         names: BTreeMap::new(),
         package_names: Allocator::default(),
         suppressed: ir.suppressed.clone(),
-        support: SupportView::default(),
+        support: SupportView {
+            exact_numbers: config.exact_numbers,
+            ..SupportView::default()
+        },
         refuse_null: BTreeSet::new(),
         refuse_null_isolated: BTreeSet::new(),
         isolated: BTreeSet::new(),
@@ -331,6 +367,9 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         if builder.needs.math {
             builtin.push(("math", "math"));
         }
+        if builder.support.decimal {
+            builtin.extend([("math/big", "big"), ("strconv", "strconv")]);
+        }
         if builder.needs.utf8 {
             builtin.push(("unicode/utf8", "utf8"));
         }
@@ -353,6 +392,11 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         }
         if builder.support.member_patterns {
             used.insert("memberMatches", "a name the generated code declares");
+        }
+        if builder.support.decimal {
+            for local in DECIMAL_NAMES {
+                used.insert(local, "a name the generated code declares");
+            }
         }
         if config.validation {
             for local in VALIDATION_NAMES {
@@ -402,6 +446,11 @@ impl Builder<'_> {
         // The helpers every file may declare.
         for reserved in ["Nullable", "Int64", "Int32", "Null"] {
             self.package_names.reserve(reserved);
+        }
+        if self.config.exact_numbers {
+            for reserved in ["Decimal", "DecimalMaxDigits", "ParseDecimal"] {
+                self.package_names.reserve(reserved);
+            }
         }
         if self.config.validation {
             for reserved in [
@@ -486,6 +535,11 @@ impl Builder<'_> {
             }
             TypeRef::Number(FloatWidth::Double) => self.refused("float64"),
             TypeRef::Number(FloatWidth::Float) => self.refused("float32"),
+            // Its own decoder refuses null.
+            TypeRef::Decimal => {
+                self.support.decimal = true;
+                "Decimal".into()
+            }
             TypeRef::Boolean => self.refused("bool"),
             TypeRef::Null => {
                 self.support.null = true;
