@@ -2,7 +2,7 @@
 
 use crate::config::{Config, Layout};
 use crate::generate::GenerateError;
-use crate::go::imports::{qualifiers, spec_names};
+use crate::go::imports::{SpecName, qualifiers, spec_name};
 use crate::go::view::{Built, FileView};
 use crate::templates::Renderer;
 use std::collections::BTreeSet;
@@ -63,7 +63,7 @@ pub(crate) fn render(
         .find(|spec| !placed.contains(*spec))
     {
         return Err(GenerateError::Config(format!(
-            "`extra_imports` entry {spec:?} is named in no generated file by the name its path ends in; under `layout = \"file_per_type\"` an import goes to the files using it, so give it the name its package is used under, such as `name \"path\"`"
+            "`extra_imports` entry {spec:?} is used by no generated file under its name; under `layout = \"file_per_type\"` an import goes to the files using it"
         )));
     }
     Ok(files)
@@ -89,9 +89,11 @@ fn render_used(
         .filter(|(_, names)| uses(names))
         .map(|(spec, _)| spec)
         .collect();
-    view.extra_imports.retain(|spec| match spec_names(spec) {
-        Some(names) => names.iter().any(|n| used.contains(n)),
-        None => package,
+    view.extra_imports.retain(|spec| match spec_name(spec) {
+        SpecName::Named(name) => used.contains(&name),
+        SpecName::Unnamed => package,
+        // Refused before rendering.
+        SpecName::Uncertain => false,
     });
     placed.extend(view.extra_imports.iter().cloned());
     renderer.render(entry, &view, "\n")

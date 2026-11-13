@@ -824,23 +824,50 @@ fn file_per_type_refuses_a_substitution_named_like_a_local() {
 }
 
 #[test]
-fn file_per_type_places_an_import_named_by_its_major_version() {
-    let toml = "layout = \"file_per_type\"\nextra_imports = ['\"example.com/x/core/v1\"']\n[substitutions.uuid.go]\nname = \"v1.ID\"\n";
+fn file_per_type_needs_a_name_for_an_import_whose_path_may_not_say_it() {
+    let components = serde_json::json!({
+        "Account": {"type": "object", "properties": {"id": {"type": "string", "format": "core-id"}}},
+        "Pod": {"type": "object", "properties": {"p": {"type": "string", "format": "pod"}}}
+    });
+    let subs = "[substitutions.core-id.go]\nname = \"core.ID\"\n[substitutions.pod.go]\nname = \"v1.Pod\"\n";
+    // `k8s.io/api/core/v1` is package `v1`; nothing in its path says so
+    // for certain.
+    let toml = format!(
+        "layout = \"file_per_type\"\nextra_imports = ['\"example.com/acme/core\"', '\"k8s.io/api/core/v1\"']\n{subs}"
+    );
+    let Some(result) = go(components.clone(), &toml) else {
+        return;
+    };
+    assert!(matches!(result.unwrap_err(), GenerateError::Config(_)));
+    let toml = format!(
+        "layout = \"file_per_type\"\nextra_imports = ['\"example.com/acme/core\"', 'v1 \"k8s.io/api/core/v1\"']\n{subs}"
+    );
+    let generation = go(components, &toml).unwrap().expect("generates");
+    let file = |name: &str| {
+        &generation
+            .files
+            .iter()
+            .find(|f| f.path == Path::new(name))
+            .unwrap()
+            .contents
+    };
+    let account = file("account.go");
+    assert!(account.contains("\"example.com/acme/core\""), "{account}");
+    assert!(!account.contains("k8s.io"), "{account}");
+    let pod = file("pod.go");
+    assert!(pod.contains("v1 \"k8s.io/api/core/v1\""), "{pod}");
+    assert!(!pod.contains("acme"), "{pod}");
+}
+
+#[test]
+fn file_per_type_refuses_a_substitution_naming_two_unknown_packages() {
+    // Which of `atomic` and `uuid` is `example.com/x/ids` is not said.
+    let toml = "layout = \"file_per_type\"\n[substitutions.uuid.go]\nname = \"atomic.Pointer[uuid.UUID]\"\nimport = \"example.com/x/ids\"\n";
     let components = serde_json::json!({"A": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}}}});
     let Some(result) = go(components, toml) else {
         return;
     };
-    let generation = result.expect("generates");
-    let a = generation
-        .files
-        .iter()
-        .find(|f| f.path == Path::new("a.go"))
-        .unwrap();
-    assert!(
-        a.contents.contains("\"example.com/x/core/v1\""),
-        "{}",
-        a.contents
-    );
+    assert!(matches!(result.unwrap_err(), GenerateError::Config(_)));
 }
 
 #[test]

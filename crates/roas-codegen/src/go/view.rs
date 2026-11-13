@@ -408,6 +408,47 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 .iter()
                 .map(|(_, name)| BTreeSet::from([(*name).to_owned()])),
         );
+        // Under `file_per_type` each substitution import goes to the files
+        // using it, so its name must be certain: the one package its
+        // spellings name that no builtin or extra import is used under.
+        // One an extra import already brings in needs no import here.
+        let file_per_type = config.layout == Layout::FilePerType;
+        let extra_names: BTreeSet<String> = config
+            .extra_imports
+            .iter()
+            .filter_map(|spec| match super::imports::spec_name(spec) {
+                super::imports::SpecName::Named(name) => Some(name),
+                _ => None,
+            })
+            .collect();
+        let extra_paths: BTreeSet<&str> = config
+            .extra_imports
+            .iter()
+            .map(|spec| super::imports::spec_path(spec))
+            .collect();
+        let mut certain: BTreeMap<&String, String> = BTreeMap::new();
+        if file_per_type {
+            for import in &builder.externs {
+                if builtin.iter().any(|(path, _)| path == import)
+                    || extra_paths.contains(import.as_str())
+                {
+                    continue;
+                }
+                let candidates: Vec<&String> = builder
+                    .extern_names
+                    .get(import)
+                    .into_iter()
+                    .flatten()
+                    .filter(|q| !builtin.iter().any(|(_, b)| b == q) && !extra_names.contains(*q))
+                    .collect();
+                let [name] = candidates.as_slice() else {
+                    return Err(GenerateError::Config(format!(
+                        "substitution import {import:?} is not the one package its spellings name beside the builtin and extra imports (they name {candidates:?}); under `layout = \"file_per_type\"` import the others through `extra_imports` with their names"
+                    )));
+                };
+                certain.insert(import, (*name).clone());
+            }
+        }
         let mut used: BTreeMap<&str, &str> =
             builtin.iter().map(|(path, name)| (*name, *path)).collect();
         // A package named like a name the generated code declares would be
@@ -449,27 +490,23 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             used.insert("r", "a name the generated validation declares");
         }
         for import in &builder.externs {
-            if builtin.iter().any(|(path, _)| path == import) {
+            if builtin.iter().any(|(path, _)| path == import)
+                || (file_per_type && extra_paths.contains(import.as_str()))
+            {
                 continue;
             }
-            let name = package_of(import);
+            let name = match certain.get(import) {
+                Some(name) => name.as_str(),
+                None => package_of(import),
+            };
             // Under `file_per_type` the import goes to the files using its
-            // names, so none may be a local the generated code declares.
-            let local = (config.layout == Layout::FilePerType)
-                .then(|| {
-                    builder
-                        .extern_names
-                        .get(import)
-                        .into_iter()
-                        .flatten()
-                        .map(String::as_str)
-                        .chain([name])
-                        .find(|q| {
-                            (config.validation && depth_local(q))
-                                || used.get(q).is_some_and(|what| what.starts_with("a name "))
-                        })
-                })
-                .flatten();
+            // name, so it may not be a local the generated code declares.
+            let local = (file_per_type
+                && ((config.validation && depth_local(name))
+                    || used
+                        .get(name)
+                        .is_some_and(|what| what.starts_with("a name "))))
+            .then_some(name);
             if let Some(q) = local {
                 return Err(GenerateError::Config(format!(
                     "substitution import {import:?} is used as `{q}`, a name the generated code declares, which `layout = \"file_per_type\"` would read as its use; import it under another name"
@@ -481,30 +518,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 )));
             }
             imports.push(quote(import));
-            // A qualifier another import is used under is that import's:
-            // a builtin, another substitution's, or an extra import's.
-            let extra: BTreeSet<String> = config
-                .extra_imports
-                .iter()
-                .filter_map(|spec| super::imports::spec_names(spec))
-                .flatten()
-                .collect();
-            let mut names: BTreeSet<String> = builder
-                .extern_names
-                .get(import)
-                .into_iter()
-                .flatten()
-                .filter(|q| {
-                    !builtin.iter().any(|(_, b)| b == q)
-                        && !extra.contains(*q)
-                        && !builder
-                            .externs
-                            .iter()
-                            .any(|other| other != import && package_of(other) == q.as_str())
-                })
-                .cloned()
-                .collect();
-            names.insert(name.to_owned());
+            let names = BTreeSet::from([name.to_owned()]);
             import_names.push(names);
             // The standard library is no dependency to declare; a module
             // path has a dot in its first element.
@@ -521,13 +535,21 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         // send it to files that only use that.
         if config.layout == Layout::FilePerType {
             for spec in &config.extra_imports {
-                let names = super::imports::spec_names(spec).unwrap_or_default();
-                if let Some((name, what)) = names.iter().find_map(|n| {
-                    if config.validation && depth_local(n) {
-                        return Some((n, "validation's loop variables"));
+                let name = match super::imports::spec_name(spec) {
+                    super::imports::SpecName::Named(name) => name,
+                    super::imports::SpecName::Unnamed => continue,
+                    super::imports::SpecName::Uncertain => {
+                        return Err(GenerateError::Config(format!(
+                            "`extra_imports` entry {spec:?} does not say the name its package is used under, which `layout = \"file_per_type\"` places it by; give it one, such as `name \"path\"`"
+                        )));
                     }
-                    used.get(n.as_str()).map(|what| (n, *what))
-                }) {
+                };
+                let what = if config.validation && depth_local(&name) {
+                    Some("validation's loop variables")
+                } else {
+                    used.get(name.as_str()).copied()
+                };
+                if let Some(what) = what {
                     return Err(GenerateError::Config(format!(
                         "`extra_imports` entry {spec:?} is used as `{name}`, which is taken by {what}; under `layout = \"file_per_type\"` give it another name"
                     )));
@@ -730,12 +752,10 @@ impl Builder<'_> {
             })?;
         if let Some(import) = &spelling.import {
             self.externs.insert(import.clone());
-            // The type's own package, not its arguments' or a map key's:
-            // those belong to the imports their packages come from.
             self.extern_names
                 .entry(import.clone())
                 .or_default()
-                .extend(super::imports::outer_qualifier(&spelling.name));
+                .extend(super::imports::qualifiers(&spelling.name));
         }
         Ok(spelling.name.clone())
     }

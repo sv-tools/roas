@@ -11,55 +11,6 @@ pub(crate) fn qualifiers(text: &str) -> BTreeSet<String> {
     qualifier_list(text).into_iter().collect()
 }
 
-/// The package a type spelling names its own type from: `atomic` in
-/// `atomic.Pointer[netip.Addr]`, `uuid` in `*uuid.UUID`, `[]uuid.UUID`,
-/// `chan uuid.UUID` and `map[netip.Addr]uuid.UUID` — not a type argument's
-/// or a map key's.
-pub(crate) fn outer_qualifier(spelling: &str) -> Option<String> {
-    let mut rest = spelling.trim();
-    loop {
-        let before = rest;
-        for prefix in ["*", "<-chan", "chan<-", "chan"] {
-            // `chan` as a word, not the start of a name such as `chans`.
-            if let Some(after) = rest.strip_prefix(prefix)
-                && (prefix == "*"
-                    || prefix == "chan<-"
-                    || !after
-                        .bytes()
-                        .next()
-                        .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80))
-            {
-                rest = after.trim_start();
-            }
-        }
-        // `[]`, `[N]` and a map's `[key]`: past the balanced brackets.
-        let bracketed = rest
-            .strip_prefix("map")
-            .map(str::trim_start)
-            .unwrap_or(rest);
-        if bracketed.starts_with('[') {
-            let mut depth = 0;
-            for (at, c) in bracketed.char_indices() {
-                match c {
-                    '[' => depth += 1,
-                    ']' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            rest = bracketed[at + 1..].trim_start();
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if rest == before {
-            break;
-        }
-    }
-    qualifier_list(rest).into_iter().next()
-}
-
 /// The qualifiers in `text`, in order.
 pub(crate) fn qualifier_list(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
@@ -142,39 +93,57 @@ pub(crate) fn qualifier_list(text: &str) -> Vec<String> {
     out
 }
 
-/// The name an `extra_imports` spec is used under: its alias, else what
-/// its path ends in. `None` for a blank or dot import, which no qualifier
-/// shows a use of.
-pub(crate) fn spec_names(spec: &str) -> Option<Vec<String>> {
+/// What an `extra_imports` spec is known to be used under, as the spec
+/// says it: nothing is guessed.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SpecName {
+    /// A blank or dot import, which no qualifier shows a use of.
+    Unnamed,
+    /// Its alias, or its path's last element where that is a plain
+    /// identifier and no major version.
+    Named(String),
+    /// The package name could differ from anything the path says
+    /// (`gopkg.in/yaml.v3`, `k8s.io/api/core/v1`, `.../go-thing`).
+    Uncertain,
+}
+
+/// The import path a spec names, up to its closing quote: a comment may
+/// follow.
+pub(crate) fn spec_path(spec: &str) -> &str {
     let spec = spec.trim();
-    let (alias, path) = match spec.find(['"', '`']) {
-        Some(0) => (None, spec),
-        Some(at) => (Some(spec[..at].trim()), &spec[at..]),
-        None => (Some(spec), ""),
+    let Some(at) = spec.find(['"', '`']) else {
+        return "";
+    };
+    let quote = &spec[at..at + 1];
+    spec[at + 1..].split(quote).next().unwrap_or_default()
+}
+
+pub(crate) fn spec_name(spec: &str) -> SpecName {
+    let spec = spec.trim();
+    let alias = match spec.find(['"', '`']) {
+        Some(at) => spec[..at].trim(),
+        None => spec,
     };
     match alias {
-        Some("_" | ".") => None,
-        Some(alias) if !alias.is_empty() => Some(vec![alias.to_owned()]),
-        _ => {
-            // The path, up to its closing quote: a comment may follow.
-            let quote = path.chars().next().unwrap_or('"');
-            let path = path[quote.len_utf8()..]
-                .split(quote)
+        "_" | "." => SpecName::Unnamed,
+        "" => {
+            let last = spec_path(spec).rsplit('/').next().unwrap_or_default();
+            let identifier = last
+                .chars()
                 .next()
-                .unwrap_or_default();
-            let last = super::view::package_of(path);
-            let mut names = vec![last.to_owned()];
-            // `gopkg.in/yaml.v3` is package `yaml`.
-            if let Some((stem, _)) = last.split_once('.') {
-                names.push(stem.to_owned());
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && last.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                && !super::naming::is_keyword(last);
+            let version = last.len() > 1
+                && last.starts_with('v')
+                && last[1..].bytes().all(|b| b.is_ascii_digit());
+            if identifier && !version {
+                SpecName::Named(last.to_owned())
+            } else {
+                SpecName::Uncertain
             }
-            // `k8s.io/api/core/v1` is package `v1`.
-            let element = path.rsplit('/').next().unwrap_or(path);
-            if element != last {
-                names.push(element.to_owned());
-            }
-            Some(names)
         }
+        alias => SpecName::Named(alias.to_owned()),
     }
 }
 
@@ -190,44 +159,24 @@ mod tests {
     }
 
     #[test]
-    fn the_outer_qualifier_is_the_type_s_own_package() {
-        for (spelling, expected) in [
-            ("atomic.Pointer[netip.Addr]", Some("atomic")),
-            ("map[netip.Addr]uuid.UUID", Some("uuid")),
-            ("*[]map[string][4]chan *uuid.UUID", Some("uuid")),
-            ("<-chan time.Time", Some("time")),
-            ("map[netip.Addr]string", None),
-            ("string", None),
-            ("chans.ID", Some("chans")),
-            ("chan chans.ID", Some("chans")),
+    fn spec_name_reads_the_alias_or_a_plain_last_element() {
+        let named = |n: &str| SpecName::Named(n.to_owned());
+        assert_eq!(spec_name("\"github.com/google/uuid\""), named("uuid"));
+        assert_eq!(
+            spec_name("\"github.com/google/uuid\" // ids"),
+            named("uuid")
+        );
+        assert_eq!(spec_name("y \"gopkg.in/yaml.v3\""), named("y"));
+        assert_eq!(spec_name("_ \"embed\""), SpecName::Unnamed);
+        assert_eq!(spec_name(". \"math\""), SpecName::Unnamed);
+        for uncertain in [
+            "\"gopkg.in/yaml.v3\"",
+            "\"k8s.io/api/core/v1\"",
+            "\"example.com/go-thing\"",
+            "\"github.com/json-iterator/go\"",
         ] {
-            assert_eq!(outer_qualifier(spelling).as_deref(), expected, "{spelling}");
+            assert_eq!(spec_name(uncertain), SpecName::Uncertain, "{uncertain}");
         }
-    }
-
-    #[test]
-    fn spec_names_read_the_alias_or_the_path() {
-        assert_eq!(
-            spec_names("\"github.com/google/uuid\""),
-            Some(vec!["uuid".to_owned()])
-        );
-        assert_eq!(
-            spec_names("\"gopkg.in/yaml.v3\""),
-            Some(vec!["yaml.v3".to_owned(), "yaml".to_owned()])
-        );
-        assert_eq!(
-            spec_names("y \"gopkg.in/yaml.v3\""),
-            Some(vec!["y".to_owned()])
-        );
-        assert_eq!(spec_names("_ \"embed\""), None);
-        assert_eq!(spec_names(". \"math\""), None);
-        assert_eq!(
-            spec_names("\"k8s.io/api/core/v1\""),
-            Some(vec!["core".to_owned(), "v1".to_owned()])
-        );
-        assert_eq!(
-            spec_names("\"github.com/google/uuid\" // ids"),
-            Some(vec!["uuid".to_owned()])
-        );
+        assert_eq!(spec_path("x `a/b` // c"), "a/b");
     }
 }
