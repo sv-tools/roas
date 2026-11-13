@@ -1,7 +1,7 @@
 //! Overlay v1.1 root document.
 
 use crate::apply::{Apply, ApplyError, ApplyOptions, ApplyReport};
-use crate::common::action::{ActionFields, apply_action};
+use crate::common::action::{ActionFields, PrimitiveTargets, apply_action};
 use crate::v1_1::action::Action;
 use crate::v1_1::info::Info;
 use crate::v1_1::version::Version;
@@ -73,7 +73,13 @@ impl Apply for Overlay {
         let mut report = ApplyReport::default();
 
         for (index, action) in self.actions.iter().enumerate() {
-            let outcome = apply_action(index, &action_fields(action), &mut working, options)?;
+            let outcome = apply_action(
+                index,
+                &action_fields(action),
+                &mut working,
+                options,
+                PrimitiveTargets::Reject,
+            )?;
             report.actions.push(outcome);
         }
 

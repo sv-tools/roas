@@ -1,6 +1,6 @@
 # roas-overlay
 
-Rust implementation of the OpenAPI Overlay Specification ([v1.0](https://spec.openapis.org/overlay/v1.0.0.html) / [v1.1](https://spec.openapis.org/overlay/v1.1.0.html)): parse, validate, and apply Overlay documents to OpenAPI specs.
+Rust implementation of the OpenAPI Overlay Specification ([v1.0](https://spec.openapis.org/overlay/v1.0.0.html) / [v1.1](https://spec.openapis.org/overlay/v1.1.0.html) / [v1.2](https://spec.openapis.org/overlay/v1.2.0.html)): parse, validate, and apply Overlay documents to OpenAPI specs.
 
 [![crates.io](https://img.shields.io/crates/v/roas-overlay.svg)](https://crates.io/crates/roas-overlay)
 [![docs.rs](https://docs.rs/roas-overlay/badge.svg)](https://docs.rs/roas-overlay)
@@ -15,8 +15,15 @@ This crate is a sibling of [`roas`](https://crates.io/crates/roas) (the typed pa
 |-----------------|------------------|----------------|----------------------------------------------------|
 | 1.0             | `v1_0`           | ✅ implemented  | —                                                  |
 | 1.1             | `v1_1` (default) | ✅ implemented  | `copy` action, `info.description`                  |
+| 1.2             | `v1_2`           | ✅ implemented  | reusable actions (`components.actions`, `$ref`), `$self`, primitive targets |
 
-`v1_0` and `v1_1` are independent — enable whichever you need. With both enabled, an `impl From<v1_0::Overlay> for v1_1::Overlay` is available for upconverting an existing v1.0 document.
+The version features are independent — enable whichever you need. With neighbouring versions enabled, `impl From<v1_0::Overlay> for v1_1::Overlay` and `impl From<v1_1::Overlay> for v1_2::Overlay` are available for upconverting an existing document.
+
+### Overlay 1.2
+
+- **Reusable actions.** `components.actions` holds named action fields without a `target`; an `actions` entry `{ "$ref": "#/components/actions/<name>", "target": … }` applies them to its own target. Apply resolves each reference into a plain action first: the referenced `fields`, then the reference's `target`, its `description` when set, and its `x-` extensions merged over those of `fields`. A reference may not set `update`, `copy` or `remove` (the schema forbids it), and deserializing one that does fails rather than dropping them.
+- **`$self` and `extends`** are parsed, serialized and validated (neither may contain a fragment). Resolving `extends` against the base URI, or matching it to a target document's `$self`, is left to the caller.
+- **Primitive targets.** `update` and `copy` replace a selected primitive (or `null`) with their value, which must then be a primitive too (`NonPrimitiveValueForPrimitiveTarget`), and `remove` removes primitive array elements.
 
 ## Quick start
 
@@ -53,19 +60,19 @@ YAML overlays work the same way — parse with `serde-saphyr` (or any other YAML
 
 ## Apply algorithm
 
-For each action in declaration order, against the *current* working copy of the target:
+For each action in declaration order, against the *current* working copy of the target (in v1.2, after resolving a reusable action reference into a plain action; an unresolvable `$ref` raises `ActionReference`):
 
 1. Compile the `target` JSONPath. Syntax errors abort the merge with `InvalidJsonPath`.
 2. Resolve matching nodes via [`serde_json_path`](https://crates.io/crates/serde_json_path).
 3. Zero matches → silent no-op (or `ZeroMatch` error under `ApplyOptions::ErrorOnZeroMatch`).
-4. Targets must be objects or arrays for *every* action (spec §4.4); primitives or `null` raise `PrimitiveActionTarget`.
+4. **v1.0 and v1.1:** targets must be objects or arrays for *every* action; primitives or `null` raise `PrimitiveActionTarget`. **v1.2:** primitive targets are allowed (see [Overlay 1.2](#overlay-12)).
 5. `remove: true` → drop each matched node from its container. Sibling array indices are preserved by processing matches in reverse.
-6. **v1.1 only:** if `copy` is set, the action's source JSONPath is evaluated against the *current* doc; it must match exactly one node (`CopySourceNotFound` / `CopySourceMultiple`). The source value is then used as the merge value, exactly like `update`. Setting both `update` and `copy` raises `ConflictingMergeSources`.
+6. **v1.1 and v1.2:** if `copy` is set, the action's source JSONPath is evaluated against the *current* doc; it must match exactly one node (`CopySourceNotFound` / `CopySourceMultiple`). The source value is then used as the merge value, exactly like `update`. Setting both `update` and `copy` raises `ConflictingMergeSources`.
 7. Otherwise, the merge value (`update`, or the `copy` source) is merged into each matched node by kind:
    - **Object target** → recursive merge per [§4.4.3.1](https://spec.openapis.org/overlay/v1.0.0.html#merging-rules): shared object keys recurse; primitives replace; nested arrays concatenate.
    - **Array target** → depends on the version:
      - **v1.0** — the merge value is appended as a single new element (spec §3.3: *"an entry to append to the array"*).
-     - **v1.1** — an *array* merge value is concatenated element-wise; an *object or primitive* merge value is appended as a single element (spec §3.3).
+     - **v1.1 and v1.2** — an *array* merge value is concatenated element-wise; an *object or primitive* merge value is appended as a single element (spec §3.3).
 
 On any error the target document is left **untouched** — `Overlay::apply` operates on a clone and commits only on success.
 
@@ -74,7 +81,7 @@ On any error the target document is left **untouched** — `Overlay::apply` oper
 `ApplyOptions` (EnumSet):
 
 - `ErrorOnZeroMatch` — fail when an action's `target` selects zero nodes (default: silent no-op).
-- `ErrorOnMixedKindMatch` — fail when an `update` selects nodes of mixed kind (some objects, some arrays). The v1.1 spec calls this out normatively; this option lets v1.0 callers opt in.
+- `ErrorOnMixedKindMatch` — fail when an `update` selects nodes of mixed kind (objects, arrays and, in v1.2, primitives). The v1.1 spec calls this out normatively; this option lets v1.0 callers opt in.
 
 `ValidationOptions` (EnumSet):
 

@@ -4,7 +4,7 @@ Vendored copies of the authoritative JSON Schemas for every specification versio
 workspace. They are reference material for the typed models and validators — nothing in the build reads
 them.
 
-Each file is the latest published iteration as of 2026-08-02, downloaded verbatim from its source URL.
+Each file is the latest published iteration as of 2026-08-02 (Overlay 1.2: 2026-11-13), downloaded verbatim from its source URL.
 
 ## OpenAPI (`roas`)
 
@@ -41,6 +41,7 @@ by `meta.json`) for every embedded Schema Object.
 |---------|----------------------------|------------------------------------------------------------|
 | 1.0.x   | `overlay/1.0/schema.json`  | <https://spec.openapis.org/overlay/1.0/schema/2026-04-01>  |
 | 1.1.x   | `overlay/1.1/schema.json`  | <https://spec.openapis.org/overlay/1.1/schema/2026-04-01>  |
+| 1.2.x   | `overlay/1.2/schema.json`  | <https://spec.openapis.org/overlay/1.2/schema/2026-08-08>  |
 
 ## AsyncAPI
 

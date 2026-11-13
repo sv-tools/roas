@@ -92,7 +92,7 @@ pub fn remove_at(doc: &mut Value, pointer: &str) -> bool {
 /// Unescape a single JSON Pointer segment per
 /// [RFC 6901 §4](https://www.rfc-editor.org/rfc/rfc6901#section-4):
 /// `~1` → `/`, `~0` → `~`. The order matters — unescape `~1` first.
-fn unescape_pointer_segment(seg: &str) -> String {
+pub(crate) fn unescape_pointer_segment(seg: &str) -> String {
     seg.replace("~1", "/").replace("~0", "~")
 }
 

@@ -1,6 +1,6 @@
-//! The Overlay v1.1 apply step: one `update` / `copy` / `remove` action
-//! against the working document, with v1.1's array rule (an array merge
-//! value concatenates, anything else is appended).
+//! The apply step Overlay v1.1 and v1.2 share: one `update` / `copy` /
+//! `remove` action against the working document, with v1.1's array
+//! rule (an array merge value concatenates, anything else is appended).
 
 use crate::apply::{ActionOutcome, ApplyError, ApplyErrorKind, ApplyOptions, Operation};
 use crate::common::apply::{compile_path, locate, merge_json, remove_at};
@@ -16,6 +16,31 @@ pub(crate) struct ActionFields<'a> {
     pub remove: bool,
 }
 
+/// How [`apply_action`] treats a `target` node that is a primitive or
+/// `null`. Each variant exists only with the version that uses it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PrimitiveTargets {
+    /// Fail with [`ApplyErrorKind::PrimitiveActionTarget`] (Overlay v1.1).
+    #[cfg(feature = "v1_1")]
+    Reject,
+    /// `update` and `copy` replace the node with their (primitive)
+    /// value, and `remove` removes it from its container, per
+    /// [Overlay v1.2's Action Object](https://spec.openapis.org/overlay/v1.2.0.html#action-object).
+    #[cfg(feature = "v1_2")]
+    Replace,
+}
+
+impl PrimitiveTargets {
+    fn are_rejected(self) -> bool {
+        match self {
+            #[cfg(feature = "v1_1")]
+            PrimitiveTargets::Reject => true,
+            #[cfg(feature = "v1_2")]
+            PrimitiveTargets::Replace => false,
+        }
+    }
+}
+
 /// Apply one action to `doc`. On error `doc` may be partly changed:
 /// callers apply to a working copy and commit it only on success.
 pub(crate) fn apply_action(
@@ -23,6 +48,7 @@ pub(crate) fn apply_action(
     action: &ActionFields<'_>,
     doc: &mut Value,
     options: EnumSet<ApplyOptions>,
+    primitives: PrimitiveTargets,
 ) -> Result<ActionOutcome, ApplyError> {
     let err = |kind| ApplyError {
         action_index: index,
@@ -69,10 +95,10 @@ pub(crate) fn apply_action(
         return Ok(outcome(operation, 0));
     }
 
-    // `target` must resolve to objects or arrays for every action —
-    // checked up front so a failure leaves the working copy untouched.
+    // Checked up front so a failure leaves the working copy untouched.
     let kinds: Vec<NodeKind> = pointers.iter().map(|p| classify(doc, p)).collect();
-    if kinds.iter().any(|k| matches!(k, NodeKind::Primitive)) {
+    let selects_primitive = kinds.iter().any(|k| matches!(k, NodeKind::Primitive));
+    if selects_primitive && primitives.are_rejected() {
         return Err(err(ApplyErrorKind::PrimitiveActionTarget));
     }
     if options.contains(ApplyOptions::ErrorOnMixedKindMatch) && !uniform_kinds(&kinds) {
@@ -121,6 +147,13 @@ pub(crate) fn apply_action(
             .expect("no-op fast path covers the all-None case"),
     };
 
+    // A primitive target is replaced, so its value must be a primitive
+    // too (v1.2 Action Object: "the value of this field MUST be a primitive
+    // value to replace each selected node").
+    if selects_primitive && matches!(effective_update, Value::Object(_) | Value::Array(_)) {
+        return Err(err(ApplyErrorKind::NonPrimitiveValueForPrimitiveTarget));
+    }
+
     // Update / copy share the same per-node merge rules. For an array
     // target the merge value either concatenates (when it is itself an
     // array) or is appended as a single entry (object / primitive),
@@ -137,10 +170,10 @@ pub(crate) fn apply_action(
                     }
                 }
                 NodeKind::Object => merge_json(node, effective_update),
-                NodeKind::Primitive | NodeKind::Missing => {
-                    // Primitives rejected above; Missing can't occur
-                    // because pointers were just located.
-                }
+                // Only reached under `PrimitiveTargets::Replace`.
+                NodeKind::Primitive => *node = effective_update.clone(),
+                // Can't occur: the pointers were just located.
+                NodeKind::Missing => {}
             }
         }
     }
