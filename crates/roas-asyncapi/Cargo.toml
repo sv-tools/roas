@@ -4,7 +4,6 @@ version = "0.5.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-homepage.workspace = true
 repository.workspace = true
 keywords = ["asyncapi", "openapi", "kafka", "validation", "parser"]
 description = "Rust implementation of the AsyncAPI Specification v2.6 / v3.0 / v3.1 — parse and validate"
