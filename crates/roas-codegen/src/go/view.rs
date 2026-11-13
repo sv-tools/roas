@@ -439,6 +439,10 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 used.insert(local, "a name the generated validation declares");
             }
         }
+        // The `Decimal` methods' receiver, in the package file.
+        if builder.support.decimal && config.layout == Layout::FilePerType {
+            used.insert("x", "a name the generated code declares");
+        }
         // A file whose only `r.` is validation's report would import a
         // package named `r`, which goes by its uses under `file_per_type`.
         if config.validation && config.layout == Layout::FilePerType {

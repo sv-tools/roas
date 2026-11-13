@@ -756,3 +756,16 @@ fn file_per_type_refuses_an_import_named_like_a_validation_loop_variable() {
         assert!(matches!(error, GenerateError::Config(_)), "{toml}: {error}");
     }
 }
+
+#[cfg(feature = "exact-numbers")]
+#[test]
+fn file_per_type_refuses_an_import_named_like_the_decimal_receiver() {
+    let toml =
+        "layout = \"file_per_type\"\nexact_numbers = true\nextra_imports = ['x \"net/netip\"']\n";
+    let components = serde_json::json!({"Price": {"type": "object", "properties": {"amount": {"type": "number"}}}});
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let error = result.unwrap_err();
+    assert!(matches!(error, GenerateError::Config(_)), "{error}");
+}
