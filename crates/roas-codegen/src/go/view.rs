@@ -729,13 +729,12 @@ impl Builder<'_> {
             })?;
         if let Some(import) = &spelling.import {
             self.externs.insert(import.clone());
-            // The type's own package, not its arguments': those belong to
-            // the imports their packages come from.
-            self.extern_names.entry(import.clone()).or_default().extend(
-                super::imports::qualifier_list(&spelling.name)
-                    .into_iter()
-                    .take(1),
-            );
+            // The type's own package, not its arguments' or a map key's:
+            // those belong to the imports their packages come from.
+            self.extern_names
+                .entry(import.clone())
+                .or_default()
+                .extend(super::imports::outer_qualifier(&spelling.name));
         }
         Ok(spelling.name.clone())
     }

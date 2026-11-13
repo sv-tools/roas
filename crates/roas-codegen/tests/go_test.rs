@@ -842,3 +842,24 @@ fn file_per_type_places_an_import_named_by_its_major_version() {
         a.contents
     );
 }
+
+#[test]
+fn file_per_type_credits_a_map_substitution_with_its_value_s_package() {
+    let toml = "layout = \"file_per_type\"\nextra_imports = ['\"net/netip\"']\n[substitutions.uuid.go]\nname = \"map[netip.Addr]uuid.UUID\"\nimport = \"github.com/google/uuid\"\n";
+    let components = serde_json::json!({"A": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}}}});
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let generation = result.expect("generates");
+    let a = generation
+        .files
+        .iter()
+        .find(|f| f.path == Path::new("a.go"))
+        .unwrap();
+    assert!(a.contents.contains("\"net/netip\""), "{}", a.contents);
+    assert!(
+        a.contents.contains("\"github.com/google/uuid\""),
+        "{}",
+        a.contents
+    );
+}

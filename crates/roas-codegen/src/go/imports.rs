@@ -11,9 +11,48 @@ pub(crate) fn qualifiers(text: &str) -> BTreeSet<String> {
     qualifier_list(text).into_iter().collect()
 }
 
-/// The qualifiers in `text`, in order: for a substitution's spelling, the
-/// first is the package of the type itself (`atomic` in
-/// `atomic.Pointer[netip.Addr]`), the rest those of its arguments.
+/// The package a type spelling names its own type from: `atomic` in
+/// `atomic.Pointer[netip.Addr]`, `uuid` in `*uuid.UUID`, `[]uuid.UUID`,
+/// `chan uuid.UUID` and `map[netip.Addr]uuid.UUID` — not a type argument's
+/// or a map key's.
+pub(crate) fn outer_qualifier(spelling: &str) -> Option<String> {
+    let mut rest = spelling.trim();
+    loop {
+        let before = rest;
+        for prefix in ["*", "<-chan", "chan<-", "chan"] {
+            if let Some(after) = rest.strip_prefix(prefix) {
+                rest = after.trim_start();
+            }
+        }
+        // `[]`, `[N]` and a map's `[key]`: past the balanced brackets.
+        let bracketed = rest
+            .strip_prefix("map")
+            .map(str::trim_start)
+            .unwrap_or(rest);
+        if bracketed.starts_with('[') {
+            let mut depth = 0;
+            for (at, c) in bracketed.char_indices() {
+                match c {
+                    '[' => depth += 1,
+                    ']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            rest = bracketed[at + 1..].trim_start();
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if rest == before {
+            break;
+        }
+    }
+    qualifier_list(rest).into_iter().next()
+}
+
+/// The qualifiers in `text`, in order.
 pub(crate) fn qualifier_list(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
@@ -140,6 +179,20 @@ mod tests {
         let text = "package x\nimport (\n\t\"fmt\"\n)\n// strings.Builder\n/* bytes.Buffer */\nvar a = fmt.Errorf(\"errors.New %d\", x.json.y, 1.5, `math.Pi`, '.', f(xs...))\nvar b = time .\n\tNow()\n";
         let found: Vec<_> = qualifiers(text).into_iter().collect();
         assert_eq!(found, ["fmt", "time", "x"]);
+    }
+
+    #[test]
+    fn the_outer_qualifier_is_the_type_s_own_package() {
+        for (spelling, expected) in [
+            ("atomic.Pointer[netip.Addr]", Some("atomic")),
+            ("map[netip.Addr]uuid.UUID", Some("uuid")),
+            ("*[]map[string][4]chan *uuid.UUID", Some("uuid")),
+            ("<-chan time.Time", Some("time")),
+            ("map[netip.Addr]string", None),
+            ("string", None),
+        ] {
+            assert_eq!(outer_qualifier(spelling).as_deref(), expected, "{spelling}");
+        }
     }
 
     #[test]
