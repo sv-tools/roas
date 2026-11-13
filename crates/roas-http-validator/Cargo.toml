@@ -4,7 +4,6 @@ version = "0.3.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-homepage.workspace = true
 repository.workspace = true
 keywords = ["openapi", "validation", "http", "request", "middleware"]
 description = "Validates HTTP requests against an OpenAPI description, with adapters for axum, actix-web, poem, salvo and rocket"

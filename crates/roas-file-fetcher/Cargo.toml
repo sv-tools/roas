@@ -4,7 +4,6 @@ version = "0.2.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-homepage.workspace = true
 repository.workspace = true
 keywords = ["openapi", "swagger", "loader", "fetcher", "filesystem"]
 description = "Filesystem fetcher for the roas OpenAPI loader, with an async variant and optional YAML support"
