@@ -2157,7 +2157,8 @@ fn exact_generation(target: Target) -> roas_codegen::Generation {
             "tiny": {"type": "number", "exclusiveMinimum": -1e-3000000000},
             "pick": {"type": "number", "enum": [1, 1.000000000000000000000000000000000000001]},
             "only": {"type": "number", "const": 1.000000000000000000000000000000000000001},
-            "odd": {"type": "number", "multipleOf": 1.000000000000000000000000000000000000001}
+            "odd": {"type": "number", "multipleOf": 1.000000000000000000000000000000000000001},
+            "edge": {"type": "number", "minimum": 1e2147483648}
         }}"#,
     )
     .unwrap();
@@ -2262,6 +2263,8 @@ fn main() {
     assert_eq!(report::<Long>(r#"{"pick":2}"#), vec![v("/pick")]);
     assert_eq!(report::<Long>(r#"{"only":1}"#), vec![v("/only")]);
     assert_eq!(report::<Long>(r#"{"odd":3}"#), vec![u("/odd")]);
+    assert_eq!(report::<Long>(r#"{"edge":1.1e2147483648}"#), vec![]);
+    assert_eq!(report::<Long>(r#"{"edge":9e2147483647}"#), vec![v("/edge")]);
     println!("exact numbers behave");
 }
 "##;
@@ -2439,6 +2442,8 @@ func main() {
 	check("pick", report[api.Long](`{"pick":2}`), v("/pick"))
 	check("only", report[api.Long](`{"only":1}`), v("/only"))
 	check("odd", report[api.Long](`{"odd":3}`), u("/odd"))
+	check("edge", report[api.Long](`{"edge":1.1e2147483648}`))
+	check("below edge", report[api.Long](`{"edge":9e2147483647}`), v("/edge"))
 	fmt.Println("exact numbers behave")
 }
 "##;

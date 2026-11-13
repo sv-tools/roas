@@ -50,16 +50,6 @@ fn float_bound(bound: f64, width: FloatWidth) -> Result<String, f64> {
     }
 }
 
-/// The keyword a bound comes from, and where a value failing it lies.
-fn bound_words(at_least: bool, exclusive: bool) -> (&'static str, &'static str) {
-    match (at_least, exclusive) {
-        (true, false) => ("minimum", "below"),
-        (true, true) => ("exclusiveMinimum", "below"),
-        (false, false) => ("maximum", "above"),
-        (false, true) => ("exclusiveMaximum", "above"),
-    }
-}
-
 /// An exact decimal as a `Decimal` constant.
 fn decimal(d: &checks::Dec) -> String {
     format!(
@@ -146,12 +136,7 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                 literal,
             } => {
                 let at_least = matches!(check, Check::NumAtLeast { .. });
-                let (op, keyword, word) = match (at_least, exclusive) {
-                    (true, false) => (">=", "minimum", "below"),
-                    (true, true) => (">", "exclusiveMinimum", "below"),
-                    (false, false) => ("<=", "maximum", "above"),
-                    (false, true) => ("<", "exclusiveMaximum", "above"),
-                };
+                let (op, keyword, word) = checks::bound_words(at_least, *exclusive);
                 let width = match kind {
                     ValueKind::Number(width) => width,
                     _ => FloatWidth::Double,
@@ -258,8 +243,7 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                         });
                     }
                     ValueKind::Decimal => {
-                        // Exactly; a value no decimal holds was an error
-                        // when lowering.
+                        // Exactly.
                         let mut set: Vec<checks::Dec> =
                             values.iter().filter_map(checks::dec).collect();
                         set.dedup();
@@ -358,12 +342,7 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                 literal,
             } => {
                 let at_least = matches!(check, Check::DecAtLeast { .. });
-                let (op, keyword, word) = match (at_least, exclusive) {
-                    (true, false) => (">=", "minimum", "below"),
-                    (true, true) => (">", "exclusiveMinimum", "below"),
-                    (false, false) => ("<=", "maximum", "above"),
-                    (false, true) => ("<", "exclusiveMaximum", "above"),
-                };
+                let (op, keyword, word) = checks::bound_words(at_least, *exclusive);
                 out.push(format!(
                     "if !(*{v} {op} {}) {{ {r}.violation({p}, format!(\"{{}} is {word} {keyword} {literal}\", {v})); }}",
                     decimal(bound)
@@ -374,7 +353,7 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                 exclusive,
                 literal,
             } => {
-                let (keyword, word) = bound_words(*at_least, *exclusive);
+                let (_, keyword, word) = checks::bound_words(*at_least, *exclusive);
                 out.push(format!(
                     "{r}.violation({p}, format!(\"{{}} is {word} {keyword} {literal}\", {v}));"
                 ));

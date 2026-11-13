@@ -1439,12 +1439,27 @@ fn gcd(mut a: i128, mut b: i128) -> i128 {
     a
 }
 
+/// A bound's comparison, the keyword it comes from, and where a value
+/// failing it lies.
+pub(crate) fn bound_words(
+    at_least: bool,
+    exclusive: bool,
+) -> (&'static str, &'static str, &'static str) {
+    match (at_least, exclusive) {
+        (true, false) => (">=", "minimum", "below"),
+        (true, true) => (">", "exclusiveMinimum", "below"),
+        (false, false) => ("<=", "maximum", "above"),
+        (false, true) => ("<", "exclusiveMaximum", "above"),
+    }
+}
+
 /// The most significant digits an exact decimal holds: an `i128` holds
 /// every 38-digit mantissa.
 pub(crate) const MAX_DIGITS: usize = 38;
 
 /// A number as generated code holds it exactly: `mantissa * 10^exponent`,
-/// canonical — no trailing zero in the mantissa, zero as `0 * 10^0`.
+/// canonical — no trailing zero in the mantissa, zero as `0 * 10^0` — but
+/// for a bound past the largest exponent, which only compares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Dec {
     pub mantissa: i128,
@@ -1482,7 +1497,7 @@ pub(crate) enum HeldBound {
     Always,
     /// No value meets it.
     Never,
-    /// Past the exponents a decimal holds, yet among its values.
+    /// Not a number as written: never for a parsed literal.
     Unheld,
 }
 
@@ -1518,33 +1533,65 @@ pub(crate) fn held_bound(n: &Number, exclusive: bool, at_least: bool) -> HeldBou
     if leading < i64::from(i32::MIN) {
         return HeldBound::Dec(zero, p.negative != at_least);
     }
-    if p.digits.len() <= MAX_DIGITS {
-        return HeldBound::Unheld;
-    }
-    let Ok(mut mantissa) = p.digits[..MAX_DIGITS].parse::<i128>() else {
-        return HeldBound::Unheld;
+    // A held value with leading power `L` is a multiple of
+    // `10^max(L - 37, i32::MIN)`: rounded to that step at the bound's own
+    // magnitude, towards the values meeting it, the bound is the nearest
+    // of them, with none in between.
+    let step = (leading - (MAX_DIGITS as i64 - 1)).max(i64::from(i32::MIN));
+    let dropped = step - p.exponent;
+    let (mut mantissa, mut exponent) = if dropped > 0 {
+        // `step <= leading`, so the leading digit is kept; the digits cut
+        // off end in a non-zero one.
+        let keep = (count - dropped) as usize;
+        let Ok(mut mantissa) = p.digits[..keep].parse::<i128>() else {
+            return HeldBound::Unheld;
+        };
+        if at_least != p.negative {
+            mantissa += 1;
+        }
+        (mantissa, step)
+    } else {
+        // Few enough digits, past the largest exponent.
+        let Ok(mantissa) = p.digits.parse::<i128>() else {
+            return HeldBound::Unheld;
+        };
+        (mantissa, p.exponent)
     };
-    let mut exponent = p.exponent + (count - MAX_DIGITS as i64);
-    // The digits cut off are not all zero: rounding away from zero moves
-    // the magnitude up to the next value.
-    if at_least != p.negative {
-        mantissa += 1;
-    }
     while mantissa % 10 == 0 {
         mantissa /= 10;
         exponent += 1;
     }
-    match i32::try_from(exponent) {
-        // The bound is no value, so a value meets it exclusively exactly
-        // when it meets the rounded one inclusively.
-        Ok(exponent) => HeldBound::Dec(
+    let sign = |m: i128| if p.negative { -m } else { m };
+    // The bound is no value, so a value meets it exclusively exactly when
+    // it meets the rounded one inclusively.
+    if let Ok(exponent) = i32::try_from(exponent) {
+        return HeldBound::Dec(
             Dec {
-                mantissa: if p.negative { -mantissa } else { mantissa },
+                mantissa: sign(mantissa),
                 exponent,
             },
             false,
+        );
+    }
+    // Past the largest exponent, spelled at it with the zeros it takes —
+    // which compares as the number it is — unless that has more digits
+    // than any value, when it is past them all.
+    let shift = exponent - i64::from(i32::MAX);
+    match u32::try_from(shift)
+        .ok()
+        .and_then(|shift| 10i128.checked_pow(shift))
+        .and_then(|scale| mantissa.checked_mul(scale))
+        .filter(|m| *m < 10i128.pow(MAX_DIGITS as u32))
+    {
+        Some(mantissa) => HeldBound::Dec(
+            Dec {
+                mantissa: sign(mantissa),
+                exponent: i32::MAX,
+            },
+            false,
         ),
-        Err(_) => HeldBound::Unheld,
+        None if p.negative == at_least => HeldBound::Always,
+        None => HeldBound::Never,
     }
 }
 
@@ -1622,6 +1669,55 @@ mod tests {
 
     fn n(text: &str) -> Number {
         serde_json::from_str(text).unwrap()
+    }
+
+    // Only an exact build keeps such literals as written.
+    #[cfg(feature = "exact-numbers")]
+    #[test]
+    fn a_bound_no_decimal_holds_is_rounded_to_the_nearest_value() {
+        let d = |mantissa: i128, exponent: i32| Dec { mantissa, exponent };
+        let held = |text: &str, at_least: bool| held_bound(&n(text), true, at_least);
+        // Held as written: kept, exclusive as it was.
+        assert_eq!(held("1.5", true), HeldBound::Dec(d(15, -1), true));
+        // 39 digits: rounded towards the values meeting it, inclusive.
+        let long = "1.00000000000000000000000000000000000001";
+        assert_eq!(
+            held(long, true),
+            HeldBound::Dec(d(10i128.pow(37) + 1, -37), false)
+        );
+        assert_eq!(held(long, false), HeldBound::Dec(d(1, 0), false));
+        assert_eq!(
+            held(&format!("-{long}"), true),
+            HeldBound::Dec(d(-1, 0), false)
+        );
+        // A carry to the next power of ten.
+        let nines = "9".repeat(39);
+        assert_eq!(held(&nines, true), HeldBound::Dec(d(1, 39), false));
+        // At the smallest exponent the step is `10^i32::MIN`.
+        assert_eq!(
+            held("1.5e-2147483648", true),
+            HeldBound::Dec(d(2, i32::MIN), false)
+        );
+        assert_eq!(
+            held("1.5e-2147483648", false),
+            HeldBound::Dec(d(1, i32::MIN), false)
+        );
+        // Below every positive value: compared with zero.
+        assert_eq!(held("1e-2147483649", true), HeldBound::Dec(d(0, 0), true));
+        assert_eq!(held("-1e-2147483649", false), HeldBound::Dec(d(0, 0), true));
+        // Past the largest exponent but among the values: spelled at it.
+        assert_eq!(
+            held("1e2147483648", true),
+            HeldBound::Dec(d(10, i32::MAX), false)
+        );
+        // Above the largest value, before or after rounding.
+        let top = format!("{}e2147483645", "9".repeat(40));
+        assert_eq!(held(&top, true), HeldBound::Never);
+        // Below it, the largest value, which every value meets.
+        let largest = HeldBound::Dec(d(10i128.pow(38) - 1, i32::MAX), false);
+        assert_eq!(held(&top, false), largest);
+        assert_eq!(held(&format!("-{top}"), false), HeldBound::Never);
+        assert_eq!(held("1e2147483685", true), HeldBound::Never);
     }
 
     #[test]

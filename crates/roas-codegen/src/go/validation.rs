@@ -240,8 +240,7 @@ fn render(
                         });
                     }
                     ValueKind::Decimal => {
-                        // Exactly; a value no decimal holds was an error
-                        // when lowering.
+                        // Exactly.
                         let mut set: Vec<checks::Dec> =
                             values.iter().filter_map(checks::dec).collect();
                         set.dedup();
@@ -343,12 +342,7 @@ fn render(
                 literal,
             } => {
                 let at_least = matches!(check, Check::NumAtLeast { .. });
-                let (op, keyword, word) = match (at_least, exclusive) {
-                    (true, false) => (">=", "minimum", "below"),
-                    (true, true) => (">", "exclusiveMinimum", "below"),
-                    (false, false) => ("<=", "maximum", "above"),
-                    (false, true) => ("<", "exclusiveMaximum", "above"),
-                };
+                let (op, keyword, word) = checks::bound_words(at_least, *exclusive);
                 let float = matches!(kind, ValueKind::Number(FloatWidth::Float));
                 // Compared at the value's own width: a float32 bound is the
                 // constant rounded to float32, as the value was.
@@ -410,12 +404,7 @@ fn render(
                 literal,
             } => {
                 let at_least = matches!(check, Check::DecAtLeast { .. });
-                let (op, keyword, word) = match (at_least, exclusive) {
-                    (true, false) => (">=", "minimum", "below"),
-                    (true, true) => (">", "exclusiveMinimum", "below"),
-                    (false, false) => ("<=", "maximum", "above"),
-                    (false, true) => ("<", "exclusiveMaximum", "above"),
-                };
+                let (op, keyword, word) = checks::bound_words(at_least, *exclusive);
                 out.push(format!(
                     "if !({e}.Cmp({}) {op} 0) {{ {r}.violation({p}, fmt.Sprintf({}, {e})) }}",
                     decimal(bound),
@@ -427,12 +416,7 @@ fn render(
                 exclusive,
                 literal,
             } => {
-                let (keyword, word) = match (at_least, exclusive) {
-                    (true, false) => ("minimum", "below"),
-                    (true, true) => ("exclusiveMinimum", "below"),
-                    (false, false) => ("maximum", "above"),
-                    (false, true) => ("exclusiveMaximum", "above"),
-                };
+                let (_, keyword, word) = checks::bound_words(*at_least, *exclusive);
                 out.push(format!(
                     "{r}.violation({p}, fmt.Sprintf({}, {e}))",
                     lit(&format!("%v is {word} {keyword} {literal}"))

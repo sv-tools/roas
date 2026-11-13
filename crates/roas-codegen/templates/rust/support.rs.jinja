@@ -151,7 +151,7 @@ impl Decimal {
     }
 
     /// The nearest `f64`.
-    pub fn to_f64(&self) -> f64 {
+    pub fn to_f64(self) -> f64 {
         self.to_string().parse().unwrap_or(f64::NAN)
     }
 
