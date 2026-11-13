@@ -18,13 +18,15 @@ load it, grouped however makes sense for the crate.
 ## Build, Test, and Development Commands
 
 - `cargo install-tools`: installs the CI toolchain from `.cargo/config.toml` (`cargo-deny`, `cargo-llvm-cov`,
-  `cargo-machete`, `cargo-nextest`, `cargo-action-fmt`).
+  `cargo-nextest`, `cargo-action-fmt`).
 - `cargo build --workspace` builds every crate with default features; pass `-p <crate>` to build one.
 - `cargo nextest run --workspace --all-features` runs all tests across the workspace.
 - `cargo fmt --all` applies standard Rust formatting across the whole workspace.
 - `cargo clippy --workspace --all-features --all-targets -- -D warnings`: lints every crate with warnings as errors.
 - `cargo deny check` audits licenses, advisories, bans, and sources using `deny.toml`.
-- `cargo machete` checks for unused dependencies before dependency cleanup.
+- Unused dependencies fail the build through cargo's `unused_dependencies` lint (denied by `build.warnings`). It
+  only checks the features being built, so build each feature alone (`--no-default-features --features <f>`) after
+  touching a crate's dependencies.
 
 ## Coding Style & Naming Conventions
 
@@ -74,4 +76,4 @@ not in the body. The PR's CI matrix is the source of truth for what passed.
 ## Security & Configuration Tips
 
 Do not commit credentials, private API specs, or local machine paths. Keep dependency and license changes intentional,
-and run `cargo deny check` plus `cargo machete` when adding, upgrading, or removing dependencies.
+and run `cargo deny check` when adding, upgrading, or removing dependencies.

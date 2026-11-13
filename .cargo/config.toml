@@ -1,2 +1,2 @@
 [alias]
-install-tools = "install --locked cargo-deny cargo-llvm-cov cargo-machete cargo-nextest cargo-action-fmt"
+install-tools = "install --locked cargo-deny cargo-llvm-cov cargo-nextest cargo-action-fmt"
