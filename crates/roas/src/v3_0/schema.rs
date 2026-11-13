@@ -201,7 +201,7 @@ pub struct AllOfSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "crate::common::extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 
@@ -230,7 +230,7 @@ pub struct AnyOfSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "crate::common::extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -252,7 +252,7 @@ pub struct OneOfSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "crate::common::extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -266,7 +266,7 @@ pub struct NotSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "crate::common::extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -422,7 +422,7 @@ pub struct StringSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "crate::common::extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -549,7 +549,7 @@ pub struct IntegerSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "crate::common::extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -669,7 +669,7 @@ pub struct NumberSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "crate::common::extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -742,7 +742,7 @@ pub struct BooleanSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "crate::common::extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -832,7 +832,7 @@ pub struct ArraySchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "crate::common::extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -945,7 +945,7 @@ pub struct ObjectSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "crate::common::extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -1012,7 +1012,7 @@ pub struct NullSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "crate::common::extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -1228,6 +1228,35 @@ fn bool_item<S, R>(b: Option<&BoolOr<RefOr<S, R>>>) -> Option<&RefOr<S, R>> {
 mod tests {
     use super::*;
     use crate::validation::ValidationErrorsExt;
+
+    #[test]
+    fn keywords_beside_all_of_survive_a_round_trip() {
+        // #372: `type`, `title` and `required` beside `allOf` were dropped.
+        let wire = serde_json::json!({
+            "type": "object",
+            "title": "WAVOutputFormat",
+            "required": ["container"],
+            "allOf": [
+                {"type": "object", "properties": {"container": {"type": "string", "enum": ["wav"]}}},
+                {"$ref": "#/components/schemas/WAVOutputFormat"}
+            ]
+        });
+        let schema: Schema = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&schema).unwrap(), wire);
+    }
+
+    #[test]
+    fn keywords_3_0_does_not_define_survive_a_round_trip() {
+        // #372: `const` was dropped while `x-keep` beside it survived.
+        let wire = serde_json::json!({
+            "type": "string",
+            "enum": ["a"],
+            "const": "a",
+            "x-keep": 1
+        });
+        let schema: Schema = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&schema).unwrap(), wire);
+    }
 
     #[test]
     fn test_single_deserialize() {
