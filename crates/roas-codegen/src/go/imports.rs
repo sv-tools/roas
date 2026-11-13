@@ -8,8 +8,15 @@ use std::collections::BTreeSet;
 /// rendered file, every package the file names; over a substitution's
 /// spelling, the packages that spelling names.
 pub(crate) fn qualifiers(text: &str) -> BTreeSet<String> {
+    qualifier_list(text).into_iter().collect()
+}
+
+/// The qualifiers in `text`, in order: for a substitution's spelling, the
+/// first is the package of the type itself (`atomic` in
+/// `atomic.Pointer[netip.Addr]`), the rest those of its arguments.
+pub(crate) fn qualifier_list(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
-    let mut out = BTreeSet::new();
+    let mut out = Vec::new();
     let mut i = 0;
     // The last token was a `.`: the identifier after it is a selector.
     let mut after_dot = false;
@@ -74,7 +81,7 @@ pub(crate) fn qualifiers(text: &str) -> BTreeSet<String> {
                     && bytes.get(next) == Some(&b'.')
                     && bytes.get(next + 1) != Some(&b'.')
                 {
-                    out.insert(text[start..i].to_owned());
+                    out.push(text[start..i].to_owned());
                 }
                 after_dot = false;
             }

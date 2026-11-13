@@ -769,3 +769,38 @@ fn file_per_type_refuses_an_import_named_like_the_decimal_receiver() {
     let error = result.unwrap_err();
     assert!(matches!(error, GenerateError::Config(_)), "{error}");
 }
+
+#[test]
+fn file_per_type_credits_a_generic_substitution_import_with_its_own_package() {
+    // `atomic` is the substitution's package; `jsontext` and `netip`, in
+    // its arguments, are other imports'.
+    let toml = "layout = \"file_per_type\"\nextra_imports = ['\"net/netip\"']\n[substitutions.ipv4.go]\nname = \"atomic.Pointer[jsontext.Value]\"\nimport = \"sync/atomic\"\n[substitutions.ipv6.go]\nname = \"atomic.Pointer[netip.Addr]\"\nimport = \"sync/atomic\"\n";
+    let components = serde_json::json!({
+        "Host": {"type": "object", "properties": {"a": {"type": "string", "format": "ipv4"}, "b": {"type": "string", "format": "ipv6"}}},
+        "Other": {"type": "object", "properties": {"raw": {"oneOf": [{"type": "string"}, {"type": "integer"}]}}}
+    });
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let generation = result.expect("generates");
+    let host = generation
+        .files
+        .iter()
+        .find(|f| f.path == Path::new("host.go"))
+        .unwrap();
+    assert!(
+        host.contents.contains("\"sync/atomic\""),
+        "{}",
+        host.contents
+    );
+    for file in &generation.files {
+        if file.path != Path::new("host.go") && !file.contents.contains("atomic.") {
+            assert!(
+                !file.contents.contains("\"sync/atomic\""),
+                "{}: {}",
+                file.path.display(),
+                file.contents
+            );
+        }
+    }
+}

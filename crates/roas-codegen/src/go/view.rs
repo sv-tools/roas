@@ -474,11 +474,21 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 )));
             }
             imports.push(quote(import));
-            let mut names = builder
+            // A qualifier another import is used under is that import's.
+            let mut names: BTreeSet<String> = builder
                 .extern_names
                 .get(import)
+                .into_iter()
+                .flatten()
+                .filter(|q| {
+                    !builtin.iter().any(|(_, b)| b == q)
+                        && !builder
+                            .externs
+                            .iter()
+                            .any(|other| other != import && package_of(other) == q.as_str())
+                })
                 .cloned()
-                .unwrap_or_default();
+                .collect();
             names.insert(name.to_owned());
             import_names.push(names);
             // The standard library is no dependency to declare; a module
@@ -712,10 +722,13 @@ impl Builder<'_> {
             })?;
         if let Some(import) = &spelling.import {
             self.externs.insert(import.clone());
-            self.extern_names
-                .entry(import.clone())
-                .or_default()
-                .extend(super::imports::qualifiers(&spelling.name));
+            // The type's own package, not its arguments': those belong to
+            // the imports their packages come from.
+            self.extern_names.entry(import.clone()).or_default().extend(
+                super::imports::qualifier_list(&spelling.name)
+                    .into_iter()
+                    .take(1),
+            );
         }
         Ok(spelling.name.clone())
     }
