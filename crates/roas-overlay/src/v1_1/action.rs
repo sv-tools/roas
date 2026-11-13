@@ -4,7 +4,6 @@
 //! New in v1.1: the `copy` field — a JSONPath selecting a single
 //! source node whose value is merged into each `target` node.
 
-use crate::common::apply::compile_path;
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -51,22 +50,12 @@ impl Action {
     }
 }
 
-/// Validate that `value` is a non-empty, syntactically valid RFC 9535
-/// JSONPath, recording diagnostics under `<current>.<field>`.
-fn validate_jsonpath(value: &str, ctx: &mut Context, field: &str) {
-    if value.is_empty() {
-        ctx.error_field(field, "must not be empty");
-    } else if let Err(msg) = compile_path(value) {
-        ctx.error_field(field, format!("invalid JSONPath query: {msg}"));
-    }
-}
-
 impl ValidateWithContext for Action {
     fn validate_with_context(&self, ctx: &mut Context) {
-        validate_jsonpath(&self.target, ctx, "target");
+        ctx.require_jsonpath("target", &self.target);
 
         if let Some(copy) = &self.copy {
-            validate_jsonpath(copy, ctx, "copy");
+            ctx.require_jsonpath("copy", copy);
         }
 
         // The spec says `update` "has no impact if the `remove` field
