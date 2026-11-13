@@ -293,14 +293,17 @@ pub(crate) fn merge_required_scalar<V>(
 
 /// Replace `base` with `other` only when `other` is non-empty.
 /// Records [`ConflictKind::ListReplaced`] when an actual replacement
-/// occurs. Used for `servers`, `security`, etc.
+/// occurs; an `other` equal to `base` is a no-op, as for
+/// [`merge_opt_scalar`]. Used for `servers`, `security`, etc.
 pub(crate) fn merge_replace_list_when_nonempty<V>(
     base: &mut Option<Vec<V>>,
     other: Option<Vec<V>>,
     ctx: &mut MergeContext,
     path: &mut String,
     segment: &str,
-) {
+) where
+    V: PartialEq,
+{
     if ctx.errored {
         return;
     }
@@ -312,11 +315,13 @@ pub(crate) fn merge_replace_list_when_nonempty<V>(
     }
     match base {
         Some(b) if !b.is_empty() => {
-            let take = with_segment(path, segment, |p| {
-                ctx.should_take_incoming(p, ConflictKind::ListReplaced)
-            });
-            if take {
-                *b = other;
+            if *b != other {
+                let take = with_segment(path, segment, |p| {
+                    ctx.should_take_incoming(p, ConflictKind::ListReplaced)
+                });
+                if take {
+                    *b = other;
+                }
             }
         }
         _ => *base = Some(other),
@@ -546,6 +551,40 @@ mod tests {
         assert_eq!(ctx.conflicts.len(), 1);
         assert_eq!(ctx.conflicts[0].kind, ConflictKind::ListReplaced);
         assert_eq!(ctx.conflicts[0].path, "#.servers");
+    }
+
+    #[test]
+    fn merge_replace_list_with_an_equal_list_records_no_conflict() {
+        let mut base: Option<Vec<i32>> = Some(vec![1, 2]);
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::new());
+        let mut path = root_path();
+        merge_replace_list_when_nonempty(
+            &mut base,
+            Some(vec![1, 2]),
+            &mut ctx,
+            &mut path,
+            ".servers",
+        );
+        assert_eq!(base, Some(vec![1, 2]));
+        assert!(ctx.conflicts.is_empty());
+        assert_eq!(path, "#", "path balanced");
+    }
+
+    #[test]
+    fn merge_replace_list_with_an_equal_list_does_not_trip_error_on_conflict() {
+        let mut base: Option<Vec<i32>> = Some(vec![1, 2]);
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::ErrorOnConflict.only());
+        let mut path = root_path();
+        merge_replace_list_when_nonempty(
+            &mut base,
+            Some(vec![1, 2]),
+            &mut ctx,
+            &mut path,
+            ".servers",
+        );
+        assert!(!ctx.errored);
+        assert!(ctx.conflicts.is_empty());
+        assert_eq!(base, Some(vec![1, 2]));
     }
 
     #[test]
