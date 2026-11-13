@@ -2119,11 +2119,13 @@ pub fn write(
     if let Some(stored) = misspelled(out_dir, &manifest_file, &mut Listings::default()) {
         respell(out_dir, &stored, &manifest_file)?;
     }
-    // A directory that held only removed files goes with them, as after
-    // leaving `layout = "file_per_type"`. `remove_dir` removes nothing but
-    // an empty directory, and never what a link points to.
-    for path in &report.removed {
-        let mut dir = path.parent();
+    // A directory that held only stale files goes with them, as after
+    // leaving `layout = "file_per_type"` — those this run removed, and
+    // those a run interrupted after removing them left gone. `remove_dir`
+    // removes nothing but an empty directory, and never what a link
+    // points to.
+    for (path, _) in &removable {
+        let mut dir = Path::new(path).parent();
         while let Some(rel) = dir.filter(|d| !d.as_os_str().is_empty()) {
             if fs::remove_dir(out_dir.join(rel)).is_err() {
                 break;
@@ -2392,6 +2394,22 @@ mod tests {
         .unwrap();
         assert!(!dir.0.join("types").exists());
         // A directory holding anything else stays.
+        assert!(dir.0.join("keep/mine.rs").exists());
+        // As after a run interrupted once the stale files were gone.
+        write(
+            &generation(&[("types.rs", "m"), ("types/a.rs", "a")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        fs::remove_file(dir.0.join("types/a.rs")).unwrap();
+        write(
+            &generation(&[("types.rs", "m2")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        assert!(!dir.0.join("types").exists());
         assert!(dir.0.join("keep/mine.rs").exists());
     }
 
