@@ -2142,7 +2142,9 @@ fn exact_generation(target: Target) -> roas_codegen::Generation {
                 "half": {"type": "number", "multipleOf": 0.5},
                 "fixed": {"type": "number", "const": -0.25}
             }},
-            "Rates": {"type": "array", "items": {"type": "number", "maximum": 1}}
+            "Rates": {"type": "array", "items": {"type": "number", "maximum": 1}},
+            "Either": {"oneOf": [{"type": "number"}, {"type": "string"}]},
+            "Pat": {"type": "object", "patternProperties": {"^x": {"type": "number"}}}
         }}
     });
     let mut description = description;
@@ -2265,6 +2267,15 @@ fn main() {
     assert_eq!(report::<Long>(r#"{"odd":3}"#), vec![u("/odd")]);
     assert_eq!(report::<Long>(r#"{"edge":1.1e2147483648}"#), vec![]);
     assert_eq!(report::<Long>(r#"{"edge":9e2147483647}"#), vec![v("/edge")]);
+    // A rounded bound is still named by its keyword.
+    let found = serde_json::from_str::<Long>(r#"{"hi":0.1000000000000000000000000000000000001}"#).unwrap().validate();
+    assert!(found.findings[0].message.contains("exclusiveMaximum"), "{found:?}");
+    // A number no decimal holds fails a branch for its representation:
+    // nothing is proven.
+    let wide = "1.000000000000000000000000000000000000001";
+    assert_eq!(report::<Either>(r#""s""#), vec![]);
+    assert_eq!(report::<Either>(wide), vec![u("")]);
+    assert_eq!(report::<Pat>(&format!(r#"{{"x1":{wide}}}"#)), vec![u("/x1")]);
     println!("exact numbers behave");
 }
 "##;
@@ -2326,6 +2337,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 
 	"generated/api"
 )
@@ -2444,6 +2456,17 @@ func main() {
 	check("odd", report[api.Long](`{"odd":3}`), u("/odd"))
 	check("edge", report[api.Long](`{"edge":1.1e2147483648}`))
 	check("below edge", report[api.Long](`{"edge":9e2147483647}`), v("/edge"))
+	var hi api.Long
+	if err := json.Unmarshal([]byte(`{"hi":0.1000000000000000000000000000000000001}`), &hi); err != nil {
+		panic(err)
+	}
+	if got := hi.Validate().Findings; len(got) != 1 || !strings.Contains(got[0].Message, "exclusiveMaximum") {
+		panic(fmt.Sprint(got))
+	}
+	wide := "1.000000000000000000000000000000000000001"
+	check("either", report[api.Either](`"s"`))
+	check("either wide", report[api.Either](wide), u(""))
+	check("pattern wide", report[api.Pat](`{"x1":`+wide+`}`), u("/x1"))
 	fmt.Println("exact numbers behave")
 }
 "##;

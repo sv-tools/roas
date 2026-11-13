@@ -82,15 +82,19 @@ pub(crate) enum Check {
         integral: bool,
         literal: String,
     },
-    /// `value >= bound` (or `>` when exclusive), on an exact decimal.
+    /// `value >= bound` (or `>` when exclusive), on an exact decimal; the
+    /// keyword it comes from, which a bound rounded to the values it
+    /// decides no longer says.
     DecAtLeast {
         bound: Dec,
         exclusive: bool,
+        keyword: &'static str,
         literal: String,
     },
     DecAtMost {
         bound: Dec,
         exclusive: bool,
+        keyword: &'static str,
         literal: String,
     },
     /// A bound on an exact decimal no value it holds meets.
@@ -322,11 +326,6 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
             }
         }
         ValueKind::Decimal => {
-            // A literal no decimal holds is warned about when lowering.
-            let unheld = |keyword: &'static str, n: &Number| Check::Unevaluated {
-                keyword,
-                reason: format!("{n} is past what an exact decimal holds"),
-            };
             for (n, keyword, exclusive, at_least) in [
                 (&c.minimum, "minimum", false, true),
                 (&c.exclusive_minimum, "exclusiveMinimum", true, true),
@@ -339,11 +338,13 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                     HeldBound::Dec(bound, exclusive) if at_least => Check::DecAtLeast {
                         bound,
                         exclusive,
+                        keyword,
                         literal,
                     },
                     HeldBound::Dec(bound, exclusive) => Check::DecAtMost {
                         bound,
                         exclusive,
+                        keyword,
                         literal,
                     },
                     HeldBound::Never => Check::DecOutside {
@@ -352,7 +353,6 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                         literal,
                     },
                     HeldBound::Always => continue,
-                    HeldBound::Unheld => unheld(keyword, n),
                 });
             }
             out.extend(number_in(c));
@@ -362,7 +362,11 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                         divisor,
                         literal: n.to_string(),
                     },
-                    None => unheld("multipleOf", n),
+                    // Warned about when lowering.
+                    None => Check::Unevaluated {
+                        keyword: "multipleOf",
+                        reason: format!("{n} is past what an exact decimal holds"),
+                    },
                 });
             }
         }
@@ -700,11 +704,14 @@ mod neighbours {
 /// The ranges the types of a holder's branches can hold, found through
 /// fields, items, values and references: the whole-number magnitude from
 /// which the narrowest integer among them overflows (`None` with no
-/// integer), and whether a 32-bit float is among them. A number past
-/// either fails a branch's decoding for the representation, not because
-/// the value is not one the branch's schema allows. A substituted type is
-/// assumed to be as narrow as any.
-pub(crate) fn number_range(ir: &crate::ir::Ir, tys: &[&TypeRef]) -> (Option<&'static str>, bool) {
+/// integer), whether a 32-bit float is among them, and whether an exact
+/// decimal is. A number past either fails a branch's decoding for the
+/// representation, not because the value is not one the branch's schema
+/// allows. A substituted type is assumed to be as narrow as any.
+pub(crate) fn number_range(
+    ir: &crate::ir::Ir,
+    tys: &[&TypeRef],
+) -> (Option<&'static str>, bool, bool) {
     fn walk(
         ir: &crate::ir::Ir,
         ty: &TypeRef,
@@ -712,11 +719,13 @@ pub(crate) fn number_range(ir: &crate::ir::Ir, tys: &[&TypeRef]) -> (Option<&'st
         int32: &mut bool,
         int64: &mut bool,
         float32: &mut bool,
+        decimal: &mut bool,
     ) {
         match ty {
             TypeRef::Integer(IntWidth::Int32) => *int32 = true,
             TypeRef::Integer(_) => *int64 = true,
             TypeRef::Number(FloatWidth::Float) => *float32 = true,
+            TypeRef::Decimal => *decimal = true,
             TypeRef::Extern(_) => {
                 *int32 = true;
                 *float32 = true;
@@ -724,7 +733,7 @@ pub(crate) fn number_range(ir: &crate::ir::Ir, tys: &[&TypeRef]) -> (Option<&'st
             TypeRef::Boxed(inner)
             | TypeRef::Nullable(inner)
             | TypeRef::Array(inner)
-            | TypeRef::Map(inner) => walk(ir, inner, seen, int32, int64, float32),
+            | TypeRef::Map(inner) => walk(ir, inner, seen, int32, int64, float32, decimal),
             TypeRef::Named(id) => {
                 if !seen.insert(id.clone()) {
                     return;
@@ -751,16 +760,24 @@ pub(crate) fn number_range(ir: &crate::ir::Ir, tys: &[&TypeRef]) -> (Option<&'st
                     TypeKind::StringEnum(_) => {}
                 }
                 for ty in inner {
-                    walk(ir, ty, seen, int32, int64, float32);
+                    walk(ir, ty, seen, int32, int64, float32, decimal);
                 }
             }
             _ => {}
         }
     }
-    let (mut int32, mut int64, mut float32) = (false, false, false);
+    let (mut int32, mut int64, mut float32, mut decimal) = (false, false, false, false);
     let mut seen = std::collections::BTreeSet::new();
     for ty in tys {
-        walk(ir, ty, &mut seen, &mut int32, &mut int64, &mut float32);
+        walk(
+            ir,
+            ty,
+            &mut seen,
+            &mut int32,
+            &mut int64,
+            &mut float32,
+            &mut decimal,
+        );
     }
     let limit = if int32 {
         Some("2147483648.0")
@@ -769,7 +786,7 @@ pub(crate) fn number_range(ir: &crate::ir::Ir, tys: &[&TypeRef]) -> (Option<&'st
     } else {
         None
     };
-    (limit, float32)
+    (limit, float32, decimal)
 }
 
 /// Whether `ty` reaches a substituted type, whose decoding is the user's:
@@ -1497,8 +1514,6 @@ pub(crate) enum HeldBound {
     Always,
     /// No value meets it.
     Never,
-    /// Not a number as written: never for a parsed literal.
-    Unheld,
 }
 
 /// `value >= n` (`at_least`) or `value <= n`, exclusive or not, for the
@@ -1510,9 +1525,7 @@ pub(crate) fn held_bound(n: &Number, exclusive: bool, at_least: bool) -> HeldBou
     if let Some(d) = dec(n) {
         return HeldBound::Dec(d, exclusive);
     }
-    let Some(p) = parse_decimal(n) else {
-        return HeldBound::Unheld;
-    };
+    let p = parse_decimal(n).expect("a JSON number reads as a decimal");
     let zero = Dec {
         mantissa: 0,
         exponent: 0,
@@ -1543,18 +1556,14 @@ pub(crate) fn held_bound(n: &Number, exclusive: bool, at_least: bool) -> HeldBou
         // `step <= leading`, so the leading digit is kept; the digits cut
         // off end in a non-zero one.
         let keep = (count - dropped) as usize;
-        let Ok(mut mantissa) = p.digits[..keep].parse::<i128>() else {
-            return HeldBound::Unheld;
-        };
+        let mut mantissa: i128 = p.digits[..keep].parse().expect("at most 38 digits");
         if at_least != p.negative {
             mantissa += 1;
         }
         (mantissa, step)
     } else {
         // Few enough digits, past the largest exponent.
-        let Ok(mantissa) = p.digits.parse::<i128>() else {
-            return HeldBound::Unheld;
-        };
+        let mantissa: i128 = p.digits.parse().expect("at most 38 digits");
         (mantissa, p.exponent)
     };
     while mantissa % 10 == 0 {

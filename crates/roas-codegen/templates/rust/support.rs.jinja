@@ -538,11 +538,12 @@ mod require_present {
 
 {% endif %}{% if support.validation %}/// Whether `raw` has a number a generated type may fail to decode for its
 /// range rather than its value: a whole number from `int_limit` on, one
-/// past the 32-bit float range when `float32` holds, or one past `f64` —
-/// or nests deeper than the decoder reads.
+/// past the 32-bit float range when `float32` holds, one no `Decimal`
+/// holds when `decimal` does, or one past `f64` — or nests deeper than the
+/// decoder reads.
 /// A union branch that fails to decode such a value proves no mismatch.
-#[allow(dead_code)]
-fn wide_number(raw: &str, int_limit: f64, float32: bool) -> bool {
+#[allow(dead_code, unused_variables)]
+fn wide_number(raw: &str, int_limit: f64, float32: bool, decimal: bool) -> bool {
     let bytes = raw.as_bytes();
     let (mut i, mut in_string, mut depth) = (0, false, 0usize);
     while i < bytes.len() {
@@ -581,7 +582,10 @@ fn wide_number(raw: &str, int_limit: f64, float32: bool) -> bool {
                 i += 1;
             }
             let f: f64 = raw[start..i].parse().unwrap_or(f64::INFINITY);
-            if !f.is_finite()
+{% if support.decimal %}            if decimal && Decimal::token(&raw[start..i]).is_none() {
+                return true;
+            }
+{% endif %}            if !f.is_finite()
                 || (f.fract() == 0.0 && f.abs() >= int_limit)
                 || (float32 && f.abs() > f64::from(f32::MAX))
             {

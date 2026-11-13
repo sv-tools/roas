@@ -334,15 +334,17 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
             Check::DecAtLeast {
                 bound,
                 exclusive,
+                keyword,
                 literal,
             }
             | Check::DecAtMost {
                 bound,
                 exclusive,
+                keyword,
                 literal,
             } => {
                 let at_least = matches!(check, Check::DecAtLeast { .. });
-                let (op, keyword, word) = checks::bound_words(at_least, *exclusive);
+                let (op, _, word) = checks::bound_words(at_least, *exclusive);
                 out.push(format!(
                     "if !(*{v} {op} {}) {{ {r}.violation({p}, format!(\"{{}} is {word} {keyword} {literal}\", {v})); }}",
                     decimal(bound)
@@ -609,9 +611,9 @@ fn rust_wide_of<'a>(
     raw: &str,
 ) -> String {
     let tys: Vec<&TypeRef> = tys.collect();
-    let (limit, float32) = checks::number_range(ir, &tys);
+    let (limit, float32, decimal) = checks::number_range(ir, &tys);
     format!(
-        "wide_number({raw}, {}, {float32})",
+        "wide_number({raw}, {}, {float32}, {decimal})",
         limit.unwrap_or("f64::INFINITY")
     )
 }
