@@ -2889,6 +2889,27 @@ mod tests {
     }
 
     #[test]
+    fn spec_with_the_same_servers_merges_under_error_on_conflict() {
+        let servers = vec![Server {
+            url: "https://api.example.com".into(),
+            ..Default::default()
+        }];
+        let mut base = Spec {
+            servers: Some(servers.clone()),
+            ..Default::default()
+        };
+        let incoming = Spec {
+            servers: Some(servers.clone()),
+            ..Default::default()
+        };
+        let report = base
+            .merge(incoming, MergeOptions::ErrorOnConflict.only())
+            .unwrap();
+        assert!(report.conflicts.is_empty());
+        assert_eq!(base.servers, Some(servers));
+    }
+
+    #[test]
     fn discriminator_mapping_loop_breaks_on_error_on_conflict() {
         use crate::v3_2::discriminator::Discriminator;
         // Two mapping collisions in a row; under ErrorOnConflict only
