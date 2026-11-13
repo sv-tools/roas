@@ -15,10 +15,6 @@
 {% endfor %}{% endblock %}
 {% block body %}{% include "rust/support.rs.jinja" %}
 {% for t in types %}
-{% for gate in t.cfg %}{{ gate }}
-{% endfor %}mod {{ t.file }};
-{% for gate in t.cfg %}{{ gate }}
-{% endfor %}#[allow(unused_imports)]
-pub use self::{{ t.file }}::{{ t.name }};
+include!("{{ module }}/{{ t.file }}.rs");
 {% endfor %}{% endblock %}
 {% block footer %}{% endblock %}

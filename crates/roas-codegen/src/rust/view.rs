@@ -154,8 +154,8 @@ pub(crate) struct TypeView {
     /// The type's conditional-compilation gates (`#[cfg(...)]` among its
     /// configured attributes), repeated on every impl generated beside it.
     pub cfg: Vec<String>,
-    /// Under `layout = "file_per_type"`, the submodule, and file stem,
-    /// the type is written to.
+    /// Under `layout = "file_per_type"`, the stem of the file the type is
+    /// written to, below the module's directory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
 }
@@ -170,6 +170,10 @@ pub(crate) struct FileView {
     pub extra_imports: Vec<String>,
     pub support: SupportView,
     pub types: Vec<TypeView>,
+    /// Under `layout = "file_per_type"`, the module: the directory the
+    /// types' files are in, which the module file includes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
 }
 
 /// A Rust dependency the generated code needs.
@@ -248,9 +252,6 @@ struct Builder<'a> {
     names: BTreeMap<SchemaId, String>,
     support: SupportView,
     externs: BTreeMap<String, String>,
-    /// The attributes the configuration and `x-rust-attrs` add, with the
-    /// type or field they are on: the paths in them are the user's.
-    written: Vec<(String, String)>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -264,7 +265,6 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             ..SupportView::default()
         },
         externs: BTreeMap::new(),
-        written: Vec::new(),
         diagnostics: Vec::new(),
     };
     select_check(ir, config)?;
@@ -282,9 +282,10 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         }
     }
     let uses_regex = super::validation::take_uses_regex();
-    if config.layout == Layout::FilePerType {
-        assign_files(&mut types, config, &builder.written)?;
-    }
+    let module = (config.layout == Layout::FilePerType).then(|| {
+        assign_files(&mut types);
+        config.rust.module.clone()
+    });
     let mut dependencies = vec![
         RustDependency {
             name: "serde".into(),
@@ -328,79 +329,19 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             extra_imports: config.extra_imports.clone(),
             support: builder.support,
             types,
+            module,
         },
         dependencies,
         diagnostics: builder.diagnostics,
     })
 }
 
-/// Lowercase names the module declares or reaches in the type namespace:
-/// a submodule named like one would hide it or clash with it.
-const MODULE_SCOPE: &[&str] = &[
-    "std",
-    "core",
-    "alloc",
-    "proc_macro",
-    "test",
-    "serde",
-    "serde_json",
-    "regex",
-    "double_option",
-    "reject_null",
-    "require_present",
-    "roas_string_only",
-    "roas_string_only_variant",
-    "roas_object_only",
-    "roas_catch_all",
-];
-
-/// Names the submodule of every type under `layout = "file_per_type"`:
-/// its name in snake case, never a name the module already uses for
-/// something else, a crate a path in the generated code starts with, or
-/// one a file system resolves elsewhere.
-fn assign_files(
-    types: &mut [TypeView],
-    config: &Config,
-    written: &[(String, String)],
-) -> Result<(), GenerateError> {
-    let mut taken: std::collections::BTreeSet<String> =
-        MODULE_SCOPE.iter().map(|s| (*s).to_owned()).collect();
-    taken.extend(types.iter().map(|t| t.name.clone()));
-    for spelling in config
-        .substitutions
-        .values()
-        .filter_map(|s| s.rust.as_ref())
-    {
-        if let Some(import) = &spelling.import {
-            taken.insert(import.replace('-', "_"));
-        }
-        taken.extend(crate::generate::first_path_segments(&spelling.name).map(str::to_owned));
-    }
-    // The derives and attributes the user added: a path in one starting
-    // at a crate is hidden by a submodule of that name, and one relative
-    // to the module would start a level too deep. The generator's own
-    // attributes name no crate a submodule could hide, and their strings
-    // (a `rename`) are names, not paths.
-    let derives = config.rust.derives.iter().map(|d| (d, "every type"));
-    for (text, at) in derives.chain(written.iter().map(|(text, at)| (text, at.as_str()))) {
-        for first in crate::generate::first_path_segments(&path_text(text)) {
-            if first == "self" || first == "super" {
-                return Err(GenerateError::Config(format!(
-                    "`{text}` on {at} names a path relative to the module, which `layout = \"file_per_type\"` moves each type below; spell it from `crate::`"
-                )));
-            }
-            taken.insert(first.to_owned());
-        }
-    }
-    for line in &config.extra_imports {
-        taken.extend(crate::generate::first_path_segments(line).map(str::to_owned));
-        // And what the line declares: `use std::fmt;` binds `fmt`.
-        if let Ok(file) = syn::parse_str::<syn::File>(line) {
-            for item in &file.items {
-                bound_names(item, &mut taken);
-            }
-        }
-    }
+/// Names the file of every type under `layout = "file_per_type"`: its name
+/// in snake case, unique and lowercase, so distinct on a case-insensitive
+/// disk too, and never one a Windows file system resolves elsewhere. The
+/// module includes the files, so their names are not Rust names.
+fn assign_files(types: &mut [TypeView]) {
+    let mut taken = std::collections::BTreeSet::new();
     for t in types {
         let base = crate::config::rust_module_name(&snake(std::slice::from_ref(&t.name)));
         let file = (1u32..)
@@ -411,120 +352,11 @@ fn assign_files(
                     format!("{base}{i}")
                 }
             })
-            .find(|candidate| {
-                !taken.contains(candidate) && crate::config::is_module_name(candidate)
-            })
-            .expect("a free module name");
+            .find(|candidate| !taken.contains(candidate) && crate::write::windows_safe(candidate))
+            .expect("a free file name");
         taken.insert(file.clone());
         t.file = Some(file);
     }
-    Ok(())
-}
-
-/// Keys whose string value is a path, as serde's are: `with = "m"`.
-const PATH_KEYS: &[&str] = &[
-    "with",
-    "serialize_with",
-    "deserialize_with",
-    "default",
-    "skip_serializing_if",
-    "getter",
-    "from",
-    "into",
-    "try_from",
-    "remote",
-    "crate",
-    "bound",
-];
-
-/// An attribute's text with every string literal blanked out but those a
-/// path-taking key is set to: a `doc` or `deprecated(note = ...)` string
-/// is prose, and a `rename` one a name.
-fn path_text(attr: &str) -> String {
-    let mut out = String::with_capacity(attr.len());
-    let mut chars = attr.char_indices().peekable();
-    while let Some((at, c)) = chars.next() {
-        // A raw string: `r"..."`, `r#"..."#`.
-        let raw = c == 'r'
-            && !out.ends_with(|p: char| p.is_alphanumeric() || p == '_')
-            && attr[at + 1..].trim_start_matches('#').starts_with('"');
-        if c != '"' && !raw {
-            out.push(c);
-            continue;
-        }
-        let hashes = if raw {
-            let n = attr[at + 1..].len() - attr[at + 1..].trim_start_matches('#').len();
-            for _ in 0..=n {
-                chars.next(); // the hashes and the quote
-            }
-            n
-        } else {
-            0
-        };
-        let start = chars.peek().map_or(attr.len(), |(i, _)| *i);
-        let mut end = attr.len();
-        while let Some((i, c)) = chars.next() {
-            if !raw && c == '\\' {
-                chars.next();
-            } else if c == '"' && attr[i + 1..].starts_with(&"#".repeat(hashes)) {
-                end = i;
-                for _ in 0..hashes {
-                    chars.next();
-                }
-                break;
-            }
-        }
-        let key = out
-            .trim_end()
-            .strip_suffix('=')
-            .map(|before| {
-                let before = before.trim_end();
-                let from = before
-                    .rfind(|p: char| !(p.is_alphanumeric() || p == '_'))
-                    .map_or(0, |i| i + 1);
-                &before[from..]
-            })
-            .unwrap_or("");
-        let path = PATH_KEYS.contains(&key);
-        out.push('"');
-        if path {
-            out.push_str(&attr[start..end]);
-        }
-        out.push('"');
-    }
-    out
-}
-
-/// The names an item brings into its module's scope.
-fn bound_names(item: &syn::Item, out: &mut std::collections::BTreeSet<String>) {
-    use syn::ext::IdentExt;
-    fn tree(node: &syn::UseTree, out: &mut std::collections::BTreeSet<String>) {
-        match node {
-            syn::UseTree::Path(path) => tree(&path.tree, out),
-            syn::UseTree::Name(name) => {
-                out.insert(name.ident.unraw().to_string());
-            }
-            syn::UseTree::Rename(rename) => {
-                out.insert(rename.rename.unraw().to_string());
-            }
-            syn::UseTree::Group(group) => group.items.iter().for_each(|t| tree(t, out)),
-            // What a glob brings in is not known here, and a submodule
-            // shadows it rather than clashing.
-            syn::UseTree::Glob(_) => {}
-        }
-    }
-    let ident = match item {
-        syn::Item::Use(item) => return tree(&item.tree, out),
-        syn::Item::ExternCrate(item) => item.rename.as_ref().map_or(&item.ident, |(_, r)| r),
-        syn::Item::Mod(item) => &item.ident,
-        syn::Item::Struct(item) => &item.ident,
-        syn::Item::Enum(item) => &item.ident,
-        syn::Item::Union(item) => &item.ident,
-        syn::Item::Trait(item) => &item.ident,
-        syn::Item::Type(item) => &item.ident,
-        _ => return,
-    };
-    out.insert(ident.unraw().to_string());
 }
 
 /// Every `types.<Name>` and `fields.<prop>` in the configuration must
@@ -911,16 +743,8 @@ impl Builder<'_> {
             .map(|t| t.attrs.clone())
             .unwrap_or_default();
         check_container_attrs(&user_attrs, &raw_name)?;
-        let described = self.codegen_attrs(&def.extensions, &def.id, false);
-        let at = format!("`{raw_name}`");
-        self.written.extend(
-            user_attrs
-                .iter()
-                .chain(&described)
-                .map(|a| (a.clone(), at.clone())),
-        );
         attrs.extend(user_attrs);
-        attrs.extend(described);
+        attrs.extend(self.codegen_attrs(&def.extensions, &def.id, false));
         // A union read by a parent's discriminator exists only where the
         // parent does; each other variant is gated on its own.
         if let TypeKind::UnionTagged(u) = &def.kind
@@ -1058,18 +882,10 @@ impl Builder<'_> {
                         &user_attrs,
                         &format!("{}.{}", view.raw_name, field.raw_name),
                     )?;
+                    attrs.extend(user_attrs);
                     let mut at = def.id.clone();
                     at.pointer = field.pointer.clone();
-                    let described = self.codegen_attrs(&field.extensions, &at, true);
-                    let on = format!("`{}.{}`", view.raw_name, field.raw_name);
-                    self.written.extend(
-                        user_attrs
-                            .iter()
-                            .chain(&described)
-                            .map(|a| (a.clone(), on.clone())),
-                    );
-                    attrs.extend(user_attrs);
-                    attrs.extend(described);
+                    attrs.extend(self.codegen_attrs(&field.extensions, &at, true));
                     let cfg = cfg_gates(&attrs, &format!("{}.{}", view.raw_name, field.raw_name))?;
                     if matches!(s.additional, Additional::CatchAll(_)) {
                         let mut names = vec![field.raw_name.clone()];
@@ -1341,22 +1157,4 @@ fn code_span(text: &str) -> String {
         ""
     };
     format!("{fence}{pad}{text}{pad}{fence}")
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn only_strings_a_path_key_takes_are_read_as_paths() {
-        let text = super::path_text(
-            r##"#[serde(with = "a::m", rename = "self::x")] #[doc = "Replaces super::Old"] #[x(bound = r#"T: b::C"#)]"##,
-        );
-        let firsts: Vec<_> = crate::generate::first_path_segments(&text).collect();
-        assert_eq!(firsts, ["a", "b"], "{text}");
-        let text = super::path_text(r#"#[deprecated(note = "use \"super::Owner\" instead")]"#);
-        assert_eq!(
-            crate::generate::first_path_segments(&text).count(),
-            0,
-            "{text}"
-        );
-    }
 }

@@ -7,7 +7,7 @@ use crate::templates::Renderer;
 use std::path::PathBuf;
 
 /// Every file of the module, as the templates render them: one, or under
-/// `layout = "file_per_type"` the module and a submodule per type.
+/// `layout = "file_per_type"` the module and a file per type it includes.
 pub(crate) fn render(
     file: &FileView,
     config: &Config,
@@ -27,10 +27,11 @@ pub(crate) fn render(
             .file
             .as_deref()
             .expect("every type has a file under file_per_type");
-        // The module's imports, helpers and types reach the submodule
-        // through `super::*`, private ones included.
+        // The module includes the file: its imports, helpers and types
+        // are in scope there already, and an import here would be a
+        // second one.
         let view = FileView {
-            imports: vec!["use super::*;".to_owned()],
+            imports: Vec::new(),
             extra_imports: Vec::new(),
             types: vec![t.clone()],
             ..file.clone()

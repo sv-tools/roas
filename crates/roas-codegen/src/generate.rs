@@ -128,7 +128,7 @@ pub enum GenerateError {
 /// `chrono` twice in `Option<chrono::NaiveDate>` and `chrono::Utc`: the
 /// names a module of the same name would hide. A path starting `::` names
 /// a crate no module can hide, so it is skipped.
-pub(crate) fn first_path_segments(ty: &str) -> impl Iterator<Item = &str> {
+fn first_path_segments(ty: &str) -> impl Iterator<Item = &str> {
     ty.match_indices("::").filter_map(move |(at, _)| {
         let before = &ty[..at];
         let start = before
@@ -136,7 +136,7 @@ pub(crate) fn first_path_segments(ty: &str) -> impl Iterator<Item = &str> {
             .rev()
             // Identifiers may hold any Unicode letter or mark; what ends
             // one in a type is punctuation or space.
-            .find(|(_, c)| c.is_whitespace() || "<>,()[]&*;:'!=+\"".contains(*c))
+            .find(|(_, c)| c.is_whitespace() || "<>,()[]&*;:'!=+".contains(*c))
             // Past that whole character, however many bytes it takes.
             .map_or(0, |(i, c)| i + c.len_utf8());
         let segment = &before[start..];
@@ -226,19 +226,6 @@ fn check_rust(config: &Config) -> Result<(), GenerateError> {
         return Err(GenerateError::Config(format!(
             "`rust.module = {:?}` is the crate substitution `{key}` imports or names; choose another module name or label",
             config.rust.module
-        )));
-    }
-    // Each type is a submodule then, one level below the module a path
-    // relative to it was written for.
-    if config.layout == Layout::FilePerType
-        && let Some((key, _)) = config.substitutions.iter().find(|(_, s)| {
-            s.rust.as_ref().is_some_and(|r| {
-                first_path_segments(&r.name).any(|first| first == "self" || first == "super")
-            })
-        })
-    {
-        return Err(GenerateError::Config(format!(
-            "substitution `{key}` names a path relative to the module, which `layout = \"file_per_type\"` moves each type below; spell it from `crate::`"
         )));
     }
     if !matches!(
@@ -583,9 +570,6 @@ mod tests {
         assert_eq!(firsts, vec!["chrono"]);
         let firsts: Vec<_> = super::first_path_segments("a::b::C").collect();
         assert_eq!(firsts, vec!["a"]);
-        // A path in a string, as `serde(with = "...")` takes one.
-        let firsts: Vec<_> = super::first_path_segments("#[serde(with = \"super::f\")]").collect();
-        assert_eq!(firsts, vec!["super"]);
         // A combining mark is no alphanumeric, and takes two bytes.
         let firsts: Vec<_> = super::first_path_segments("cafe\u{301}::Date").collect();
         assert_eq!(firsts.len(), 1);
