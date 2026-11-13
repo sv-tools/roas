@@ -136,7 +136,7 @@ pub(crate) fn first_path_segments(ty: &str) -> impl Iterator<Item = &str> {
             .rev()
             // Identifiers may hold any Unicode letter or mark; what ends
             // one in a type is punctuation or space.
-            .find(|(_, c)| c.is_whitespace() || "<>,()[]&*;:'!=+".contains(*c))
+            .find(|(_, c)| c.is_whitespace() || "<>,()[]&*;:'!=+\"".contains(*c))
             // Past that whole character, however many bytes it takes.
             .map_or(0, |(i, c)| i + c.len_utf8());
         let segment = &before[start..];
@@ -581,6 +581,11 @@ mod tests {
         let firsts: Vec<_> =
             super::first_path_segments("Option<chrono::NaiveDate, ::other::X>").collect();
         assert_eq!(firsts, vec!["chrono"]);
+        let firsts: Vec<_> = super::first_path_segments("a::b::C").collect();
+        assert_eq!(firsts, vec!["a"]);
+        // A path in a string, as `serde(with = "...")` takes one.
+        let firsts: Vec<_> = super::first_path_segments("#[serde(with = \"super::f\")]").collect();
+        assert_eq!(firsts, vec!["super"]);
         let firsts: Vec<_> = super::first_path_segments("a::b::C").collect();
         assert_eq!(firsts, vec!["a"]);
         // A combining mark is no alphanumeric, and takes two bytes.

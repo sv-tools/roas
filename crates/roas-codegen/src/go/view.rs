@@ -423,6 +423,22 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 used.insert(local, "a name the generated validation declares");
             }
         }
+        // Under `file_per_type` an extra import goes to the files naming it,
+        // and a name the generated code also declares, or imports, would
+        // send it to files that only use that.
+        if config.layout == Layout::FilePerType {
+            for spec in &config.extra_imports {
+                let names = super::imports::spec_names(spec).unwrap_or_default();
+                if let Some((name, what)) = names
+                    .iter()
+                    .find_map(|n| used.get(n.as_str()).map(|what| (n, what)))
+                {
+                    return Err(GenerateError::Config(format!(
+                        "`extra_imports` entry {spec:?} is used as `{name}`, which is taken by {what}; under `layout = \"file_per_type\"` give it another name"
+                    )));
+                }
+            }
+        }
         for import in &builder.externs {
             if builtin.iter().any(|(path, _)| path == import) {
                 continue;

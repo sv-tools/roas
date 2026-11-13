@@ -279,7 +279,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
     }
     let uses_regex = super::validation::take_uses_regex();
     if config.layout == Layout::FilePerType {
-        assign_files(&mut types, config);
+        assign_files(&mut types, config)?;
     }
     let mut dependencies = vec![
         RustDependency {
@@ -354,7 +354,7 @@ const MODULE_SCOPE: &[&str] = &[
 /// its name in snake case, never a name the module already uses for
 /// something else, a crate a path in the generated code starts with, or
 /// one a file system resolves elsewhere.
-fn assign_files(types: &mut [TypeView], config: &Config) {
+fn assign_files(types: &mut [TypeView], config: &Config) -> Result<(), GenerateError> {
     let mut taken: std::collections::BTreeSet<String> =
         MODULE_SCOPE.iter().map(|s| (*s).to_owned()).collect();
     taken.extend(types.iter().map(|t| t.name.clone()));
@@ -367,6 +367,28 @@ fn assign_files(types: &mut [TypeView], config: &Config) {
             taken.insert(import.replace('-', "_"));
         }
         taken.extend(crate::generate::first_path_segments(&spelling.name).map(str::to_owned));
+    }
+    // The derives and attributes as written into each type's file: a path
+    // in one starting at a crate is hidden by a submodule of that name,
+    // and one relative to the module would start a level too deep.
+    for t in types.iter() {
+        let written = t
+            .derives
+            .iter()
+            .chain(&t.attrs)
+            .chain(t.fields.iter().flat_map(|f| &f.attrs))
+            .chain(t.variants.iter().flat_map(|v| &v.attrs));
+        for text in written {
+            for first in crate::generate::first_path_segments(text) {
+                if first == "self" || first == "super" {
+                    return Err(GenerateError::Config(format!(
+                        "`{text}` on `{}` names a path relative to the module, which `layout = \"file_per_type\"` moves each type below; spell it from `crate::`",
+                        t.raw_name
+                    )));
+                }
+                taken.insert(first.to_owned());
+            }
+        }
     }
     for line in &config.extra_imports {
         taken.extend(crate::generate::first_path_segments(line).map(str::to_owned));
@@ -394,6 +416,7 @@ fn assign_files(types: &mut [TypeView], config: &Config) {
         taken.insert(file.clone());
         t.file = Some(file);
     }
+    Ok(())
 }
 
 /// The names an item brings into its module's scope.

@@ -680,7 +680,14 @@ fn file_per_type_writes_a_file_per_type_importing_what_it_uses() {
 #[test]
 fn file_per_type_refuses_an_import_it_cannot_place() {
     let components = serde_json::json!({"Pet": {"type": "string"}});
-    for spec in [r#". "math""#, r#""example.com/go-thing""#] {
+    // A dot import, one no file names, and one named like a local the
+    // generated code declares.
+    for spec in [
+        r#". "math""#,
+        r#""example.com/go-thing""#,
+        r#""go/token""#,
+        r#"fmt "fmt""#,
+    ] {
         let toml = format!("layout = \"file_per_type\"\nextra_imports = ['{spec}']\n");
         let Some(result) = go(components.clone(), &toml) else {
             return;

@@ -445,6 +445,44 @@ fn file_per_type_refuses_a_substitution_relative_to_the_module() {
 }
 
 #[test]
+fn file_per_type_keeps_clear_of_crates_derives_and_attributes_name() {
+    let components = serde_json::json!({"Noop": {"type": "string"}, "Schemars": {"type": "string"}, "Pet": {"type": "object", "properties": {"a": {"type": "string"}}}});
+    let config = rust_config(
+        "layout = \"file_per_type\"\n[rust]\nderives = [\"noop::Nothing\"]\n[types.Pet.fields.a]\nattrs = ['#[schemars(with = \"schemars::X\")]']\n",
+    );
+    let generation = generate(&document(components), &config).expect("generates");
+    let mut paths: Vec<_> = generation
+        .files
+        .iter()
+        .map(|f| f.path.to_string_lossy().replace('\\', "/"))
+        .collect();
+    paths.sort();
+    assert_eq!(
+        paths,
+        [
+            "types.rs",
+            "types/noop2.rs",
+            "types/pet.rs",
+            "types/schemars2.rs"
+        ]
+    );
+}
+
+#[test]
+fn file_per_type_refuses_attributes_relative_to_the_module() {
+    for toml in [
+        "[rust]\nderives = [\"super::Nothing\"]\n",
+        "[types.Pet]\nattrs = ['#[derive(self::Nothing)]']\n",
+        "[types.Pet.fields.name]\nattrs = ['#[schemars(with = \"super::X\")]']\n",
+    ] {
+        let config = rust_config(&format!("layout = \"file_per_type\"\n{toml}"));
+        let error = generate(&document(pet()), &config).unwrap_err();
+        assert!(matches!(error, GenerateError::Config(_)), "{toml}: {error}");
+        generate(&document(pet()), &rust_config(toml)).unwrap();
+    }
+}
+
+#[test]
 fn file_per_type_names_one_module_file_without_types() {
     let config = rust_config("layout = \"file_per_type\"\n");
     let generation = generate(&document(serde_json::json!({})), &config).expect("generates");
