@@ -586,7 +586,7 @@ pub struct AllOfSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -624,7 +624,7 @@ pub struct AnyOfSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -662,7 +662,7 @@ pub struct OneOfSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -692,7 +692,7 @@ pub struct NotSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -840,7 +840,7 @@ pub struct StringSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -959,7 +959,7 @@ pub struct IntegerSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -1070,7 +1070,7 @@ pub struct NumberSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -1142,7 +1142,7 @@ pub struct BooleanSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -1231,7 +1231,7 @@ pub struct ArraySchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -1385,7 +1385,7 @@ pub struct ObjectSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -1451,7 +1451,7 @@ pub struct NullSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -1539,7 +1539,7 @@ pub struct MultiSchema {
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -1857,70 +1857,6 @@ impl ValidateWithContext<Spec> for MultiSchema {
         }
         if let Some(discriminator) = &self.discriminator {
             discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
-        }
-    }
-}
-
-mod extensions {
-    use std::collections::BTreeMap;
-    use std::fmt;
-
-    use serde::de::{Error, MapAccess, Visitor};
-    use serde::ser::SerializeMap;
-    use serde::{Deserializer, Serialize, Serializer};
-
-    pub(super) fn deserialize<'de, D>(
-        deserializer: D,
-    ) -> Result<Option<BTreeMap<String, serde_json::Value>>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct ExtensionsVisitor;
-        impl<'de> Visitor<'de> for ExtensionsVisitor {
-            type Value = BTreeMap<String, serde_json::Value>;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("extensions: Option<BTreeMap<String, serde_json::Value>>")
-            }
-
-            fn visit_map<V>(
-                self,
-                mut map: V,
-            ) -> Result<BTreeMap<String, serde_json::Value>, V::Error>
-            where
-                V: MapAccess<'de>,
-            {
-                let mut ext: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-                while let Some(key) = map.next_key::<String>()? {
-                    if ext.contains_key(key.as_str()) {
-                        return Err(Error::custom(format_args!("duplicate field `{key}`")));
-                    }
-                    let value: serde_json::Value = map.next_value()?;
-                    ext.insert(key, value);
-                }
-                Ok(ext)
-            }
-        }
-
-        let map = deserializer.deserialize_map(ExtensionsVisitor)?;
-        Ok(if map.is_empty() { None } else { Some(map) })
-    }
-
-    pub(super) fn serialize<S>(
-        ext: &Option<BTreeMap<String, serde_json::Value>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        if let Some(ext) = ext {
-            let mut map = serializer.serialize_map(Some(ext.len()))?;
-            for (k, v) in ext.clone() {
-                map.serialize_entry(&k, &v)?;
-            }
-            map.end()
-        } else {
-            None::<BTreeMap<String, serde_json::Value>>.serialize(serializer)
         }
     }
 }
