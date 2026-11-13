@@ -20,7 +20,15 @@ pub(crate) fn outer_qualifier(spelling: &str) -> Option<String> {
     loop {
         let before = rest;
         for prefix in ["*", "<-chan", "chan<-", "chan"] {
-            if let Some(after) = rest.strip_prefix(prefix) {
+            // `chan` as a word, not the start of a name such as `chans`.
+            if let Some(after) = rest.strip_prefix(prefix)
+                && (prefix == "*"
+                    || prefix == "chan<-"
+                    || !after
+                        .bytes()
+                        .next()
+                        .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80))
+            {
                 rest = after.trim_start();
             }
         }
@@ -190,6 +198,8 @@ mod tests {
             ("<-chan time.Time", Some("time")),
             ("map[netip.Addr]string", None),
             ("string", None),
+            ("chans.ID", Some("chans")),
+            ("chan chans.ID", Some("chans")),
         ] {
             assert_eq!(outer_qualifier(spelling).as_deref(), expected, "{spelling}");
         }

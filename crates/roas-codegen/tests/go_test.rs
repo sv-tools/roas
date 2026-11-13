@@ -863,3 +863,28 @@ fn file_per_type_credits_a_map_substitution_with_its_value_s_package() {
         a.contents
     );
 }
+
+#[test]
+fn file_per_type_leaves_an_extra_import_s_name_to_it() {
+    // `atomic` comes from the extra import; the substitution's is `uuid`.
+    let toml = "layout = \"file_per_type\"\nextra_imports = ['\"sync/atomic\"']\n[substitutions.uuid.go]\nname = \"atomic.Pointer[uuid.UUID]\"\nimport = \"github.com/google/uuid\"\n";
+    let components = serde_json::json!({
+        "A": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}}},
+        "B": {"type": "object", "properties": {"n": {"type": "string"}}}
+    });
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let generation = result.expect("generates");
+    let a = generation
+        .files
+        .iter()
+        .find(|f| f.path == Path::new("a.go"))
+        .unwrap();
+    assert!(a.contents.contains("\"sync/atomic\""), "{}", a.contents);
+    assert!(
+        a.contents.contains("\"github.com/google/uuid\""),
+        "{}",
+        a.contents
+    );
+}

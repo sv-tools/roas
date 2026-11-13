@@ -481,7 +481,14 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 )));
             }
             imports.push(quote(import));
-            // A qualifier another import is used under is that import's.
+            // A qualifier another import is used under is that import's:
+            // a builtin, another substitution's, or an extra import's.
+            let extra: BTreeSet<String> = config
+                .extra_imports
+                .iter()
+                .filter_map(|spec| super::imports::spec_names(spec))
+                .flatten()
+                .collect();
             let mut names: BTreeSet<String> = builder
                 .extern_names
                 .get(import)
@@ -489,6 +496,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 .flatten()
                 .filter(|q| {
                     !builtin.iter().any(|(_, b)| b == q)
+                        && !extra.contains(*q)
                         && !builder
                             .externs
                             .iter()
@@ -518,14 +526,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                     if config.validation && depth_local(n) {
                         return Some((n, "validation's loop variables"));
                     }
-                    used.get(n.as_str()).map(|what| (n, *what)).or_else(|| {
-                        // Or the name a substitution's spelling uses.
-                        builder
-                            .extern_names
-                            .iter()
-                            .find(|(_, names)| names.contains(n))
-                            .map(|(import, _)| (n, import.as_str()))
-                    })
+                    used.get(n.as_str()).map(|what| (n, *what))
                 }) {
                     return Err(GenerateError::Config(format!(
                         "`extra_imports` entry {spec:?} is used as `{name}`, which is taken by {what}; under `layout = \"file_per_type\"` give it another name"
