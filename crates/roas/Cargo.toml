@@ -15,16 +15,16 @@ publish = true
 [features]
 default = ["v3_2"]
 # Support for OpenAPI v2
-v2 = []
+v2 = ["dep:monostate"]
 
 # Support for OpenAPI v3.0.x
-v3_0 = []
+v3_0 = ["dep:monostate"]
 
 # Support for OpenAPI v3.1.x
-v3_1 = []
+v3_1 = ["dep:monostate"]
 
 # Support for OpenAPI v3.2.x
-v3_2 = []
+v3_2 = ["dep:monostate"]
 
 # Keep every number exactly as it was written.
 #
@@ -49,7 +49,7 @@ clap = ["dep:clap"]
 clap = { workspace = true, optional = true }
 enumset.workspace = true
 lazy-regex.workspace = true
-monostate.workspace = true
+monostate = { workspace = true, optional = true }
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
