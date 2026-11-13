@@ -611,9 +611,9 @@ fn rust_wide_of<'a>(
     raw: &str,
 ) -> String {
     let tys: Vec<&TypeRef> = tys.collect();
-    let (limit, float32, decimal) = checks::number_range(ir, &tys);
+    let (limit, float32, decimal, float) = checks::number_range(ir, &tys);
     format!(
-        "wide_number({raw}, {}, {float32}, {decimal})",
+        "wide_number({raw}, {}, {float32}, {decimal}, {float})",
         limit.unwrap_or("f64::INFINITY")
     )
 }

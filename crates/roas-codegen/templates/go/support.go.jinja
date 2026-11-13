@@ -518,10 +518,11 @@ func memberMatches(name string, srcs ...string) bool {
 // wideNumber says whether raw has a number a generated type may fail to
 // decode for its range rather than its value: a whole number from intLimit
 // on, one past the 32-bit float range when narrow holds, one no Decimal
-// holds when decimal does, or one past float64 — or nests deeper than the
-// decoder reads. A union branch that fails to decode such a value proves
-// no mismatch.
-func wideNumber(raw []byte, intLimit float64, narrow, decimal bool) bool {
+// holds when decimal does, or one past float64 when a type reading it as a
+// float does (float), or but for Decimals, any does — or nests deeper than
+// the decoder reads. A union branch that fails to decode such a value
+// proves no mismatch.
+func wideNumber(raw []byte, intLimit float64, narrow, decimal, float bool) bool {
 	inString, depth := false, 0
 	for i := 0; i < len(raw); i++ {
 		b := raw[i]
@@ -561,9 +562,11 @@ func wideNumber(raw []byte, intLimit float64, narrow, decimal bool) bool {
 			}
 {% endif %}			var f float64
 			if json.Unmarshal(raw[start:i], &f) != nil || math.IsInf(f, 0) {
-				return true
-			}
-			if (f == math.Trunc(f) && math.Abs(f) >= intLimit) || (narrow && math.Abs(f) > math.MaxFloat32) {
+				// A Decimal holds it: only a type reading it as a float fails.
+				if !decimal || float {
+					return true
+				}
+			} else if (f == math.Trunc(f) && math.Abs(f) >= intLimit) || (narrow && math.Abs(f) > math.MaxFloat32) {
 				return true
 			}
 			i--

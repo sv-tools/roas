@@ -704,14 +704,17 @@ mod neighbours {
 /// The ranges the types of a holder's branches can hold, found through
 /// fields, items, values and references: the whole-number magnitude from
 /// which the narrowest integer among them overflows (`None` with no
-/// integer), whether a 32-bit float is among them, and whether an exact
-/// decimal is. A number past either fails a branch's decoding for the
+/// integer), whether a 32-bit float is among them, whether an exact
+/// decimal is, and whether anything reading a number as a float is — an
+/// integer, a float, raw JSON, a substitution — which a number past `f64`
+/// fails. A number past any of these fails a branch's decoding for the
 /// representation, not because the value is not one the branch's schema
 /// allows. A substituted type is assumed to be as narrow as any.
 pub(crate) fn number_range(
     ir: &crate::ir::Ir,
     tys: &[&TypeRef],
-) -> (Option<&'static str>, bool, bool) {
+) -> (Option<&'static str>, bool, bool, bool) {
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         ir: &crate::ir::Ir,
         ty: &TypeRef,
@@ -720,20 +723,32 @@ pub(crate) fn number_range(
         int64: &mut bool,
         float32: &mut bool,
         decimal: &mut bool,
+        float: &mut bool,
     ) {
         match ty {
-            TypeRef::Integer(IntWidth::Int32) => *int32 = true,
-            TypeRef::Integer(_) => *int64 = true,
-            TypeRef::Number(FloatWidth::Float) => *float32 = true,
+            TypeRef::Integer(IntWidth::Int32) => {
+                *int32 = true;
+                *float = true;
+            }
+            TypeRef::Integer(_) => {
+                *int64 = true;
+                *float = true;
+            }
+            TypeRef::Number(width) => {
+                *float32 |= *width == FloatWidth::Float;
+                *float = true;
+            }
             TypeRef::Decimal => *decimal = true,
+            TypeRef::Any => *float = true,
             TypeRef::Extern(_) => {
                 *int32 = true;
                 *float32 = true;
+                *float = true;
             }
             TypeRef::Boxed(inner)
             | TypeRef::Nullable(inner)
             | TypeRef::Array(inner)
-            | TypeRef::Map(inner) => walk(ir, inner, seen, int32, int64, float32, decimal),
+            | TypeRef::Map(inner) => walk(ir, inner, seen, int32, int64, float32, decimal, float),
             TypeRef::Named(id) => {
                 if !seen.insert(id.clone()) {
                     return;
@@ -756,17 +771,19 @@ pub(crate) fn number_range(
                     TypeKind::Extern => {
                         *int32 = true;
                         *float32 = true;
+                        *float = true;
                     }
                     TypeKind::StringEnum(_) => {}
                 }
                 for ty in inner {
-                    walk(ir, ty, seen, int32, int64, float32, decimal);
+                    walk(ir, ty, seen, int32, int64, float32, decimal, float);
                 }
             }
             _ => {}
         }
     }
-    let (mut int32, mut int64, mut float32, mut decimal) = (false, false, false, false);
+    let (mut int32, mut int64, mut float32, mut decimal, mut float) =
+        (false, false, false, false, false);
     let mut seen = std::collections::BTreeSet::new();
     for ty in tys {
         walk(
@@ -777,6 +794,7 @@ pub(crate) fn number_range(
             &mut int64,
             &mut float32,
             &mut decimal,
+            &mut float,
         );
     }
     let limit = if int32 {
@@ -786,7 +804,7 @@ pub(crate) fn number_range(
     } else {
         None
     };
-    (limit, float32, decimal)
+    (limit, float32, decimal, float)
 }
 
 /// Whether `ty` reaches a substituted type, whose decoding is the user's:

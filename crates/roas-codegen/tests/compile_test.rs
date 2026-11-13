@@ -2148,7 +2148,12 @@ fn exact_generation(target: Target) -> roas_codegen::Generation {
             "Neg": {"type": "number", "exclusiveMinimum": -1, "maximum": -0.5},
             "Nul": {"type": ["number", "null"], "enum": [1.5, null]},
             "Zero": {"type": "number", "const": 0},
-            "Top": {"type": "number", "multipleOf": 0.25}
+            "Top": {"type": "number", "multipleOf": 0.25},
+            "Disc": {"oneOf": [
+                {"type": "number", "maximum": 2},
+                {"type": "boolean"},
+                {"type": "array", "items": {"type": "number", "minimum": 0}}
+            ]}
         }}
     });
     let mut description = description;
@@ -2279,6 +2284,10 @@ fn main() {
     let wide = "1.000000000000000000000000000000000000001";
     assert_eq!(report::<Either>(r#""s""#), vec![]);
     assert_eq!(report::<Either>(wide), vec![u("")]);
+    // Past every f64, but a decimal holds it: decided.
+    assert_eq!(report::<Either>("1e400"), vec![]);
+    assert_eq!(report::<Disc>("1e400"), vec![v("")]);
+    assert_eq!(report::<Disc>("[1e400]"), vec![]);
     assert_eq!(report::<Pat>(&format!(r#"{{"x1":{wide}}}"#)), vec![u("/x1")]);
     // A top-level number is checked as one.
     assert_eq!(report::<Neg>("-0.75"), vec![]);
@@ -2482,6 +2491,9 @@ func main() {
 	wide := "1.000000000000000000000000000000000000001"
 	check("either", report[api.Either](`"s"`))
 	check("either wide", report[api.Either](wide), u(""))
+	check("either huge", report[api.Either](`1e400`))
+	check("disc huge", report[api.Disc](`1e400`), v(""))
+	check("disc huge item", report[api.Disc](`[1e400]`))
 	check("pattern wide", report[api.Pat](`{"x1":`+wide+`}`), u("/x1"))
 	check("neg", report[api.Neg](`-0.75`))
 	check("neg low", report[api.Neg](`-1`), v(""))

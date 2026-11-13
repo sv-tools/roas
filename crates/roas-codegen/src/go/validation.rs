@@ -660,9 +660,9 @@ fn go_wide<'a>(ir: &crate::ir::Ir, tys: impl Iterator<Item = &'a TypeRef>) -> St
 /// [`go_wide`] over the raw JSON `raw`.
 fn go_wide_of<'a>(ir: &crate::ir::Ir, tys: impl Iterator<Item = &'a TypeRef>, raw: &str) -> String {
     let tys: Vec<&TypeRef> = tys.collect();
-    let (limit, float32, decimal) = checks::number_range(ir, &tys);
+    let (limit, float32, decimal, float) = checks::number_range(ir, &tys);
     format!(
-        "wideNumber({raw}, {}, {float32}, {decimal})",
+        "wideNumber({raw}, {}, {float32}, {decimal}, {float})",
         limit.unwrap_or("math.Inf(1)")
     )
 }
