@@ -8,7 +8,7 @@
 //! that Go's decoder stores a zero value for a JSON null where Rust's
 //! refuses it, which the generated code turns back into an error.
 
-use crate::config::{Config, FieldConfig, TypeConfig};
+use crate::config::{Config, FieldConfig, Layout, TypeConfig};
 use crate::diagnostic::{Diagnostic, SchemaId};
 use crate::front::{FloatWidth, IntWidth};
 use crate::generate::GenerateError;
@@ -248,6 +248,10 @@ pub(crate) struct TypeView {
     pub validate: Option<Vec<String>>,
     /// The statements of `validateNull`; empty for none.
     pub validate_null: Vec<String>,
+    /// Under `layout = "file_per_type"`, the stem of the file the type is
+    /// written to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -283,6 +287,10 @@ impl GoDependency {
 
 pub(crate) struct Built {
     pub file: FileView,
+    /// For each of `file.imports`, the names a file using it qualifies
+    /// with: what decides, under `layout = "file_per_type"`, which files
+    /// import it.
+    pub import_names: Vec<BTreeSet<String>>,
     pub dependencies: Vec<GoDependency>,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -301,12 +309,14 @@ struct Builder<'a> {
     refuse_null_isolated: BTreeSet<String>,
     isolated: BTreeSet<String>,
     externs: BTreeSet<String>,
+    /// For each substitution import, the qualifiers its spellings use.
+    extern_names: BTreeMap<String, BTreeSet<String>>,
     diagnostics: Vec<Diagnostic>,
 }
 
 /// The package name an import path is used under, as far as the path
 /// says: its last element, skipping a `/vN` major-version suffix.
-fn package_of(import: &str) -> &str {
+pub(crate) fn package_of(import: &str) -> &str {
     let mut elements = import.rsplit('/');
     let last = elements.next().unwrap_or(import);
     let major =
@@ -333,6 +343,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         refuse_null_isolated: BTreeSet::new(),
         isolated: BTreeSet::new(),
         externs: BTreeSet::new(),
+        extern_names: BTreeMap::new(),
         diagnostics: Vec::new(),
     };
     select_check(ir, config)?;
@@ -355,7 +366,11 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         .cloned()
         .collect();
     builder.support.isolated = builder.isolated.iter().cloned().collect();
+    if config.layout == Layout::FilePerType {
+        assign_files(&mut types, config);
+    }
     let mut imports = Vec::new();
+    let mut import_names = Vec::new();
     let mut dependencies = Vec::new();
     if !types.is_empty() {
         let mut builtin = BUILTIN_IMPORTS.to_vec();
@@ -378,6 +393,11 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             builder.support.patterns = true;
         }
         imports.extend(builtin.iter().map(|(path, _)| quote(path)));
+        import_names.extend(
+            builtin
+                .iter()
+                .map(|(_, name)| BTreeSet::from([(*name).to_owned()])),
+        );
         let mut used: BTreeMap<&str, &str> =
             builtin.iter().map(|(path, name)| (*name, *path)).collect();
         // A package named like a name the generated code declares would be
@@ -414,6 +434,13 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 )));
             }
             imports.push(quote(import));
+            let mut names = builder
+                .extern_names
+                .get(import)
+                .cloned()
+                .unwrap_or_default();
+            names.insert(name.to_owned());
+            import_names.push(names);
             // The standard library is no dependency to declare; a module
             // path has a dot in its first element.
             if import
@@ -436,9 +463,33 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             support: builder.support,
             types,
         },
+        import_names,
         dependencies,
         diagnostics: builder.diagnostics,
     })
+}
+
+/// Names the file of every type under `layout = "file_per_type"`: its
+/// name in snake case, never the package file's, one `go build` would
+/// constrain, or one a file system resolves elsewhere.
+fn assign_files(types: &mut [TypeView], config: &Config) {
+    let mut taken = BTreeSet::from([config.go.file.clone()]);
+    for t in types {
+        let base =
+            super::naming::go_file_name(&crate::rust::naming::snake(std::slice::from_ref(&t.name)));
+        let file = (1u32..)
+            .map(|i| {
+                if i == 1 {
+                    base.clone()
+                } else {
+                    format!("{base}{i}")
+                }
+            })
+            .find(|candidate| !taken.contains(candidate) && super::naming::is_file_stem(candidate))
+            .expect("a free file name");
+        taken.insert(file.clone());
+        t.file = Some(file);
+    }
 }
 
 impl Builder<'_> {
@@ -595,6 +646,10 @@ impl Builder<'_> {
             })?;
         if let Some(import) = &spelling.import {
             self.externs.insert(import.clone());
+            self.extern_names
+                .entry(import.clone())
+                .or_default()
+                .extend(super::imports::qualifiers(&spelling.name));
         }
         Ok(spelling.name.clone())
     }
@@ -700,6 +755,7 @@ impl Builder<'_> {
             from_raw: String::new(),
             validate: None,
             validate_null: Vec::new(),
+            file: None,
         };
         if !self.fill_kind(def, &mut view)? {
             return Ok(None);

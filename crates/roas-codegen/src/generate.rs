@@ -1,6 +1,6 @@
 //! The generation entry point and its result.
 
-use crate::config::{Config, Layout, Target};
+use crate::config::{Config, Target};
 use crate::diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity};
 use crate::front::Translator;
 use crate::go::GoDependency;
@@ -128,7 +128,7 @@ pub enum GenerateError {
 /// `chrono` twice in `Option<chrono::NaiveDate>` and `chrono::Utc`: the
 /// names a module of the same name would hide. A path starting `::` names
 /// a crate no module can hide, so it is skipped.
-fn first_path_segments(ty: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn first_path_segments(ty: &str) -> impl Iterator<Item = &str> {
     ty.match_indices("::").filter_map(move |(at, _)| {
         let before = &ty[..at];
         let start = before
@@ -296,11 +296,6 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
     match config.target {
         Target::Rust => check_rust(config)?,
         Target::Go => check_go(config)?,
-    }
-    if config.layout != Layout::OneFilePerModule {
-        return Err(GenerateError::Unsupported(
-            "`layout = \"file_per_type\"`".into(),
-        ));
     }
     let mut diagnostics = document.diagnostics();
 

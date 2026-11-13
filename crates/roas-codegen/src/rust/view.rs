@@ -2,7 +2,7 @@
 //! for Rust, every name is final, every attribute is decided. A
 //! template lays this out and nothing more.
 
-use crate::config::{Config, FieldConfig, TypeConfig};
+use crate::config::{Config, FieldConfig, Layout, TypeConfig};
 use crate::diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity};
 use crate::front::{Constraints, FloatWidth, IntWidth};
 use crate::generate::GenerateError;
@@ -154,6 +154,10 @@ pub(crate) struct TypeView {
     /// The type's conditional-compilation gates (`#[cfg(...)]` among its
     /// configured attributes), repeated on every impl generated beside it.
     pub cfg: Vec<String>,
+    /// Under `layout = "file_per_type"`, the submodule, and file stem,
+    /// the type is written to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -274,6 +278,9 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         }
     }
     let uses_regex = super::validation::take_uses_regex();
+    if config.layout == Layout::FilePerType {
+        assign_files(&mut types, config);
+    }
     let mut dependencies = vec![
         RustDependency {
             name: "serde".into(),
@@ -321,6 +328,66 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         dependencies,
         diagnostics: builder.diagnostics,
     })
+}
+
+/// Lowercase names the module declares or reaches in the type namespace:
+/// a submodule named like one would hide it or clash with it.
+const MODULE_SCOPE: &[&str] = &[
+    "std",
+    "core",
+    "alloc",
+    "proc_macro",
+    "test",
+    "serde",
+    "serde_json",
+    "regex",
+    "double_option",
+    "reject_null",
+    "require_present",
+    "roas_string_only",
+    "roas_string_only_variant",
+    "roas_object_only",
+    "roas_catch_all",
+];
+
+/// Names the submodule of every type under `layout = "file_per_type"`:
+/// its name in snake case, never a name the module already uses for
+/// something else, a crate a path in the generated code starts with, or
+/// one a file system resolves elsewhere.
+fn assign_files(types: &mut [TypeView], config: &Config) {
+    let mut taken: std::collections::BTreeSet<String> =
+        MODULE_SCOPE.iter().map(|s| (*s).to_owned()).collect();
+    taken.extend(types.iter().map(|t| t.name.clone()));
+    for spelling in config
+        .substitutions
+        .values()
+        .filter_map(|s| s.rust.as_ref())
+    {
+        if let Some(import) = &spelling.import {
+            taken.insert(import.replace('-', "_"));
+        }
+        taken.extend(crate::generate::first_path_segments(&spelling.name).map(str::to_owned));
+    }
+    for line in &config.extra_imports {
+        taken.extend(crate::generate::first_path_segments(line).map(str::to_owned));
+    }
+    for t in types {
+        let base = crate::config::rust_module_name(&snake(std::slice::from_ref(&t.name)));
+        let file = (1u32..)
+            .map(|i| {
+                if i == 1 {
+                    base.clone()
+                } else {
+                    format!("{base}{i}")
+                }
+            })
+            .find(|candidate| {
+                !taken.contains(candidate) && crate::config::is_module_name(candidate)
+            })
+            .expect("a free module name");
+        taken.insert(file.clone());
+        t.file = Some(file);
+    }
 }
 
 /// Every `types.<Name>` and `fields.<prop>` in the configuration must
@@ -751,6 +818,7 @@ impl Builder<'_> {
             pattern_tys: Vec::new(),
             others_ty: None,
             cfg,
+            file: None,
         };
         let result = self.fill_kind(def, &mut view)?;
         if !result {
