@@ -53,13 +53,9 @@ const VALIDATION_NAMES: &[&str] = &[
 /// when it is generated.
 const PATTERN_NAMES: &[&str] = &["matchPattern", "patterns"];
 
-const TEMPLATE_NAMES: &[&str] = &[
-    "decodeOptions",
-    "noUnmarshalers",
-    "isolatedNone",
-    "refuseNull",
-    "readTag",
-    "integerToken",
+/// The names the `Decimal` support declares, at package level or locally,
+/// reserved only when it is generated.
+const DECIMAL_NAMES: &[&str] = &[
     "decimalToken",
     "decimalDigits",
     "power",
@@ -84,6 +80,15 @@ const TEMPLATE_NAMES: &[&str] = &[
     "m",
     "y",
     "divisor",
+];
+
+const TEMPLATE_NAMES: &[&str] = &[
+    "decodeOptions",
+    "noUnmarshalers",
+    "isolatedNone",
+    "refuseNull",
+    "readTag",
+    "integerToken",
     "v",
     "u",
     "d",
@@ -382,6 +387,11 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         }
         if builder.support.member_patterns {
             used.insert("memberMatches", "a name the generated code declares");
+        }
+        if builder.support.decimal {
+            for local in DECIMAL_NAMES {
+                used.insert(local, "a name the generated code declares");
+            }
         }
         if config.validation {
             for local in VALIDATION_NAMES {

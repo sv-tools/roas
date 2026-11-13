@@ -2397,3 +2397,27 @@ fn a_substituted_parent_is_held_as_its_substitution() {
         g.diagnostics
     );
 }
+
+#[test]
+fn decimal_helper_names_are_free_without_a_decimal() {
+    let components = serde_json::json!({
+        "Tallied": {"type": "object", "properties": {
+            "t": {"type": "string", "format": "tally"},
+            "n": {"type": "integer", "minimum": 0, "maximum": 9}
+        }}
+    });
+    let config = ConfigFile::from_toml(
+        "validation = true\n[substitutions.tally.go]\nname = \"count.Tally\"\nimport = \"example.com/count\"\n",
+        Path::new("/"),
+    )
+    .unwrap()
+    .merge(target(Target::Go))
+    .build()
+    .unwrap();
+    let g = generate(&document(components), &config).expect("`count` is free");
+    assert!(
+        g.files[0].contents.contains("\"example.com/count\""),
+        "{}",
+        g.files[0].contents
+    );
+}

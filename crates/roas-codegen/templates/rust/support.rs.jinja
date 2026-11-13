@@ -539,11 +539,11 @@ mod require_present {
 {% endif %}{% if support.validation %}/// Whether `raw` has a number a generated type may fail to decode for its
 /// range rather than its value: a whole number from `int_limit` on, one
 /// past the 32-bit float range when `float32` holds, one no `Decimal`
-/// holds when `decimal` does, or one past `f64` when a type reading it as
-/// a float does (`float`), or but for `Decimal`s, any does — or nests
-/// deeper than the decoder reads.
+/// holds when `decimal` does, or one past `f64` when no `Decimal` is
+/// reachable, or one is and a type reading floats (`float`) is too — or
+/// nests deeper than the decoder reads.
 /// A union branch that fails to decode such a value proves no mismatch.
-#[allow(dead_code, unused_variables)]
+#[allow(dead_code)]
 fn wide_number(raw: &str, int_limit: f64, float32: bool, decimal: bool, float: bool) -> bool {
     let bytes = raw.as_bytes();
     let (mut i, mut in_string, mut depth) = (0, false, 0usize);
