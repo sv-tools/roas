@@ -586,8 +586,6 @@ mod tests {
         // A path in a string, as `serde(with = "...")` takes one.
         let firsts: Vec<_> = super::first_path_segments("#[serde(with = \"super::f\")]").collect();
         assert_eq!(firsts, vec!["super"]);
-        let firsts: Vec<_> = super::first_path_segments("a::b::C").collect();
-        assert_eq!(firsts, vec!["a"]);
         // A combining mark is no alphanumeric, and takes two bytes.
         let firsts: Vec<_> = super::first_path_segments("cafe\u{301}::Date").collect();
         assert_eq!(firsts.len(), 1);

@@ -383,7 +383,7 @@ fn assign_files(
     // (a `rename`) are names, not paths.
     let derives = config.rust.derives.iter().map(|d| (d, "every type"));
     for (text, at) in derives.chain(written.iter().map(|(text, at)| (text, at.as_str()))) {
-        for first in crate::generate::first_path_segments(text) {
+        for first in crate::generate::first_path_segments(&path_text(text)) {
             if first == "self" || first == "super" {
                 return Err(GenerateError::Config(format!(
                     "`{text}` on {at} names a path relative to the module, which `layout = \"file_per_type\"` moves each type below; spell it from `crate::`"
@@ -419,6 +419,80 @@ fn assign_files(
         t.file = Some(file);
     }
     Ok(())
+}
+
+/// Keys whose string value is a path, as serde's are: `with = "m"`.
+const PATH_KEYS: &[&str] = &[
+    "with",
+    "serialize_with",
+    "deserialize_with",
+    "default",
+    "skip_serializing_if",
+    "getter",
+    "from",
+    "into",
+    "try_from",
+    "remote",
+    "crate",
+    "bound",
+];
+
+/// An attribute's text with every string literal blanked out but those a
+/// path-taking key is set to: a `doc` or `deprecated(note = ...)` string
+/// is prose, and a `rename` one a name.
+fn path_text(attr: &str) -> String {
+    let mut out = String::with_capacity(attr.len());
+    let mut chars = attr.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        // A raw string: `r"..."`, `r#"..."#`.
+        let raw = c == 'r'
+            && !out.ends_with(|p: char| p.is_alphanumeric() || p == '_')
+            && attr[at + 1..].trim_start_matches('#').starts_with('"');
+        if c != '"' && !raw {
+            out.push(c);
+            continue;
+        }
+        let hashes = if raw {
+            let n = attr[at + 1..].len() - attr[at + 1..].trim_start_matches('#').len();
+            for _ in 0..=n {
+                chars.next(); // the hashes and the quote
+            }
+            n
+        } else {
+            0
+        };
+        let start = chars.peek().map_or(attr.len(), |(i, _)| *i);
+        let mut end = attr.len();
+        while let Some((i, c)) = chars.next() {
+            if !raw && c == '\\' {
+                chars.next();
+            } else if c == '"' && attr[i + 1..].starts_with(&"#".repeat(hashes)) {
+                end = i;
+                for _ in 0..hashes {
+                    chars.next();
+                }
+                break;
+            }
+        }
+        let key = out
+            .trim_end()
+            .strip_suffix('=')
+            .map(|before| {
+                let before = before.trim_end();
+                let from = before
+                    .rfind(|p: char| !(p.is_alphanumeric() || p == '_'))
+                    .map_or(0, |i| i + 1);
+                &before[from..]
+            })
+            .unwrap_or("");
+        let path = PATH_KEYS.contains(&key);
+        out.push('"');
+        if path {
+            out.push_str(&attr[start..end]);
+        }
+        out.push('"');
+    }
+    out
 }
 
 /// The names an item brings into its module's scope.
@@ -1267,4 +1341,22 @@ fn code_span(text: &str) -> String {
         ""
     };
     format!("{fence}{pad}{text}{pad}{fence}")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_strings_a_path_key_takes_are_read_as_paths() {
+        let text = super::path_text(
+            r##"#[serde(with = "a::m", rename = "self::x")] #[doc = "Replaces super::Old"] #[x(bound = r#"T: b::C"#)]"##,
+        );
+        let firsts: Vec<_> = crate::generate::first_path_segments(&text).collect();
+        assert_eq!(firsts, ["a", "b"], "{text}");
+        let text = super::path_text(r#"#[deprecated(note = "use \"super::Owner\" instead")]"#);
+        assert_eq!(
+            crate::generate::first_path_segments(&text).count(),
+            0,
+            "{text}"
+        );
+    }
 }

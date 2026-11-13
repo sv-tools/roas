@@ -34,7 +34,6 @@ const BUILTIN_IMPORTS: &[(&str, &str)] = &[
 /// import used under one of them would not compile.
 /// The names generated validation adds, reserved only when it is on.
 const VALIDATION_NAMES: &[&str] = &[
-    "r",
     "certain",
     "uncertain",
     "branch",
@@ -423,6 +422,11 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             for local in VALIDATION_NAMES {
                 used.insert(local, "a name the generated validation declares");
             }
+        }
+        // A file whose only `r.` is validation's report would import a
+        // package named `r`, which goes by its uses under `file_per_type`.
+        if config.validation && config.layout == Layout::FilePerType {
+            used.insert("r", "a name the generated validation declares");
         }
         // Under `file_per_type` an extra import goes to the files naming it,
         // and a name the generated code also declares, or imports, would

@@ -490,6 +490,11 @@ fn file_per_type_reads_names_in_the_description_as_names() {
         "Mode": {"type": "string", "enum": ["self::read"]}
     });
     let config = rust_config("layout = \"file_per_type\"\n");
+    generate(&document(components.clone()), &config).expect("generates");
+    // Nor is prose in a configured attribute.
+    let config = rust_config(
+        "layout = \"file_per_type\"\n[types.Mode]\nattrs = ['#[doc = \"Replaces self::Old.\"]', '#[deprecated(note = \"use super::Owner\")]']\n",
+    );
     generate(&document(components), &config).expect("generates");
 }
 
