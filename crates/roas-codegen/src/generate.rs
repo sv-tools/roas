@@ -1,6 +1,6 @@
 //! The generation entry point and its result.
 
-use crate::config::{Config, Target};
+use crate::config::{Config, Layout, Target};
 use crate::diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity};
 use crate::front::Translator;
 use crate::go::GoDependency;
@@ -228,6 +228,19 @@ fn check_rust(config: &Config) -> Result<(), GenerateError> {
             config.rust.module
         )));
     }
+    // Each type is a submodule then, one level below the module a path
+    // relative to it was written for.
+    if config.layout == Layout::FilePerType
+        && let Some((key, _)) = config.substitutions.iter().find(|(_, s)| {
+            s.rust.as_ref().is_some_and(|r| {
+                first_path_segments(&r.name).any(|first| first == "self" || first == "super")
+            })
+        })
+    {
+        return Err(GenerateError::Config(format!(
+            "substitution `{key}` names a path relative to the module, which `layout = \"file_per_type\"` moves each type below; spell it from `crate::`"
+        )));
+    }
     if !matches!(
         config.rust.edition.as_str(),
         "2015" | "2018" | "2021" | "2024"
@@ -251,6 +264,18 @@ fn check_go(config: &Config) -> Result<(), GenerateError> {
         return Err(GenerateError::Config(format!(
             "`go.file = {:?}` must be a lowercase file stem `go build` reads as plain source",
             config.go.file
+        )));
+    }
+    // What a dot import is used for shows in no qualifier, and Go refuses
+    // it in a file that does not use it.
+    if config.layout == Layout::FilePerType
+        && let Some(spec) = config
+            .extra_imports
+            .iter()
+            .find(|spec| spec.trim().starts_with('.'))
+    {
+        return Err(GenerateError::Config(format!(
+            "`extra_imports` entry {spec:?} is a dot import, which `layout = \"file_per_type\"` cannot place: give it a name"
         )));
     }
     Ok(())

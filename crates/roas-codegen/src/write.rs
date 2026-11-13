@@ -2108,6 +2108,18 @@ pub fn write(
     if let Some(stored) = misspelled(out_dir, &manifest_file, &mut Listings::default()) {
         respell(out_dir, &stored, &manifest_file)?;
     }
+    // A directory that held only removed files goes with them, as after
+    // leaving `layout = "file_per_type"`. `remove_dir` removes nothing but
+    // an empty directory, and never what a link points to.
+    for path in &report.removed {
+        let mut dir = path.parent();
+        while let Some(rel) = dir.filter(|d| !d.as_os_str().is_empty()) {
+            if fs::remove_dir(out_dir.join(rel)).is_err() {
+                break;
+            }
+            dir = rel.parent();
+        }
+    }
     created.keep = true;
     Ok(report)
 }
@@ -2349,6 +2361,27 @@ mod tests {
             .filter(|n| n.contains("roas-tmp"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn a_directory_emptied_of_stale_files_goes_with_them() {
+        let dir = TempDir::new("stale-dir");
+        write(
+            &generation(&[("types.rs", "m"), ("types/a.rs", "a"), ("keep/b.rs", "b")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        fs::write(dir.0.join("keep/mine.rs"), "hand-written").unwrap();
+        write(
+            &generation(&[("types.rs", "m2")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        assert!(!dir.0.join("types").exists());
+        // A directory holding anything else stays.
+        assert!(dir.0.join("keep/mine.rs").exists());
     }
 
     #[test]

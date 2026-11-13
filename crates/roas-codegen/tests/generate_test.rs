@@ -377,7 +377,7 @@ fn file_per_type_writes_a_submodule_per_type() {
     for fragment in [
         "// SPDX-License-Identifier: MIT",
         "use my_crate::prelude::*;",
-        "mod pet;\n#[allow(unused_imports)]\npub use self::pet::*;",
+        "mod pet;\n#[allow(unused_imports)]\npub use self::pet::Pet;",
         "pub struct Int64(pub i64);",
     ] {
         assert!(
@@ -409,6 +409,39 @@ fn file_per_type_writes_a_submodule_per_type() {
         pet.contents
     );
     assert!(!pet.contents.contains("my_crate"), "{}", pet.contents);
+}
+
+#[test]
+fn file_per_type_keeps_clear_of_what_extra_imports_bind() {
+    let components = serde_json::json!({"Fmt": {"type": "string"}, "Io": {"type": "string"}, "Map": {"type": "string"}});
+    let config = rust_config(
+        "layout = \"file_per_type\"\nextra_imports = [\"use std::fmt;\", \"use std::{io as io, collections::{BTreeMap as map}};\"]\n",
+    );
+    let generation = generate(&document(components), &config).expect("generates");
+    let mut paths: Vec<_> = generation
+        .files
+        .iter()
+        .map(|f| f.path.to_string_lossy().replace('\\', "/"))
+        .collect();
+    paths.sort();
+    assert_eq!(
+        paths,
+        ["types.rs", "types/fmt2.rs", "types/io2.rs", "types/map2.rs"]
+    );
+}
+
+#[test]
+fn file_per_type_refuses_a_substitution_relative_to_the_module() {
+    for name in ["super::ids::Id", "Option<self::Id>"] {
+        let config = rust_config(&format!(
+            "layout = \"file_per_type\"\n[substitutions.uuid.rust]\nname = \"{name}\"\n"
+        ));
+        let error = generate(&document(pet()), &config).unwrap_err();
+        assert!(matches!(error, GenerateError::Config(_)), "{error}");
+        // The one-file layout keeps the module the path was written for.
+        let config = rust_config(&format!("[substitutions.uuid.rust]\nname = \"{name}\"\n"));
+        generate(&document(pet()), &config).unwrap();
+    }
 }
 
 #[test]

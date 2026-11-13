@@ -21,9 +21,18 @@ pub(crate) fn render(
         let text = renderer.render("go/file.go.jinja", file, "\n")?;
         return Ok(vec![(package_path, text)]);
     }
+    // The extra imports some file took.
+    let mut placed = BTreeSet::new();
     let mut files = vec![(
         package_path,
-        render_used(&renderer, "go/package.go.jinja", file.clone(), built, true)?,
+        render_used(
+            &renderer,
+            "go/package.go.jinja",
+            file.clone(),
+            built,
+            true,
+            &mut placed,
+        )?,
     )];
     for t in &file.types {
         let stem = t
@@ -36,8 +45,26 @@ pub(crate) fn render(
         };
         files.push((
             PathBuf::from(format!("{stem}.go")),
-            render_used(&renderer, "go/type.go.jinja", view, built, false)?,
+            render_used(
+                &renderer,
+                "go/type.go.jinja",
+                view,
+                built,
+                false,
+                &mut placed,
+            )?,
         ));
+    }
+    // One no file names by the name its path suggests is likely used
+    // under another: the package's own name, which only an alias says.
+    if let Some(spec) = file
+        .extra_imports
+        .iter()
+        .find(|spec| !placed.contains(*spec))
+    {
+        return Err(GenerateError::Config(format!(
+            "`extra_imports` entry {spec:?} is named in no generated file by the name its path ends in; under `layout = \"file_per_type\"` an import goes to the files using it, so give it the name its package is used under, such as `name \"path\"`"
+        )));
     }
     Ok(files)
 }
@@ -51,6 +78,7 @@ fn render_used(
     mut view: FileView,
     built: &Built,
     package: bool,
+    placed: &mut BTreeSet<String>,
 ) -> Result<String, GenerateError> {
     let used = qualifiers(&renderer.render(entry, &view, "\n")?);
     let uses = |names: &BTreeSet<String>| names.iter().any(|n| used.contains(n));
@@ -65,5 +93,6 @@ fn render_used(
         Some(names) => names.iter().any(|n| used.contains(n)),
         None => package,
     });
+    placed.extend(view.extra_imports.iter().cloned());
     renderer.render(entry, &view, "\n")
 }

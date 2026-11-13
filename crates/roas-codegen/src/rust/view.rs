@@ -370,6 +370,12 @@ fn assign_files(types: &mut [TypeView], config: &Config) {
     }
     for line in &config.extra_imports {
         taken.extend(crate::generate::first_path_segments(line).map(str::to_owned));
+        // And what the line declares: `use std::fmt;` binds `fmt`.
+        if let Ok(file) = syn::parse_str::<syn::File>(line) {
+            for item in &file.items {
+                bound_names(item, &mut taken);
+            }
+        }
     }
     for t in types {
         let base = crate::config::rust_module_name(&snake(std::slice::from_ref(&t.name)));
@@ -388,6 +394,38 @@ fn assign_files(types: &mut [TypeView], config: &Config) {
         taken.insert(file.clone());
         t.file = Some(file);
     }
+}
+
+/// The names an item brings into its module's scope.
+fn bound_names(item: &syn::Item, out: &mut std::collections::BTreeSet<String>) {
+    use syn::ext::IdentExt;
+    fn tree(node: &syn::UseTree, out: &mut std::collections::BTreeSet<String>) {
+        match node {
+            syn::UseTree::Path(path) => tree(&path.tree, out),
+            syn::UseTree::Name(name) => {
+                out.insert(name.ident.unraw().to_string());
+            }
+            syn::UseTree::Rename(rename) => {
+                out.insert(rename.rename.unraw().to_string());
+            }
+            syn::UseTree::Group(group) => group.items.iter().for_each(|t| tree(t, out)),
+            // What a glob brings in is not known here, and a submodule
+            // shadows it rather than clashing.
+            syn::UseTree::Glob(_) => {}
+        }
+    }
+    let ident = match item {
+        syn::Item::Use(item) => return tree(&item.tree, out),
+        syn::Item::ExternCrate(item) => item.rename.as_ref().map_or(&item.ident, |(_, r)| r),
+        syn::Item::Mod(item) => &item.ident,
+        syn::Item::Struct(item) => &item.ident,
+        syn::Item::Enum(item) => &item.ident,
+        syn::Item::Union(item) => &item.ident,
+        syn::Item::Trait(item) => &item.ident,
+        syn::Item::Type(item) => &item.ident,
+        _ => return,
+    };
+    out.insert(ident.unraw().to_string());
 }
 
 /// Every `types.<Name>` and `fields.<prop>` in the configuration must

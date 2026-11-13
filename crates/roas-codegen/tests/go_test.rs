@@ -614,7 +614,7 @@ fn file_per_type_writes_a_file_per_type_importing_what_it_uses() {
         "ArmLinux": {"type": "string", "enum": ["a"]},
         "PetTest": {"type": "boolean"}
     });
-    let toml = "layout = \"file_per_type\"\nheader = \"// SPDX-License-Identifier: MIT\"\nextra_imports = ['_ \"embed\"', 'y \"gopkg.in/yaml.v3\"']\n[substitutions.date-time]\ngo = { name = \"time.Time\", import = \"time\" }\n";
+    let toml = "layout = \"file_per_type\"\nheader = \"// SPDX-License-Identifier: MIT\"\nextra_imports = ['_ \"embed\"']\n[substitutions.date-time]\ngo = { name = \"time.Time\", import = \"time\" }\n";
     let Some(generation) = go(components, toml) else {
         return;
     };
@@ -659,9 +659,7 @@ fn file_per_type_writes_a_file_per_type_importing_what_it_uses() {
     assert!(pet.contains("\"time\""), "{pet}");
     assert!(pet.contains("type Pet struct"), "{pet}");
     for (path, contents) in generation.files.iter().map(|f| (&f.path, &f.contents)) {
-        // An import no file uses is left out, and so is a blank one
-        // beyond the package file.
-        assert!(!contents.contains("yaml"), "{}: {contents}", path.display());
+        // A blank import goes to the package file alone.
         if path != Path::new("types.go") {
             assert!(
                 !contents.contains("\"embed\""),
@@ -677,4 +675,36 @@ fn file_per_type_writes_a_file_per_type_importing_what_it_uses() {
     }
     let flag = file("types2.go");
     assert!(!flag.contains("\"time\""), "{flag}");
+}
+
+#[test]
+fn file_per_type_refuses_an_import_it_cannot_place() {
+    let components = serde_json::json!({"Pet": {"type": "string"}});
+    for spec in [r#". "math""#, r#""example.com/go-thing""#] {
+        let toml = format!("layout = \"file_per_type\"\nextra_imports = ['{spec}']\n");
+        let Some(result) = go(components.clone(), &toml) else {
+            return;
+        };
+        let error = result.unwrap_err();
+        assert!(matches!(error, GenerateError::Config(_)), "{spec}: {error}");
+    }
+    // Named as it is used, an import goes to the files using it.
+    let toml = "layout = \"file_per_type\"\nextra_imports = ['thing \"example.com/go-thing\"']\n[substitutions.Pet.go]\nname = \"thing.T\"\n";
+    let Some(result) = go(
+        serde_json::json!({"Pet": {"type": "string"}, "Owner": {"type": "object", "properties": {"p": {"$ref": "#/components/schemas/Pet"}}}}),
+        toml,
+    ) else {
+        return;
+    };
+    let generation = result.expect("generates");
+    let owner = generation
+        .files
+        .iter()
+        .find(|f| f.path == Path::new("owner.go"))
+        .unwrap();
+    assert!(
+        owner.contents.contains("thing \"example.com/go-thing\""),
+        "{}",
+        owner.contents
+    );
 }

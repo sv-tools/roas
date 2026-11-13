@@ -19,6 +19,6 @@
 {% endfor %}mod {{ t.file }};
 {% for gate in t.cfg %}{{ gate }}
 {% endfor %}#[allow(unused_imports)]
-pub use self::{{ t.file }}::*;
+pub use self::{{ t.file }}::{{ t.name }};
 {% endfor %}{% endblock %}
 {% block footer %}{% endblock %}
