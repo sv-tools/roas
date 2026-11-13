@@ -4,7 +4,6 @@ version = "0.3.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-homepage.workspace = true
 repository.workspace = true
 keywords = ["openapi", "swagger", "loader", "fetcher", "http"]
 description = "HTTP/HTTPS fetcher for the roas OpenAPI loader"

@@ -6,7 +6,6 @@ members = ["crates/*"]
 edition = "2024"
 authors = ["Sergey Vilgelm <sergey@vilgelm.com>"]
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/sv-tools/roas"
 repository = "https://github.com/sv-tools/roas"
 
 [workspace.dependencies]

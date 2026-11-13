@@ -3002,7 +3002,7 @@ dependencies = [
 
 [[package]]
 name = "roas"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "clap",
  "enumset",
@@ -3017,7 +3017,7 @@ dependencies = [
 
 [[package]]
 name = "roas-arazzo"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "clap",
  "enumset",
@@ -3051,7 +3051,7 @@ dependencies = [
 
 [[package]]
 name = "roas-asyncapi"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "clap",
  "enumset",

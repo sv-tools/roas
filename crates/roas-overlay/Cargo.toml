@@ -4,7 +4,6 @@ version = "0.3.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-homepage.workspace = true
 repository.workspace = true
 keywords = ["openapi", "overlay", "swagger", "jsonpath", "validation"]
 description = "Rust implementation of the OpenAPI Overlay Specification v1.0 / v1.1 — parse, validate, and apply"
