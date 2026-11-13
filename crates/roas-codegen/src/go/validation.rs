@@ -426,6 +426,10 @@ fn render(
                     lit(&format!("%v is {word} {keyword} {literal}"))
                 ));
             }
+            Check::DecMultipleUnheld { literal } => out.push(format!(
+                "if {x}.sign() != 0 {{ {r}.unevaluated({p}, {}) }}",
+                lit(&format!("multipleOf: {literal} is past what an exact decimal holds"))
+            )),
             Check::DecMultipleOf { divisor, literal } => out.push(format!(
                 "if !{x}.IsMultipleOf({}) {{ {r}.violation({p}, fmt.Sprintf({}, {x})) }}",
                 decimal(divisor),
@@ -661,10 +665,13 @@ fn go_wide<'a>(ir: &crate::ir::Ir, tys: impl Iterator<Item = &'a TypeRef>) -> St
 fn go_wide_of<'a>(ir: &crate::ir::Ir, tys: impl Iterator<Item = &'a TypeRef>, raw: &str) -> String {
     let tys: Vec<&TypeRef> = tys.collect();
     let (limit, float32, decimal, float) = checks::number_range(ir, &tys);
-    format!(
-        "wideNumber({raw}, {}, {float32}, {decimal}, {float})",
-        limit.unwrap_or("math.Inf(1)")
-    )
+    let limit = limit.unwrap_or("math.Inf(1)");
+    // Spelled as before `exact_numbers` existed when it is off.
+    if ir.exact_numbers {
+        format!("wideNumber({raw}, {limit}, {float32}, {decimal}, {float})")
+    } else {
+        format!("wideNumber({raw}, {limit}, {float32})")
+    }
 }
 
 /// The checks on one member a struct holds raw beside `patternProperties`,

@@ -360,6 +360,10 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                     "{r}.violation({p}, format!(\"{{}} is {word} {keyword} {literal}\", {v}));"
                 ));
             }
+            Check::DecMultipleUnheld { literal } => out.push(format!(
+                "if {v}.mantissa() != 0 {{ {r}.unevaluated({p}, {:?}); }}",
+                format!("multipleOf: {literal} is past what an exact decimal holds")
+            )),
             Check::DecMultipleOf { divisor, literal } => out.push(format!(
                 "if !{v}.is_multiple_of(&{}) {{ {r}.violation({p}, format!(\"{{}} is not a multiple of {literal}\", {v})); }}",
                 decimal(divisor)
@@ -612,10 +616,13 @@ fn rust_wide_of<'a>(
 ) -> String {
     let tys: Vec<&TypeRef> = tys.collect();
     let (limit, float32, decimal, float) = checks::number_range(ir, &tys);
-    format!(
-        "wide_number({raw}, {}, {float32}, {decimal}, {float})",
-        limit.unwrap_or("f64::INFINITY")
-    )
+    let limit = limit.unwrap_or("f64::INFINITY");
+    // Spelled as before `exact_numbers` existed when it is off.
+    if ir.exact_numbers {
+        format!("wide_number({raw}, {limit}, {float32}, {decimal}, {float})")
+    } else {
+        format!("wide_number({raw}, {limit}, {float32})")
+    }
 }
 
 /// The checks on one member a struct holds raw beside `patternProperties`,

@@ -52,7 +52,10 @@ pub(crate) fn lower(front: &Front, config: &Config) -> Ir {
     let mut lowerer = Lowerer {
         front,
         config,
-        ir: Ir::default(),
+        ir: Ir {
+            exact_numbers: config.exact_numbers,
+            ..Ir::default()
+        },
         owners: Vec::new(),
         proven_tags: BTreeSet::new(),
         component_ids: front

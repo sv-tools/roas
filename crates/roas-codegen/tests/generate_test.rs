@@ -2414,7 +2414,21 @@ fn decimal_helper_names_are_free_without_a_decimal() {
     .merge(target(Target::Go))
     .build()
     .unwrap();
+    let mut components = components;
+    // An open union: its checks read numbers through the wide-number guard.
+    components["Open"] = serde_json::json!({"oneOf": [{"type": "integer"}, {"type": "string"}]});
     let g = generate(&document(components), &config).expect("`count` is free");
+    // Spelled as before `exact_numbers` existed.
+    assert!(
+        g.files[0]
+            .contents
+            .contains("func wideNumber(raw []byte, intLimit float64, narrow bool) bool")
+            && g.files[0]
+                .contents
+                .contains("wideNumber(v.raw, 9223372036854775808.0, false)"),
+        "{}",
+        g.files[0].contents
+    );
     assert!(
         g.files[0].contents.contains("\"example.com/count\""),
         "{}",

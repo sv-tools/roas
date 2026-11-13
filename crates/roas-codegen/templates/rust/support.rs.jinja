@@ -536,7 +536,7 @@ mod require_present {
     }
 }
 
-{% endif %}{% if support.validation %}/// Whether `raw` has a number a generated type may fail to decode for its
+{% endif %}{% if support.validation %}{% if support.exact_numbers %}/// Whether `raw` has a number a generated type may fail to decode for its
 /// range rather than its value: a whole number from `int_limit` on, one
 /// past the 32-bit float range when `float32` holds, one no `Decimal`
 /// holds when `decimal` does, or one past `f64` when no `Decimal` is
@@ -602,7 +602,64 @@ fn wide_number(raw: &str, int_limit: f64, float32: bool, decimal: bool, float: b
     }
     false
 }
-
+{% else %}/// Whether `raw` has a number a generated type may fail to decode for its
+/// range rather than its value: a whole number from `int_limit` on, one
+/// past the 32-bit float range when `float32` holds, or one past `f64` —
+/// or nests deeper than the decoder reads.
+/// A union branch that fails to decode such a value proves no mismatch.
+#[allow(dead_code)]
+fn wide_number(raw: &str, int_limit: f64, float32: bool) -> bool {
+    let bytes = raw.as_bytes();
+    let (mut i, mut in_string, mut depth) = (0, false, 0usize);
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            match b {
+                // A lone surrogate escape is raw JSON serde_json captures
+                // but will not read as a string.
+                b'\\' if bytes.get(i + 1) == Some(&b'u')
+                    && bytes.get(i + 2).is_some_and(|c| c.eq_ignore_ascii_case(&b'd'))
+                    && bytes.get(i + 3).is_some_and(|c| matches!(c, b'8'..=b'9' | b'a'..=b'f' | b'A'..=b'F')) =>
+                {
+                    return true;
+                }
+                b'\\' => i += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            in_string = true;
+        } else if b == b'[' || b == b'{' {
+            // Nested past serde_json's limit, a branch fails to decode
+            // for the decoder, not the schema.
+            depth += 1;
+            if depth > 120 {
+                return true;
+            }
+        } else if b == b']' || b == b'}' {
+            depth = depth.saturating_sub(1);
+        } else if b == b'-' || b.is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && matches!(bytes[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-') {
+                i += 1;
+            }
+            let f: f64 = raw[start..i].parse().unwrap_or(f64::INFINITY);
+            if !f.is_finite()
+                || (f.fract() == 0.0 && f.abs() >= int_limit)
+                || (float32 && f.abs() > f64::from(f32::MAX))
+            {
+                return true;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+{% endif %}
 /// What [`Validate`] found: every constraint a value breaks, and every one
 /// it could not check. Findings collect rather than stop at the first.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

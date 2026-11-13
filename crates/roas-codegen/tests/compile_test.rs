@@ -2274,6 +2274,7 @@ fn main() {
     assert_eq!(report::<Long>(r#"{"pick":2}"#), vec![v("/pick")]);
     assert_eq!(report::<Long>(r#"{"only":1}"#), vec![v("/only")]);
     assert_eq!(report::<Long>(r#"{"odd":3}"#), vec![u("/odd")]);
+    assert_eq!(report::<Long>(r#"{"odd":0}"#), vec![]);
     assert_eq!(report::<Long>(r#"{"edge":1.1e2147483648}"#), vec![]);
     assert_eq!(report::<Long>(r#"{"edge":9e2147483647}"#), vec![v("/edge")]);
     // A rounded bound is still named by its keyword.
@@ -2479,6 +2480,7 @@ func main() {
 	check("pick", report[api.Long](`{"pick":2}`), v("/pick"))
 	check("only", report[api.Long](`{"only":1}`), v("/only"))
 	check("odd", report[api.Long](`{"odd":3}`), u("/odd"))
+	check("odd zero", report[api.Long](`{"odd":0}`))
 	check("edge", report[api.Long](`{"edge":1.1e2147483648}`))
 	check("below edge", report[api.Long](`{"edge":9e2147483647}`), v("/edge"))
 	var hi api.Long

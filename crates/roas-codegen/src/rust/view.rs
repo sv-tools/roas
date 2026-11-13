@@ -21,6 +21,8 @@ pub(crate) struct SupportView {
     pub int32: bool,
     /// A `number` held exactly, under `exact_numbers`: `Decimal`.
     pub decimal: bool,
+    /// `exact_numbers` is on: the support reads numbers as decimals may.
+    pub exact_numbers: bool,
     pub raw_holder: bool,
     /// A closed struct reads through `ObjectOnly`.
     pub object_only: bool,
@@ -250,7 +252,10 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         ir,
         config,
         names: BTreeMap::new(),
-        support: SupportView::default(),
+        support: SupportView {
+            exact_numbers: config.exact_numbers,
+            ..SupportView::default()
+        },
         externs: BTreeMap::new(),
         diagnostics: Vec::new(),
     };

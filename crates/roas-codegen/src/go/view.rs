@@ -131,6 +131,8 @@ pub(crate) struct SupportView {
     pub int32: bool,
     /// A `number` held exactly, under `exact_numbers`: `Decimal`.
     pub decimal: bool,
+    /// `exact_numbers` is on: the support reads numbers as decimals may.
+    pub exact_numbers: bool,
     pub null: bool,
     pub tagged: bool,
     /// A self-writing struct has a catch-all, written in key order.
@@ -323,7 +325,10 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         names: BTreeMap::new(),
         package_names: Allocator::default(),
         suppressed: ir.suppressed.clone(),
-        support: SupportView::default(),
+        support: SupportView {
+            exact_numbers: config.exact_numbers,
+            ..SupportView::default()
+        },
         refuse_null: BTreeSet::new(),
         refuse_null_isolated: BTreeSet::new(),
         isolated: BTreeSet::new(),

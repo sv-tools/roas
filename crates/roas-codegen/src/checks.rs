@@ -103,6 +103,11 @@ pub(crate) enum Check {
         exclusive: bool,
         literal: String,
     },
+    /// `multipleOf` on an exact decimal, by a divisor no decimal holds:
+    /// decided only for zero, a multiple of anything.
+    DecMultipleUnheld {
+        literal: String,
+    },
     /// `multipleOf` on an exact decimal.
     DecMultipleOf {
         divisor: Dec,
@@ -363,9 +368,8 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                         literal: n.to_string(),
                     },
                     // Warned about when lowering.
-                    None => Check::Unevaluated {
-                        keyword: "multipleOf",
-                        reason: format!("{n} is past what an exact decimal holds"),
+                    None => Check::DecMultipleUnheld {
+                        literal: n.to_string(),
                     },
                 });
             }
