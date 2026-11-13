@@ -49,6 +49,16 @@ const VALIDATION_NAMES: &[&str] = &[
     "zero",
 ];
 
+/// Validation's loop variables, one per nesting depth: `i0`, `item0`,
+/// `k0`. A file under `layout = "file_per_type"` reads `item0.` as a use
+/// of a package of that name.
+fn depth_local(name: &str) -> bool {
+    ["item", "i", "k"].iter().any(|prefix| {
+        name.strip_prefix(prefix)
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
 /// The package-level names the pattern support declares, reserved only
 /// when it is generated.
 const PATTERN_NAMES: &[&str] = &["matchPattern", "patterns"];
@@ -433,6 +443,21 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 continue;
             }
             let name = package_of(import);
+            let local = config.validation
+                && config.layout == Layout::FilePerType
+                && builder
+                    .extern_names
+                    .get(import)
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str)
+                    .chain([name])
+                    .any(depth_local);
+            if local {
+                return Err(GenerateError::Config(format!(
+                    "substitution import {import:?} is used under a name like validation's loop variables (`item0`, `i0`, `k0`), which `layout = \"file_per_type\"` would read as its use; import it under another name"
+                )));
+            }
             if let Some(path) = used.insert(name, import) {
                 return Err(GenerateError::Config(format!(
                     "substitution import {import:?} is used as `{name}`, which the generated code already imports as {path:?}"
@@ -463,6 +488,9 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             for spec in &config.extra_imports {
                 let names = super::imports::spec_names(spec).unwrap_or_default();
                 if let Some((name, what)) = names.iter().find_map(|n| {
+                    if config.validation && depth_local(n) {
+                        return Some((n, "validation's loop variables"));
+                    }
                     used.get(n.as_str()).map(|what| (n, *what)).or_else(|| {
                         // Or the name a substitution's spelling uses.
                         builder

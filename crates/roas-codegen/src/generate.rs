@@ -228,6 +228,13 @@ fn check_rust(config: &Config) -> Result<(), GenerateError> {
             config.rust.module
         )));
     }
+    // The types' files go to a directory named after the module, and
+    // Cargo builds every file in `src/bin` as a program of its own.
+    if config.layout == Layout::FilePerType && config.rust.module == "bin" {
+        return Err(GenerateError::Config(
+            "`rust.module = \"bin\"` puts the types' files in a `bin` directory, which Cargo reads as programs under `src/`; choose another module name".into(),
+        ));
+    }
     // The header heads every type's file too, which the module includes:
     // an inner attribute or doc comment is not allowed there.
     if config.layout == Layout::FilePerType

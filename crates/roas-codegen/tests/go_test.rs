@@ -737,3 +737,22 @@ fn file_per_type_refuses_an_import_named_like_a_substitution_import() {
     let error = result.unwrap_err();
     assert!(matches!(error, GenerateError::Config(_)), "{error}");
 }
+
+#[test]
+fn file_per_type_refuses_an_import_named_like_a_validation_loop_variable() {
+    let components = serde_json::json!({
+        "Pet": {"type": "object", "properties": {"at": {"type": "string", "format": "date-time"}}},
+        "Pets": {"type": "array", "items": {"$ref": "#/components/schemas/Pet"}}
+    });
+    for toml in [
+        "extra_imports = ['item0 \"time\"']\n[substitutions.date-time.go]\nname = \"item0.Time\"\n",
+        "[substitutions.date-time.go]\nname = \"item0.Time\"\nimport = \"item0\"\n",
+    ] {
+        let toml = format!("layout = \"file_per_type\"\nvalidation = true\n{toml}");
+        let Some(result) = go(components.clone(), &toml) else {
+            return;
+        };
+        let error = result.unwrap_err();
+        assert!(matches!(error, GenerateError::Config(_)), "{toml}: {error}");
+    }
+}

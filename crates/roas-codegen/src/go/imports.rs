@@ -102,7 +102,12 @@ pub(crate) fn spec_names(spec: &str) -> Option<Vec<String>> {
         Some("_" | ".") => None,
         Some(alias) if !alias.is_empty() => Some(vec![alias.to_owned()]),
         _ => {
-            let path = path.trim_matches(['"', '`']);
+            // The path, up to its closing quote: a comment may follow.
+            let quote = path.chars().next().unwrap_or('"');
+            let path = path[quote.len_utf8()..]
+                .split(quote)
+                .next()
+                .unwrap_or_default();
             let last = super::view::package_of(path);
             let mut names = vec![last.to_owned()];
             // `gopkg.in/yaml.v3` is package `yaml`.
@@ -141,5 +146,9 @@ mod tests {
         );
         assert_eq!(spec_names("_ \"embed\""), None);
         assert_eq!(spec_names(". \"math\""), None);
+        assert_eq!(
+            spec_names("\"github.com/google/uuid\" // ids"),
+            Some(vec!["uuid".to_owned()])
+        );
     }
 }
