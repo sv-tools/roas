@@ -37,7 +37,9 @@ fn a_v3_1_description_is_accepted() {
         } } }
     }))
     .expect("the v3.1 description must parse");
-    assert_reads_a_path_parameter(&Validator::from_v3_1(spec, Options::new()));
+    let validator =
+        Validator::from_v3_1(spec, Options::new()).expect("the v3.1 description converts");
+    assert_reads_a_path_parameter(&validator);
 }
 
 #[cfg(feature = "v3_0")]
@@ -56,7 +58,9 @@ fn a_v3_0_description_is_accepted() {
         } } }
     }))
     .expect("the v3.0 description must parse");
-    assert_reads_a_path_parameter(&Validator::from_v3_0(spec, Options::new()));
+    let validator =
+        Validator::from_v3_0(spec, Options::new()).expect("the v3.0 description converts");
+    assert_reads_a_path_parameter(&validator);
 }
 
 #[cfg(feature = "v2")]
@@ -76,7 +80,8 @@ fn a_v2_swagger_description_is_accepted() {
         } } }
     }))
     .expect("the v2 description must parse");
-    assert_reads_a_path_parameter(&Validator::from_v2(spec, Options::new()));
+    let validator = Validator::from_v2(spec, Options::new()).expect("the v2 description converts");
+    assert_reads_a_path_parameter(&validator);
 }
 
 #[cfg(feature = "v2")]
@@ -94,7 +99,7 @@ fn a_v2_base_path_is_carried_into_the_server_url() {
         } } }
     }))
     .expect("the v2 description must parse");
-    let validator = Validator::from_v2(spec, Options::new());
+    let validator = Validator::from_v2(spec, Options::new()).expect("the v2 description converts");
     let report = validator
         .validate(&RequestView::new("GET", "/v1/pets"))
         .expect("the base path from `basePath` is stripped");
