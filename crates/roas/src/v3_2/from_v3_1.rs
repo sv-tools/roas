@@ -29,20 +29,33 @@
 //! not migrations from 3.1 shape, so they're not synthesised.
 //!
 //! The conversion serializes the v3.1 input with serde, runs the
-//! transforms, and deserializes as a v3.2 spec. A valid 3.1 input
-//! produces a structurally valid 3.2 document; semantic regressions
-//! are surfaced by `Spec::validate`.
+//! transforms, and deserializes as a v3.2 spec. A transformed document
+//! the v3.2 model cannot hold — a gap in the conversion, not an invalid
+//! input — fails with a [`ConversionError`] instead of panicking;
+//! semantic regressions are surfaced by `Spec::validate`.
 
+use crate::conversion::{Conversion, ConversionError};
 use crate::v3_1::spec::Spec as V31Spec;
 use crate::v3_2::spec::Spec as V32Spec;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
-impl From<V31Spec> for V32Spec {
-    fn from(v31: V31Spec) -> Self {
-        let mut value = serde_json::to_value(v31).expect("v3_1::Spec serializes");
+impl TryFrom<V31Spec> for V32Spec {
+    type Error = ConversionError;
+
+    /// The v3.1 description as v3.2.
+    ///
+    /// # Errors
+    ///
+    /// [`ConversionError`] when the transformed document does not fit the v3.2 model.
+    fn try_from(v31: V31Spec) -> Result<Self, Self::Error> {
+        let conversion = Conversion {
+            from: "v3.1",
+            to: "v3.2",
+        };
+        let mut value = conversion.to_json(v31)?;
         transform_spec(&mut value);
-        serde_json::from_value(value).expect("transformed spec deserializes as v3_2::Spec")
+        conversion.to_target(value)
     }
 }
 
@@ -185,7 +198,7 @@ mod tests {
 
     fn convert(raw: &str) -> Value {
         let v31: V31Spec = serde_json::from_str(raw).expect("v3.1 spec parses");
-        let v32: V32Spec = v31.into();
+        let v32 = V32Spec::try_from(v31).unwrap();
         serde_json::to_value(&v32).unwrap()
     }
 
@@ -532,7 +545,7 @@ mod tests {
         for (name, raw) in fixtures {
             let v31: V31Spec =
                 serde_json::from_str(raw).unwrap_or_else(|e| panic!("{name}: parse: {e}"));
-            let v32: V32Spec = v31.into();
+            let v32 = V32Spec::try_from(v31).unwrap();
             assert_eq!(v32.openapi.as_str(), "3.2.0", "{name} openapi version");
             if let Err(e) = v32.validate(opts, None) {
                 panic!("{name}: converted spec did not validate cleanly:\n{e}");

@@ -46,20 +46,33 @@
 //! * v2 `Items` array-of-arrays nesting becomes a recursively-built `Schema`.
 //!
 //! The conversion serializes the v2 input with serde, runs the transforms,
-//! and deserializes as a v3.0 spec. If the input is a valid v2 document the
-//! output is a structurally valid v3.0 document; semantic regressions are
+//! and deserializes as a v3.0 spec. A transformed document the v3.0 model
+//! cannot hold — a gap in the conversion, not an invalid input — fails with a
+//! [`ConversionError`] instead of panicking; semantic regressions are
 //! surfaced by `Spec::validate`.
 
+use crate::conversion::{Conversion, ConversionError};
 use crate::v2::spec::Spec as V2Spec;
 use crate::v3_0::spec::Spec as V3Spec;
 use serde_json::{Map, Value};
 use std::collections::HashSet;
 
-impl From<V2Spec> for V3Spec {
-    fn from(v2: V2Spec) -> Self {
-        let mut value = serde_json::to_value(v2).expect("v2::Spec serializes");
+impl TryFrom<V2Spec> for V3Spec {
+    type Error = ConversionError;
+
+    /// The v2.0 description as v3.0.
+    ///
+    /// # Errors
+    ///
+    /// [`ConversionError`] when the transformed document does not fit the v3.0 model.
+    fn try_from(v2: V2Spec) -> Result<Self, Self::Error> {
+        let conversion = Conversion {
+            from: "v2.0",
+            to: "v3.0",
+        };
+        let mut value = conversion.to_json(v2)?;
         transform_spec(&mut value);
-        serde_json::from_value(value).expect("transformed spec deserializes as v3_0::Spec")
+        conversion.to_target(value)
     }
 }
 
@@ -1244,7 +1257,7 @@ mod tests {
         for (name, raw) in fixtures {
             let v2: V2Spec =
                 serde_json::from_str(raw).unwrap_or_else(|e| panic!("{name}: parse: {e}"));
-            let v3: V3Spec = v2.into();
+            let v3 = V3Spec::try_from(v2).unwrap();
             assert_eq!(v3.openapi.as_str(), "3.0.4", "{name} openapi version");
             // Some v2 fixtures use tags on operations without declaring
             // them at the spec level, and the unused-* validators are
@@ -1262,7 +1275,7 @@ mod tests {
     #[test]
     fn petstore_minimal_round_trips_to_valid_v3_0() {
         let v2: V2Spec = v2_from_json(include_str!("../../tests/v2_data/petstore_minimal.json"));
-        let v3: V3Spec = v2.into();
+        let v3 = V3Spec::try_from(v2).unwrap();
         // openapi version landed.
         assert_eq!(v3.openapi.as_str(), "3.0.4");
         // host + basePath + schemes assembled into servers.
@@ -1310,7 +1323,7 @@ mod tests {
                 "Pet": { "type": "object" }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let post = &value["paths"]["/pets"]["post"];
         assert!(post.get("parameters").is_none(), "body param removed");
@@ -1337,7 +1350,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let post = &value["paths"]["/login"]["post"];
         assert!(
@@ -1370,7 +1383,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let content = &value["paths"]["/upload"]["post"]["requestBody"]["content"];
         let media = &content["multipart/form-data"]["schema"]["properties"]["file"];
@@ -1398,7 +1411,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let p = &value["paths"]["/items"]["get"]["parameters"][0];
         assert_eq!(p["in"], "query");
@@ -1436,7 +1449,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let content = &value["paths"]["/x"]["get"]["responses"]["200"]["content"];
         assert_eq!(content["application/json"]["schema"]["type"], "string");
@@ -1551,7 +1564,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let trap = &value["components"]["schemas"]["Doc"]["x-trap"];
         assert_eq!(trap["x-nullable"], true);
@@ -1585,7 +1598,7 @@ mod tests {
             },
             "definitions": {"Err": {"type": "object"}}
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let schema_ref = &value["paths"]["/x"]["get"]["responses"]["default"]["content"]["application/json"]
             ["schema"]["$ref"];
@@ -1617,7 +1630,7 @@ mod tests {
                 "Err": {"type": "object"}
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         assert_eq!(
             value["paths"]["/x"]["get"]["parameters"][0]["$ref"],
@@ -1660,7 +1673,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let limit = &value["components"]["parameters"]["Limit"];
         assert_eq!(limit["in"], "query");
@@ -1699,7 +1712,7 @@ mod tests {
             },
             "definitions": {"Pet": {"type": "object"}}
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         // Pet body lives in components.requestBodies, not parameters.
         assert!(
@@ -1744,7 +1757,7 @@ mod tests {
                 "File": {"in": "formData", "name": "file", "type": "file"}
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         // The component is built once.
         let file_rb = &value["components"]["requestBodies"]["File"];
@@ -1784,7 +1797,7 @@ mod tests {
                 "File": {"in": "formData", "name": "file", "type": "file"}
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let post = &value["paths"]["/upload"]["post"];
         // An inline form is present, so the operation body is the
@@ -1819,7 +1832,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let body = &value["paths"]["/upload"]["post"]["requestBody"];
         // Multipart because at least one field is `type: file`.
@@ -1849,7 +1862,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let props = &value["paths"]["/x"]["post"]["requestBody"]["content"]["application/x-www-form-urlencoded"]
             ["schema"]["properties"];
@@ -1876,7 +1889,7 @@ mod tests {
                 "File": {"in": "formData", "name": "file", "type": "file"}
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         assert_eq!(
             value["paths"]["/upload"]["post"]["requestBody"]["$ref"],
@@ -1910,7 +1923,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         // PUT inherits the path-level body.
         let put = &value["paths"]["/items/{id}"]["put"];
@@ -1942,7 +1955,7 @@ mod tests {
             "schemes": ["https"],
             "paths": {}
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         assert!(
             v3.servers.is_none(),
             "no servers expected, got {:?}",
@@ -1959,7 +1972,7 @@ mod tests {
             "schemes": ["https", "http"],
             "paths": {}
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let servers = v3.servers.as_ref().expect("servers populated");
         assert_eq!(servers.len(), 1, "deduped to a single relative entry");
         assert_eq!(servers[0].url, "/v1");
@@ -1982,7 +1995,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         // Spec-level servers reflect the spec-level https scheme.
         let spec_url = &value["servers"][0]["url"];
@@ -2002,7 +2015,7 @@ mod tests {
                 "auth": {"type": "basic"}
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let scheme = &value["components"]["securitySchemes"]["auth"];
         assert_eq!(scheme["type"], "http");
@@ -2027,7 +2040,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let scheme = &value["components"]["securitySchemes"]["oauth"];
         assert_eq!(scheme["type"], "oauth2");
@@ -2053,7 +2066,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let pet = &value["components"]["schemas"]["Pet"];
         assert_eq!(pet["nullable"], true);
@@ -2079,7 +2092,7 @@ mod tests {
                 "Pet": {"type": "object"}
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let cat = &value["components"]["schemas"]["Cat"];
         assert_eq!(cat["discriminator"]["propertyName"], "kind");
@@ -2113,7 +2126,7 @@ mod tests {
                 "responses": {name: {"description": "d", "schema": schema}},
                 "parameters": {name: {"name": "b", "in": "body", "schema": schema}},
             });
-            let v3: V3Spec = serde_json::from_value::<V2Spec>(raw).unwrap().into();
+            let v3 = V3Spec::try_from(serde_json::from_value::<V2Spec>(raw).unwrap()).unwrap();
             let value = serde_json::to_value(&v3).unwrap();
             let components = &value["components"];
             for at in [
@@ -2146,7 +2159,7 @@ mod tests {
                     "schema": {"type": "object", "discriminator": "kind"}
                 }}}}},
             });
-            let v3: V3Spec = serde_json::from_value::<V2Spec>(raw).unwrap().into();
+            let v3 = V3Spec::try_from(serde_json::from_value::<V2Spec>(raw).unwrap()).unwrap();
             let value = serde_json::to_value(&v3).unwrap();
             let content = &value["paths"]["/p"]["get"]["responses"]["200"]["content"];
             assert_eq!(
@@ -2170,7 +2183,7 @@ mod tests {
                     "schema": {"type": "object", "discriminator": "kind"}
                 }}}}},
             });
-            let v3: V3Spec = serde_json::from_value::<V2Spec>(raw).unwrap().into();
+            let v3 = V3Spec::try_from(serde_json::from_value::<V2Spec>(raw).unwrap()).unwrap();
             let value = serde_json::to_value(&v3).unwrap();
             let content = &value["paths"][path]["get"]["responses"]["200"]["content"];
             assert_eq!(
@@ -2199,7 +2212,7 @@ mod tests {
                 }}}}},
                 "definitions": {"X": {"type": "object"}},
             });
-            let v3: V3Spec = serde_json::from_value::<V2Spec>(raw).unwrap().into();
+            let v3 = V3Spec::try_from(serde_json::from_value::<V2Spec>(raw).unwrap()).unwrap();
             let value = serde_json::to_value(&v3).unwrap();
             let header = &value["paths"]["/p"]["get"]["responses"]["200"]["headers"][name];
             assert_eq!(
@@ -2248,7 +2261,7 @@ mod tests {
             "x-servers": [{"url": "https://override.example.com"}],
             "paths": {}
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let servers = v3.servers.as_ref().expect("servers populated");
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].url, "https://override.example.com");
@@ -2264,7 +2277,7 @@ mod tests {
             "basePath": "/v2",
             "paths": {}
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let servers = v3.servers.as_ref().expect("servers populated");
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].url, "https://api.example.com/v2");
@@ -2286,7 +2299,7 @@ mod tests {
             }
         }"##;
         // Must not panic; the x- key is not a path item and should be skipped.
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         // The real path is present.
         assert!(value["paths"]["/real"]["get"].is_object());
@@ -2309,7 +2322,7 @@ mod tests {
             },
             "definitions": {"Error": {"type": "object"}}
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let comp_resp = &value["components"]["responses"]["ErrorResp"];
         assert_eq!(comp_resp["description"], "an error");
@@ -2341,7 +2354,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let rb = &value["paths"]["/pets"]["post"]["requestBody"];
         assert_eq!(rb["description"], "A pet");
@@ -2374,7 +2387,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let p = &value["paths"]["/items/{tags}"]["get"]["parameters"][0];
         assert_eq!(p["style"], "simple");
@@ -2402,7 +2415,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let p = &value["paths"]["/items"]["get"]["parameters"][0];
         assert_eq!(p["style"], "pipeDelimited");
@@ -2429,7 +2442,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let p = &value["paths"]["/x"]["get"]["parameters"][0];
         assert_eq!(p["style"], "simple");
@@ -2457,7 +2470,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let p = &value["paths"]["/items"]["get"]["parameters"][0];
         assert_eq!(p["style"], "form");
@@ -2486,7 +2499,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let p = &value["paths"]["/items/{id}"]["get"]["parameters"][0];
         assert_eq!(p["style"], "simple");
@@ -2513,7 +2526,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let p = &value["paths"]["/items"]["get"]["parameters"][0];
         assert_eq!(p["style"], "spaceDelimited");
@@ -2545,7 +2558,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let p = &value["paths"]["/items"]["get"]["parameters"][0];
         // No collectionFormat at any nesting level.
@@ -2600,7 +2613,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let scheme = &value["components"]["securitySchemes"]["oauth"];
         assert!(scheme["flows"]["implicit"].is_object());
@@ -2626,7 +2639,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let scheme = &value["components"]["securitySchemes"]["oauth"];
         assert!(scheme["flows"]["password"].is_object());
@@ -2652,7 +2665,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let scheme = &value["components"]["securitySchemes"]["oauth"];
         assert!(scheme["flows"]["clientCredentials"].is_object());
@@ -2711,7 +2724,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         // x-links is an extension — round-trips verbatim; walk doesn't touch its values.
         let link = &value["paths"]["/pets"]["get"]["responses"]["200"]["x-links"]["GetPetById"];
@@ -2776,7 +2789,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         // External ref must be preserved verbatim.
         let p = &value["paths"]["/x"]["get"]["parameters"][0]["$ref"];
@@ -2802,7 +2815,7 @@ mod tests {
                 "auth": {"type": "apiKey", "name": "api_key", "in": "header"}
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         // The scheme must live under securitySchemes.
         assert!(
@@ -2834,7 +2847,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let props = &value["paths"]["/login"]["post"]["requestBody"]["content"]["application/x-www-form-urlencoded"]
             ["schema"]["properties"];
@@ -2867,7 +2880,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let p = &value["paths"]["/x/{id}"]["get"]["parameters"][0];
         assert!(
@@ -2896,7 +2909,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let p = &value["paths"]["/x"]["get"]["parameters"][0];
         assert_eq!(p["allowEmptyValue"], true);
@@ -2952,7 +2965,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let p = &value["paths"]["/items"]["get"]["parameters"][0];
         // No style/explode emitted for tsv.
@@ -3133,7 +3146,7 @@ mod tests {
                 }
             }
         }"##;
-        let v3: V3Spec = v2_from_json(raw).into();
+        let v3 = V3Spec::try_from(v2_from_json(raw)).unwrap();
         let value = serde_json::to_value(&v3).unwrap();
         let content = &value["paths"]["/login"]["post"]["requestBody"]["content"];
         // Both MIME entries must have the schema.

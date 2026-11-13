@@ -130,26 +130,48 @@ pub use validator::{Options, Validator};
 
 impl Validator {
     /// Prepare a v3.1 description, upconverting it to v3.2 first.
+    ///
+    /// # Errors
+    ///
+    /// [`ConversionError`](roas::conversion::ConversionError) when `roas` cannot convert the
+    /// description to v3.2.
     #[cfg(feature = "v3_1")]
-    #[must_use]
-    pub fn from_v3_1(spec: roas::v3_1::spec::Spec, options: Options) -> Self {
-        Self::with_options(spec.into(), options)
+    pub fn from_v3_1(
+        spec: roas::v3_1::spec::Spec,
+        options: Options,
+    ) -> Result<Self, roas::conversion::ConversionError> {
+        let v3_2 = roas::v3_2::spec::Spec::try_from(spec)?;
+        Ok(Self::with_options(v3_2, options))
     }
 
     /// Prepare a v3.0 description, upconverting it to v3.2 first.
+    ///
+    /// # Errors
+    ///
+    /// [`ConversionError`](roas::conversion::ConversionError) when `roas` cannot convert the
+    /// description to v3.2.
     #[cfg(feature = "v3_0")]
-    #[must_use]
-    pub fn from_v3_0(spec: roas::v3_0::spec::Spec, options: Options) -> Self {
-        let v3_1: roas::v3_1::spec::Spec = spec.into();
+    pub fn from_v3_0(
+        spec: roas::v3_0::spec::Spec,
+        options: Options,
+    ) -> Result<Self, roas::conversion::ConversionError> {
+        let v3_1 = roas::v3_1::spec::Spec::try_from(spec)?;
         Self::from_v3_1(v3_1, options)
     }
 
     /// Prepare a v2.0 (Swagger) description, upconverting it to v3.2
     /// first.
+    ///
+    /// # Errors
+    ///
+    /// [`ConversionError`](roas::conversion::ConversionError) when `roas` cannot convert the
+    /// description to v3.2.
     #[cfg(feature = "v2")]
-    #[must_use]
-    pub fn from_v2(spec: roas::v2::spec::Spec, options: Options) -> Self {
-        let v3_0: roas::v3_0::spec::Spec = spec.into();
+    pub fn from_v2(
+        spec: roas::v2::spec::Spec,
+        options: Options,
+    ) -> Result<Self, roas::conversion::ConversionError> {
+        let v3_0 = roas::v3_0::spec::Spec::try_from(spec)?;
         Self::from_v3_0(v3_0, options)
     }
 }

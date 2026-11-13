@@ -12,17 +12,17 @@ use serde_json::{Value, json};
 /// serialized 3.0, 3.1 and 3.2 forms.
 fn upgrade(raw: Value) -> [Value; 3] {
     let spec: v2::spec::Spec = serde_json::from_value(raw).unwrap();
-    let v30: v3_0::spec::Spec = spec.into();
+    let v30 = v3_0::spec::Spec::try_from(spec).expect("the description converts");
     from_v30(v30)
 }
 
 fn from_v30(v30: v3_0::spec::Spec) -> [Value; 3] {
     v30.validate(Options::new(), None).unwrap();
     let as_30 = serde_json::to_value(&v30).unwrap();
-    let v31: v3_1::spec::Spec = v30.into();
+    let v31 = v3_1::spec::Spec::try_from(v30).expect("the description converts");
     v31.validate(Options::new(), None).unwrap();
     let as_31 = serde_json::to_value(&v31).unwrap();
-    let v32: v3_2::spec::Spec = v31.into();
+    let v32 = v3_2::spec::Spec::try_from(v31).expect("the description converts");
     v32.validate(Options::new(), None).unwrap();
     let as_32 = serde_json::to_value(&v32).unwrap();
     [as_30, as_31, as_32]
@@ -105,9 +105,9 @@ fn v2_discriminator_is_rewritten_in_every_schema_position() {
     );
     let expected = json!({"propertyName": "petType"});
     let spec: v2::spec::Spec = serde_json::from_value(raw).unwrap();
-    let v30: v3_0::spec::Spec = spec.into();
-    let v31: v3_1::spec::Spec = v30.clone().into();
-    let v32: v3_2::spec::Spec = v31.clone().into();
+    let v30 = v3_0::spec::Spec::try_from(spec).expect("the description converts");
+    let v31 = v3_1::spec::Spec::try_from(v30.clone()).expect("the description converts");
+    let v32 = v3_2::spec::Spec::try_from(v31.clone()).expect("the description converts");
     for doc in [
         serde_json::to_value(&v30).unwrap(),
         serde_json::to_value(&v31).unwrap(),
@@ -139,8 +139,8 @@ fn nullable_parent_keeps_a_typed_discriminator() {
         pet_paths(),
     );
     let spec: v2::spec::Spec = serde_json::from_value(raw).unwrap();
-    let v30: v3_0::spec::Spec = spec.into();
-    let v31: v3_1::spec::Spec = v30.into();
+    let v30 = v3_0::spec::Spec::try_from(spec).expect("the description converts");
+    let v31 = v3_1::spec::Spec::try_from(v30).expect("the description converts");
     let schemas = v31.components.as_ref().unwrap().schemas.as_ref().unwrap();
     let roas::common::reference::RefOr::Item(v3_1::schema::Schema::Multi(multi)) = &schemas["Pet"]
     else {
@@ -151,7 +151,7 @@ fn nullable_parent_keeps_a_typed_discriminator() {
         "petType"
     );
 
-    let v32: v3_2::spec::Spec = v31.into();
+    let v32 = v3_2::spec::Spec::try_from(v31).expect("the description converts");
     let schemas = v32.components.as_ref().unwrap().schemas.as_ref().unwrap();
     let roas::common::reference::RefOr::Item(v3_2::schema::Schema::Multi(multi)) = &schemas["Pet"]
     else {

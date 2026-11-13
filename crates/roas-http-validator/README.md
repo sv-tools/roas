@@ -177,14 +177,14 @@ In practice this needs a bound written in YAML with more significant digits than
 
 ## Versions
 
-The interpreter is v3.2. Enable `v3_1`, `v3_0` or `v2` to accept an older description: it is upconverted through `roas`'s own migrations first, so there is one interpreter rather than four.
+The interpreter is v3.2. Enable `v3_1`, `v3_0` or `v2` to accept an older description: it is upconverted through `roas`'s own migrations first, so there is one interpreter rather than four. A description `roas` cannot convert is a `roas::conversion::ConversionError` from the constructor.
 
 ```rust
 # use roas_http_validator::{Options, Validator};
 # #[cfg(feature = "v2")]
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 let swagger = serde_json::from_str(r#"{"swagger":"2.0","info":{"title":"t","version":"1"}}"#)?;
-let validator = Validator::from_v2(swagger, Options::new());
+let validator = Validator::from_v2(swagger, Options::new())?;
 # Ok(()) }
 # #[cfg(not(feature = "v2"))]
 # fn main() {}
