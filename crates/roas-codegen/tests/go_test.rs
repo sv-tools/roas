@@ -715,3 +715,14 @@ fn file_per_type_refuses_an_import_it_cannot_place() {
         owner.contents
     );
 }
+
+#[test]
+fn file_per_type_refuses_an_import_named_like_a_validation_local() {
+    let toml = "layout = \"file_per_type\"\nvalidation = true\nextra_imports = ['r \"time\"']\n[substitutions.date-time.go]\nname = \"r.Time\"\n";
+    let components = serde_json::json!({"Ev": {"type": "object", "properties": {"at": {"type": "string", "format": "date-time"}}}});
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let error = result.unwrap_err();
+    assert!(matches!(error, GenerateError::Config(_)), "{error}");
+}

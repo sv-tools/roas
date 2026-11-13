@@ -248,6 +248,9 @@ struct Builder<'a> {
     names: BTreeMap<SchemaId, String>,
     support: SupportView,
     externs: BTreeMap<String, String>,
+    /// The attributes the configuration and `x-rust-attrs` add, with the
+    /// type or field they are on: the paths in them are the user's.
+    written: Vec<(String, String)>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -261,6 +264,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             ..SupportView::default()
         },
         externs: BTreeMap::new(),
+        written: Vec::new(),
         diagnostics: Vec::new(),
     };
     select_check(ir, config)?;
@@ -279,7 +283,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
     }
     let uses_regex = super::validation::take_uses_regex();
     if config.layout == Layout::FilePerType {
-        assign_files(&mut types, config)?;
+        assign_files(&mut types, config, &builder.written)?;
     }
     let mut dependencies = vec![
         RustDependency {
@@ -354,7 +358,11 @@ const MODULE_SCOPE: &[&str] = &[
 /// its name in snake case, never a name the module already uses for
 /// something else, a crate a path in the generated code starts with, or
 /// one a file system resolves elsewhere.
-fn assign_files(types: &mut [TypeView], config: &Config) -> Result<(), GenerateError> {
+fn assign_files(
+    types: &mut [TypeView],
+    config: &Config,
+    written: &[(String, String)],
+) -> Result<(), GenerateError> {
     let mut taken: std::collections::BTreeSet<String> =
         MODULE_SCOPE.iter().map(|s| (*s).to_owned()).collect();
     taken.extend(types.iter().map(|t| t.name.clone()));
@@ -368,26 +376,20 @@ fn assign_files(types: &mut [TypeView], config: &Config) -> Result<(), GenerateE
         }
         taken.extend(crate::generate::first_path_segments(&spelling.name).map(str::to_owned));
     }
-    // The derives and attributes as written into each type's file: a path
-    // in one starting at a crate is hidden by a submodule of that name,
-    // and one relative to the module would start a level too deep.
-    for t in types.iter() {
-        let written = t
-            .derives
-            .iter()
-            .chain(&t.attrs)
-            .chain(t.fields.iter().flat_map(|f| &f.attrs))
-            .chain(t.variants.iter().flat_map(|v| &v.attrs));
-        for text in written {
-            for first in crate::generate::first_path_segments(text) {
-                if first == "self" || first == "super" {
-                    return Err(GenerateError::Config(format!(
-                        "`{text}` on `{}` names a path relative to the module, which `layout = \"file_per_type\"` moves each type below; spell it from `crate::`",
-                        t.raw_name
-                    )));
-                }
-                taken.insert(first.to_owned());
+    // The derives and attributes the user added: a path in one starting
+    // at a crate is hidden by a submodule of that name, and one relative
+    // to the module would start a level too deep. The generator's own
+    // attributes name no crate a submodule could hide, and their strings
+    // (a `rename`) are names, not paths.
+    let derives = config.rust.derives.iter().map(|d| (d, "every type"));
+    for (text, at) in derives.chain(written.iter().map(|(text, at)| (text, at.as_str()))) {
+        for first in crate::generate::first_path_segments(text) {
+            if first == "self" || first == "super" {
+                return Err(GenerateError::Config(format!(
+                    "`{text}` on {at} names a path relative to the module, which `layout = \"file_per_type\"` moves each type below; spell it from `crate::`"
+                )));
             }
+            taken.insert(first.to_owned());
         }
     }
     for line in &config.extra_imports {
@@ -835,8 +837,16 @@ impl Builder<'_> {
             .map(|t| t.attrs.clone())
             .unwrap_or_default();
         check_container_attrs(&user_attrs, &raw_name)?;
+        let described = self.codegen_attrs(&def.extensions, &def.id, false);
+        let at = format!("`{raw_name}`");
+        self.written.extend(
+            user_attrs
+                .iter()
+                .chain(&described)
+                .map(|a| (a.clone(), at.clone())),
+        );
         attrs.extend(user_attrs);
-        attrs.extend(self.codegen_attrs(&def.extensions, &def.id, false));
+        attrs.extend(described);
         // A union read by a parent's discriminator exists only where the
         // parent does; each other variant is gated on its own.
         if let TypeKind::UnionTagged(u) = &def.kind
@@ -974,10 +984,18 @@ impl Builder<'_> {
                         &user_attrs,
                         &format!("{}.{}", view.raw_name, field.raw_name),
                     )?;
-                    attrs.extend(user_attrs);
                     let mut at = def.id.clone();
                     at.pointer = field.pointer.clone();
-                    attrs.extend(self.codegen_attrs(&field.extensions, &at, true));
+                    let described = self.codegen_attrs(&field.extensions, &at, true);
+                    let on = format!("`{}.{}`", view.raw_name, field.raw_name);
+                    self.written.extend(
+                        user_attrs
+                            .iter()
+                            .chain(&described)
+                            .map(|a| (a.clone(), on.clone())),
+                    );
+                    attrs.extend(user_attrs);
+                    attrs.extend(described);
                     let cfg = cfg_gates(&attrs, &format!("{}.{}", view.raw_name, field.raw_name))?;
                     if matches!(s.additional, Additional::CatchAll(_)) {
                         let mut names = vec![field.raw_name.clone()];

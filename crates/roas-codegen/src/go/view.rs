@@ -34,6 +34,7 @@ const BUILTIN_IMPORTS: &[(&str, &str)] = &[
 /// import used under one of them would not compile.
 /// The names generated validation adds, reserved only when it is on.
 const VALIDATION_NAMES: &[&str] = &[
+    "r",
     "certain",
     "uncertain",
     "branch",

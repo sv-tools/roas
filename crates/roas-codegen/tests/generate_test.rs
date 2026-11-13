@@ -483,6 +483,17 @@ fn file_per_type_refuses_attributes_relative_to_the_module() {
 }
 
 #[test]
+fn file_per_type_reads_names_in_the_description_as_names() {
+    // The generator's own `rename` carries them: no path, nothing refused.
+    let components = serde_json::json!({
+        "Mod": {"type": "object", "properties": {"super::x": {"type": "string"}}},
+        "Mode": {"type": "string", "enum": ["self::read"]}
+    });
+    let config = rust_config("layout = \"file_per_type\"\n");
+    generate(&document(components), &config).expect("generates");
+}
+
+#[test]
 fn file_per_type_names_one_module_file_without_types() {
     let config = rust_config("layout = \"file_per_type\"\n");
     let generation = generate(&document(serde_json::json!({})), &config).expect("generates");
