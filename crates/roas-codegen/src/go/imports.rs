@@ -121,6 +121,11 @@ pub(crate) fn spec_names(spec: &str) -> Option<Vec<String>> {
             if let Some((stem, _)) = last.split_once('.') {
                 names.push(stem.to_owned());
             }
+            // `k8s.io/api/core/v1` is package `v1`.
+            let element = path.rsplit('/').next().unwrap_or(path);
+            if element != last {
+                names.push(element.to_owned());
+            }
             Some(names)
         }
     }
@@ -153,6 +158,10 @@ mod tests {
         );
         assert_eq!(spec_names("_ \"embed\""), None);
         assert_eq!(spec_names(". \"math\""), None);
+        assert_eq!(
+            spec_names("\"k8s.io/api/core/v1\""),
+            Some(vec!["core".to_owned(), "v1".to_owned()])
+        );
         assert_eq!(
             spec_names("\"github.com/google/uuid\" // ids"),
             Some(vec!["uuid".to_owned()])

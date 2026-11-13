@@ -453,19 +453,26 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 continue;
             }
             let name = package_of(import);
-            let local = config.validation
-                && config.layout == Layout::FilePerType
-                && builder
-                    .extern_names
-                    .get(import)
-                    .into_iter()
-                    .flatten()
-                    .map(String::as_str)
-                    .chain([name])
-                    .any(depth_local);
-            if local {
+            // Under `file_per_type` the import goes to the files using its
+            // names, so none may be a local the generated code declares.
+            let local = (config.layout == Layout::FilePerType)
+                .then(|| {
+                    builder
+                        .extern_names
+                        .get(import)
+                        .into_iter()
+                        .flatten()
+                        .map(String::as_str)
+                        .chain([name])
+                        .find(|q| {
+                            (config.validation && depth_local(q))
+                                || used.get(q).is_some_and(|what| what.starts_with("a name "))
+                        })
+                })
+                .flatten();
+            if let Some(q) = local {
                 return Err(GenerateError::Config(format!(
-                    "substitution import {import:?} is used under a name like validation's loop variables (`item0`, `i0`, `k0`), which `layout = \"file_per_type\"` would read as its use; import it under another name"
+                    "substitution import {import:?} is used as `{q}`, a name the generated code declares, which `layout = \"file_per_type\"` would read as its use; import it under another name"
                 )));
             }
             if let Some(path) = used.insert(name, import) {

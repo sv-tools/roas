@@ -804,3 +804,41 @@ fn file_per_type_credits_a_generic_substitution_import_with_its_own_package() {
         }
     }
 }
+
+#[test]
+fn file_per_type_refuses_a_substitution_named_like_a_local() {
+    let toml = "layout = \"file_per_type\"\n[substitutions.uuid.go]\nname = \"d.ID\"\nimport = \"example.com/x/dpkg\"\n";
+    let components = serde_json::json!({"A": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}}}});
+    let Some(result) = go(components.clone(), toml) else {
+        return;
+    };
+    let error = result.unwrap_err();
+    assert!(matches!(error, GenerateError::Config(_)), "{error}");
+    // The default layout takes it, as before.
+    go(
+        components,
+        "[substitutions.uuid.go]\nname = \"d.ID\"\nimport = \"example.com/x/dpkg\"\n",
+    )
+    .unwrap()
+    .expect("generates");
+}
+
+#[test]
+fn file_per_type_places_an_import_named_by_its_major_version() {
+    let toml = "layout = \"file_per_type\"\nextra_imports = ['\"example.com/x/core/v1\"']\n[substitutions.uuid.go]\nname = \"v1.ID\"\n";
+    let components = serde_json::json!({"A": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}}}});
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let generation = result.expect("generates");
+    let a = generation
+        .files
+        .iter()
+        .find(|f| f.path == Path::new("a.go"))
+        .unwrap();
+    assert!(
+        a.contents.contains("\"example.com/x/core/v1\""),
+        "{}",
+        a.contents
+    );
+}
