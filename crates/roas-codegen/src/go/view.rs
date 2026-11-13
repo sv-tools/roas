@@ -421,17 +421,30 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 _ => None,
             })
             .collect();
-        let extra_paths: BTreeSet<&str> = config
+        // A substitution import an extra import brings in under the name
+        // its spellings use: the extra import serves.
+        let extra_paths: BTreeMap<&str, String> = config
             .extra_imports
             .iter()
-            .map(|spec| super::imports::spec_path(spec))
+            .filter_map(|spec| match super::imports::spec_name(spec) {
+                super::imports::SpecName::Named(name) => {
+                    Some((super::imports::spec_path(spec), name))
+                }
+                _ => None,
+            })
             .collect();
+        let served = |import: &String| {
+            extra_paths.get(import.as_str()).is_some_and(|name| {
+                builder
+                    .extern_names
+                    .get(import)
+                    .is_some_and(|names| names.contains(name))
+            })
+        };
         let mut certain: BTreeMap<&String, String> = BTreeMap::new();
         if file_per_type {
             for import in &builder.externs {
-                if builtin.iter().any(|(path, _)| path == import)
-                    || extra_paths.contains(import.as_str())
-                {
+                if builtin.iter().any(|(path, _)| path == import) || served(import) {
                     continue;
                 }
                 let candidates: Vec<&String> = builder
@@ -490,9 +503,19 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             used.insert("r", "a name the generated validation declares");
         }
         for import in &builder.externs {
-            if builtin.iter().any(|(path, _)| path == import)
-                || (file_per_type && extra_paths.contains(import.as_str()))
+            if builtin.iter().any(|(path, _)| path == import) {
+                continue;
+            }
+            // The standard library is no dependency to declare; a module
+            // path has a dot in its first element.
+            if import
+                .split('/')
+                .next()
+                .is_some_and(|first| first.contains('.'))
             {
+                dependencies.push(GoDependency::new(import.clone()));
+            }
+            if file_per_type && served(import) {
                 continue;
             }
             let name = match certain.get(import) {
@@ -520,15 +543,6 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             imports.push(quote(import));
             let names = BTreeSet::from([name.to_owned()]);
             import_names.push(names);
-            // The standard library is no dependency to declare; a module
-            // path has a dot in its first element.
-            if import
-                .split('/')
-                .next()
-                .is_some_and(|first| first.contains('.'))
-            {
-                dependencies.push(GoDependency::new(import.clone()));
-            }
         }
         // Under `file_per_type` an extra import goes to the files naming it,
         // and a name the generated code also declares, or imports, would

@@ -915,3 +915,37 @@ fn file_per_type_leaves_an_extra_import_s_name_to_it() {
         a.contents
     );
 }
+
+#[test]
+fn file_per_type_leaves_a_substitution_import_only_to_an_extra_import_of_its_name() {
+    let components = serde_json::json!({"Pet": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}}}});
+    let subs =
+        "[substitutions.uuid.go]\nname = \"uuid.UUID\"\nimport = \"github.com/google/uuid\"\n";
+    // A blank import brings in no name: the substitution's import stays.
+    // One under the name the spelling uses serves for it.
+    for extra in [
+        r#"_ "github.com/google/uuid""#,
+        r#""github.com/google/uuid""#,
+    ] {
+        let toml = format!("layout = \"file_per_type\"\nextra_imports = ['{extra}']\n{subs}");
+        let Some(result) = go(components.clone(), &toml) else {
+            return;
+        };
+        let generation = result.expect("generates");
+        let pet = generation
+            .files
+            .iter()
+            .find(|f| f.path == Path::new("pet.go"))
+            .unwrap();
+        assert_eq!(
+            pet.contents
+                .matches("\t\"github.com/google/uuid\"\n")
+                .count(),
+            1,
+            "{extra}: {}",
+            pet.contents
+        );
+        // The module is a dependency either way.
+        assert_eq!(generation.dependencies.go.len(), 1, "{extra}");
+    }
+}
