@@ -451,6 +451,17 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> WriteError + '_ {
     }
 }
 
+/// A file stem cut to a length every file system takes, with room for a
+/// numeric suffix: a type's name, from nested inline schemas, can run to
+/// hundreds of characters. Stems are ASCII.
+pub(crate) fn capped_stem(stem: String) -> String {
+    const MAX: usize = 100;
+    if stem.len() <= MAX {
+        return stem;
+    }
+    stem[..MAX].trim_end_matches('_').to_owned()
+}
+
 /// Whether Windows reaches a file by this name and no other: not an 8.3
 /// short name (`PETSTO~1.RS`), an alternate data stream (`a.rs:x`) or a
 /// device (`aux.rs`, `con`), which it resolves elsewhere whatever follows.

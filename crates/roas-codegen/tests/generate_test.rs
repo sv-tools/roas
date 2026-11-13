@@ -403,6 +403,29 @@ fn file_per_type_writes_a_file_per_type_the_module_includes() {
 }
 
 #[test]
+fn file_per_type_cuts_a_long_file_name() {
+    // Nested inline objects make a type name longer than a file name may be.
+    let mut schema = serde_json::json!({"type": "string"});
+    for depth in (0..30).rev() {
+        schema = serde_json::json!({"type": "object", "properties": {format!("propertyname{depth:02}"): schema}});
+    }
+    let config = rust_config("layout = \"file_per_type\"\n");
+    let generation =
+        generate(&document(serde_json::json!({"Root": schema})), &config).expect("generates");
+    let mut stems = std::collections::BTreeSet::new();
+    for file in &generation.files {
+        let name = file
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(name.len() <= 110, "{name}");
+        assert!(stems.insert(name.clone()), "{name} twice");
+    }
+}
+
+#[test]
 fn file_per_type_refuses_a_module_named_bin() {
     let toml = "[rust]\nmodule = \"bin\"\n";
     let error = generate(

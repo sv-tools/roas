@@ -419,6 +419,12 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             for local in PATTERN_NAMES {
                 used.insert(local, "a name the generated code declares");
             }
+            // Locals of `matchPattern`, in the package file.
+            if config.layout == Layout::FilePerType {
+                for local in ["re", "c"] {
+                    used.insert(local, "a name the generated code declares");
+                }
+            }
         }
         if builder.support.member_patterns {
             used.insert("memberMatches", "a name the generated code declares");
@@ -530,8 +536,9 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
 fn assign_files(types: &mut [TypeView], config: &Config) {
     let mut taken = BTreeSet::from([config.go.file.clone()]);
     for t in types {
-        let base =
-            super::naming::go_file_name(&crate::rust::naming::snake(std::slice::from_ref(&t.name)));
+        let base = crate::write::capped_stem(super::naming::go_file_name(
+            &crate::rust::naming::snake(std::slice::from_ref(&t.name)),
+        ));
         let file = (1u32..)
             .map(|i| {
                 if i == 1 {

@@ -232,7 +232,7 @@ fn check_rust(config: &Config) -> Result<(), GenerateError> {
     // Cargo builds every file in `src/bin` as a program of its own.
     if config.layout == Layout::FilePerType && config.rust.module == "bin" {
         return Err(GenerateError::Config(
-            "`rust.module = \"bin\"` puts the types' files in a `bin` directory, which Cargo reads as programs under `src/`; choose another module name".into(),
+            "`rust.module = \"bin\"` puts the types' files in a `bin` directory, and in `src/bin` Cargo builds each file as a program; choose another module name".into(),
         ));
     }
     // The header heads every type's file too, which the module includes:

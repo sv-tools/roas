@@ -343,7 +343,9 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
 fn assign_files(types: &mut [TypeView]) {
     let mut taken = std::collections::BTreeSet::new();
     for t in types {
-        let base = crate::config::rust_module_name(&snake(std::slice::from_ref(&t.name)));
+        let base = crate::write::capped_stem(crate::config::rust_module_name(&snake(
+            std::slice::from_ref(&t.name),
+        )));
         let file = (1u32..)
             .map(|i| {
                 if i == 1 {
