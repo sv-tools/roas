@@ -438,8 +438,19 @@ fn file_per_type_refuses_a_module_named_bin() {
 }
 
 #[test]
+fn file_per_type_takes_a_header_of_plain_comments() {
+    let toml = "layout = \"file_per_type\"\nheader = \"/*\\n//! vendored notice\\n*/\"\n";
+    generate(&document(pet()), &rust_config(toml)).expect("generates");
+}
+
+#[test]
 fn file_per_type_refuses_an_inner_header() {
-    for header in ["//! Copyright", "// SPDX\\n#![allow(clippy::all)]"] {
+    for header in [
+        "//! Copyright",
+        "// SPDX\\n#![allow(clippy::all)]",
+        "// lic\\n# ![allow(dead_code)]",
+        "/* lic */ #![allow(dead_code)]",
+    ] {
         let toml = format!("header = \"{header}\"\n");
         let error = generate(
             &document(pet()),

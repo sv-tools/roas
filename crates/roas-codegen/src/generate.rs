@@ -236,17 +236,17 @@ fn check_rust(config: &Config) -> Result<(), GenerateError> {
         ));
     }
     // The header heads every type's file too, which the module includes:
-    // an inner attribute or doc comment is not allowed there.
+    // an inner attribute or doc comment, which an included file cannot
+    // hold, is refused. Read as Rust reads it: `# ![a]`, or `#![a]` after
+    // a comment, is one too, and `//!` inside a block comment is not.
     if config.layout == Layout::FilePerType
-        && let Some(line) = config.header.as_deref().and_then(|header| {
-            header.lines().map(str::trim_start).find(|line| {
-                line.starts_with("//!") || line.starts_with("/*!") || line.starts_with("#!")
-            })
-        })
+        && let Some(header) = config.header.as_deref()
+        && let Ok(file) = syn::parse_file(header)
+        && (!file.attrs.is_empty() || file.shebang.is_some())
     {
-        return Err(GenerateError::Config(format!(
-            "`header` line {line:?} is an inner doc comment or attribute, which a type's file under `layout = \"file_per_type\"` cannot hold, as the module includes it; write it in the module file's template, or as `//`"
-        )));
+        return Err(GenerateError::Config(
+            "`header` holds an inner doc comment or attribute (`//!`, `#![...]`), which a type's file under `layout = \"file_per_type\"` cannot hold, as the module includes it; write it as `//`, or in the module file's template".into(),
+        ));
     }
     if !matches!(
         config.rust.edition.as_str(),
