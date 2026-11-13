@@ -1,8 +1,8 @@
 //! Public surface for applying an Overlay to a target JSON document.
 //!
 //! See [`Apply::apply`] for the entry point. The trait is implemented
-//! for each per-version `Overlay` type ([`crate::v1_0::Overlay`] today;
-//! `v1_1::Overlay` once that feature lands).
+//! for each per-version `Overlay` type (`v1_0::Overlay`,
+//! `v1_1::Overlay` and `v1_2::Overlay`, behind their features).
 
 use enumset::{EnumSet, EnumSetType};
 use std::fmt::{self, Display};
@@ -142,7 +142,47 @@ pub enum ApplyErrorKind {
     /// which the spec treats as mutually exclusive. Validation flags
     /// this; apply fails fast rather than silently dropping one.
     ConflictingMergeSources,
+    /// Overlay v1.2 only: `target` selects a primitive (or `null`) node,
+    /// but the merge value (`update`, or the `copy` source) is an object
+    /// or an array. The spec requires a primitive value to replace a
+    /// primitive node.
+    NonPrimitiveValueForPrimitiveTarget,
+    /// Overlay v1.2 only: an action's `$ref` is malformed or names no
+    /// entry of `components.actions`.
+    ActionReference(ActionReferenceError),
 }
+
+/// Why an Overlay v1.2 Reusable Action Reference Object could not be
+/// resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ActionReferenceError {
+    /// The `$ref` is not of the form `#/components/actions/<name>`,
+    /// with `~` escaped as `~0` and `/` as `~1` (RFC 6901).
+    Malformed(String),
+    /// The `$ref` names no entry of `components.actions`.
+    NotFound(String),
+}
+
+impl Display for ActionReferenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ActionReferenceError::Malformed(reference) => write!(
+                f,
+                "`$ref` {reference:?} must be `#/components/actions/<name>`, \
+                 with `~` escaped as `~0` and `/` as `~1`",
+            ),
+            ActionReferenceError::NotFound(reference) => {
+                write!(
+                    f,
+                    "`$ref` {reference:?} names no entry of `components.actions`"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ActionReferenceError {}
 
 impl Display for ApplyErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -152,7 +192,7 @@ impl Display for ApplyErrorKind {
                 f.write_str("target matched zero nodes (error-on-zero-match)")
             }
             ApplyErrorKind::MixedKindMatch => f.write_str(
-                "target matched nodes of mixed kind (objects and arrays) — \
+                "target matched nodes of mixed kind (objects, arrays, primitives) — \
                  error-on-mixed-kind-match",
             ),
             ApplyErrorKind::PrimitiveActionTarget => f.write_str(
@@ -169,6 +209,11 @@ impl Display for ApplyErrorKind {
             ApplyErrorKind::ConflictingMergeSources => {
                 f.write_str("action sets both `update` and `copy`; they are mutually exclusive")
             }
+            ApplyErrorKind::NonPrimitiveValueForPrimitiveTarget => f.write_str(
+                "target selects a primitive node, so the `update` or `copy` value \
+                 must be a primitive to replace it, not an object or array",
+            ),
+            ApplyErrorKind::ActionReference(reason) => reason.fmt(f),
         }
     }
 }
@@ -207,6 +252,11 @@ mod tests {
             ApplyErrorKind::CopySourceNotFound("$.src".into()),
             ApplyErrorKind::CopySourceMultiple("$.src".into()),
             ApplyErrorKind::ConflictingMergeSources,
+            ApplyErrorKind::NonPrimitiveValueForPrimitiveTarget,
+            ApplyErrorKind::ActionReference(ActionReferenceError::Malformed("#/x".into())),
+            ApplyErrorKind::ActionReference(ActionReferenceError::NotFound(
+                "#/components/actions/x".into(),
+            )),
         ];
         for k in cases {
             assert!(

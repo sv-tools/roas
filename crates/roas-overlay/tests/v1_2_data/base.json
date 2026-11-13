@@ -1,0 +1,25 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "Pets (internal)", "version": "1.0.0" },
+  "paths": {
+    "/pets": {
+      "get": {
+        "summary": "List pets",
+        "tags": ["pets", "internal"],
+        "responses": { "200": { "description": "The pets" } }
+      },
+      "post": {
+        "summary": "Add a pet",
+        "tags": ["pets", "internal"],
+        "responses": { "201": { "description": "Added" } }
+      }
+    },
+    "/pets/{id}": {
+      "get": {
+        "summary": "Get a pet",
+        "tags": ["pets"],
+        "responses": { "200": { "description": "The pet" } }
+      }
+    }
+  }
+}

@@ -10,6 +10,7 @@
 //!
 //! [`roas::validation`]: https://docs.rs/roas/latest/roas/validation/index.html
 
+use crate::common::apply::compile_path;
 use enumset::{EnumSet, EnumSetType};
 use std::fmt::{self, Display, Write};
 
@@ -187,6 +188,16 @@ impl Context {
     pub fn require_non_empty(&mut self, field: &str, value: &str) {
         if value.is_empty() {
             self.error_field(field, "must not be empty");
+        }
+    }
+
+    /// Error at `<current>.<field>` unless `value` is a non-empty,
+    /// syntactically valid RFC 9535 JSONPath query.
+    pub fn require_jsonpath(&mut self, field: &str, value: &str) {
+        if value.is_empty() {
+            self.error_field(field, "must not be empty");
+        } else if let Err(msg) = compile_path(value) {
+            self.error_field(field, format!("invalid JSONPath query: {msg}"));
         }
     }
 

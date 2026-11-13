@@ -6,14 +6,14 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 keywords = ["openapi", "overlay", "swagger", "jsonpath", "validation"]
-description = "Rust implementation of the OpenAPI Overlay Specification v1.0 / v1.1 — parse, validate, and apply"
+description = "Rust implementation of the OpenAPI Overlay Specification v1.0 / v1.1 / v1.2 — parse, validate, and apply"
 readme = "README.md"
 categories = ["web-programming", "parser-implementations"]
 include = ["src", "Cargo.toml", "README.md"]
 publish = true
 
 # Document every version module on docs.rs, not just the default one,
-# so the `v1_0` / `v1_1` intra-doc links in the crate docs resolve.
+# so the `v1_0` / `v1_1` / `v1_2` intra-doc links in the crate docs resolve.
 [package.metadata.docs.rs]
 all-features = true
 
@@ -25,6 +25,10 @@ v1_0 = []
 # enable both to get the additional `From<v1_0::Overlay> for
 # v1_1::Overlay` upconversion impl.
 v1_1 = []
+# Support for OpenAPI Overlay v1.2.x. Independent of the others; enable
+# `v1_1` too to get the additional `From<v1_1::Overlay> for
+# v1_2::Overlay` upconversion impl.
+v1_2 = []
 
 # `clap::ValueEnum` impls for `apply::ApplyOptions` and
 # `validation::ValidationOptions`, for downstream CLIs.
