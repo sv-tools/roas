@@ -40,24 +40,35 @@ pub(crate) fn render(
     source: &str,
 ) -> Result<Vec<GeneratedFile>, GenerateError> {
     let built = view::build(ir, config, source)?;
-    let rendered = render::render_module(&built.file, config.template_dir.as_deref())?;
-    Ok(vec![GeneratedFile::new(
-        format!("{}.rs", config.rust.module),
-        rendered,
-    )])
+    Ok(render::render(&built.file, config)?
+        .into_iter()
+        .map(|(path, text)| GeneratedFile::new(path, text))
+        .collect())
 }
 
 pub(crate) fn emit(ir: &Ir, config: &Config, source: &str) -> Result<Output, GenerateError> {
     let built = view::build(ir, config, source)?;
-    let rendered = render::render_module(&built.file, config.template_dir.as_deref())?;
-    let path = format!("{}.rs", config.rust.module);
-    format::validate(&rendered, &path)?;
-    let (contents, unformatted) = match format::format(&rendered, &config.rust.edition) {
-        Ok(formatted) => (formatted, None),
-        Err(reason) => (rendered, Some(reason)),
-    };
+    let mut files = Vec::new();
+    let mut unformatted = None;
+    for (path, rendered) in render::render(&built.file, config)? {
+        format::validate(&rendered, &path.to_string_lossy())?;
+        // Once `rustfmt` fails, it is not run on the files after: the
+        // output is unformatted either way, and says why once.
+        let contents = if unformatted.is_some() {
+            rendered
+        } else {
+            match format::format(&rendered, &config.rust.edition) {
+                Ok(formatted) => formatted,
+                Err(reason) => {
+                    unformatted = Some(reason);
+                    rendered
+                }
+            }
+        };
+        files.push(GeneratedFile::new(path, contents));
+    }
     Ok(Output {
-        files: vec![GeneratedFile::new(path, contents)],
+        files,
         dependencies: built.dependencies,
         diagnostics: built.diagnostics,
         unformatted,

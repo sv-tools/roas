@@ -8,7 +8,7 @@
 //! that Go's decoder stores a zero value for a JSON null where Rust's
 //! refuses it, which the generated code turns back into an error.
 
-use crate::config::{Config, FieldConfig, TypeConfig};
+use crate::config::{Config, FieldConfig, Layout, TypeConfig};
 use crate::diagnostic::{Diagnostic, SchemaId};
 use crate::front::{FloatWidth, IntWidth};
 use crate::generate::GenerateError;
@@ -48,6 +48,16 @@ const VALIDATION_NAMES: &[&str] = &[
     "f",
     "zero",
 ];
+
+/// Validation's loop variables, one per nesting depth: `i0`, `item0`,
+/// `k0`. A file under `layout = "file_per_type"` reads `item0.` as a use
+/// of a package of that name.
+fn depth_local(name: &str) -> bool {
+    ["item", "i", "k"].iter().any(|prefix| {
+        name.strip_prefix(prefix)
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
 
 /// The package-level names the pattern support declares, reserved only
 /// when it is generated.
@@ -248,6 +258,10 @@ pub(crate) struct TypeView {
     pub validate: Option<Vec<String>>,
     /// The statements of `validateNull`; empty for none.
     pub validate_null: Vec<String>,
+    /// Under `layout = "file_per_type"`, the stem of the file the type is
+    /// written to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -283,6 +297,10 @@ impl GoDependency {
 
 pub(crate) struct Built {
     pub file: FileView,
+    /// For each of `file.imports`, the names a file using it qualifies
+    /// with: what decides, under `layout = "file_per_type"`, which files
+    /// import it.
+    pub import_names: Vec<BTreeSet<String>>,
     pub dependencies: Vec<GoDependency>,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -301,12 +319,14 @@ struct Builder<'a> {
     refuse_null_isolated: BTreeSet<String>,
     isolated: BTreeSet<String>,
     externs: BTreeSet<String>,
+    /// For each substitution import, the qualifiers its spellings use.
+    extern_names: BTreeMap<String, BTreeSet<String>>,
     diagnostics: Vec<Diagnostic>,
 }
 
 /// The package name an import path is used under, as far as the path
 /// says: its last element, skipping a `/vN` major-version suffix.
-fn package_of(import: &str) -> &str {
+pub(crate) fn package_of(import: &str) -> &str {
     let mut elements = import.rsplit('/');
     let last = elements.next().unwrap_or(import);
     let major =
@@ -333,6 +353,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         refuse_null_isolated: BTreeSet::new(),
         isolated: BTreeSet::new(),
         externs: BTreeSet::new(),
+        extern_names: BTreeMap::new(),
         diagnostics: Vec::new(),
     };
     select_check(ir, config)?;
@@ -355,7 +376,11 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         .cloned()
         .collect();
     builder.support.isolated = builder.isolated.iter().cloned().collect();
+    if config.layout == Layout::FilePerType {
+        assign_files(&mut types, config);
+    }
     let mut imports = Vec::new();
+    let mut import_names = Vec::new();
     let mut dependencies = Vec::new();
     if !types.is_empty() {
         let mut builtin = BUILTIN_IMPORTS.to_vec();
@@ -378,6 +403,65 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             builder.support.patterns = true;
         }
         imports.extend(builtin.iter().map(|(path, _)| quote(path)));
+        import_names.extend(
+            builtin
+                .iter()
+                .map(|(_, name)| BTreeSet::from([(*name).to_owned()])),
+        );
+        // Under `file_per_type` each substitution import goes to the files
+        // using it, so its name must be certain: the one package its
+        // spellings name that no builtin or extra import is used under.
+        // One an extra import already brings in needs no import here.
+        let file_per_type = config.layout == Layout::FilePerType;
+        let extra_names: BTreeSet<String> = config
+            .extra_imports
+            .iter()
+            .filter_map(|spec| match super::imports::spec_name(spec) {
+                super::imports::SpecName::Named(name) => Some(name),
+                _ => None,
+            })
+            .collect();
+        // A substitution import an extra import brings in under the name
+        // its spellings use: the extra import serves.
+        let extra_paths: BTreeMap<&str, String> = config
+            .extra_imports
+            .iter()
+            .filter_map(|spec| match super::imports::spec_name(spec) {
+                super::imports::SpecName::Named(name) => {
+                    Some((super::imports::spec_path(spec), name))
+                }
+                _ => None,
+            })
+            .collect();
+        let served = |import: &String| {
+            extra_paths.get(import.as_str()).is_some_and(|name| {
+                builder
+                    .extern_names
+                    .get(import)
+                    .is_some_and(|names| names.contains(name))
+            })
+        };
+        let mut certain: BTreeMap<&String, String> = BTreeMap::new();
+        if file_per_type {
+            for import in &builder.externs {
+                if builtin.iter().any(|(path, _)| path == import) || served(import) {
+                    continue;
+                }
+                let candidates: Vec<&String> = builder
+                    .extern_names
+                    .get(import)
+                    .into_iter()
+                    .flatten()
+                    .filter(|q| !builtin.iter().any(|(_, b)| b == q) && !extra_names.contains(*q))
+                    .collect();
+                let [name] = candidates.as_slice() else {
+                    return Err(GenerateError::Config(format!(
+                        "substitution import {import:?} is not the one package its spellings name beside the builtin and extra imports (they name {candidates:?}); under `layout = \"file_per_type\"` import the others through `extra_imports` with their names"
+                    )));
+                };
+                certain.insert(import, (*name).clone());
+            }
+        }
         let mut used: BTreeMap<&str, &str> =
             builtin.iter().map(|(path, name)| (*name, *path)).collect();
         // A package named like a name the generated code declares would be
@@ -388,6 +472,12 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         if builder.needs.pattern {
             for local in PATTERN_NAMES {
                 used.insert(local, "a name the generated code declares");
+            }
+            // Locals of `matchPattern`, in the package file.
+            if config.layout == Layout::FilePerType {
+                for local in ["re", "c"] {
+                    used.insert(local, "a name the generated code declares");
+                }
             }
         }
         if builder.support.member_patterns {
@@ -403,17 +493,19 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 used.insert(local, "a name the generated validation declares");
             }
         }
+        // The `Decimal` methods' receiver, in the package file.
+        if builder.support.decimal && config.layout == Layout::FilePerType {
+            used.insert("x", "a name the generated code declares");
+        }
+        // A file whose only `r.` is validation's report would import a
+        // package named `r`, which goes by its uses under `file_per_type`.
+        if config.validation && config.layout == Layout::FilePerType {
+            used.insert("r", "a name the generated validation declares");
+        }
         for import in &builder.externs {
             if builtin.iter().any(|(path, _)| path == import) {
                 continue;
             }
-            let name = package_of(import);
-            if let Some(path) = used.insert(name, import) {
-                return Err(GenerateError::Config(format!(
-                    "substitution import {import:?} is used as `{name}`, which the generated code already imports as {path:?}"
-                )));
-            }
-            imports.push(quote(import));
             // The standard library is no dependency to declare; a module
             // path has a dot in its first element.
             if import
@@ -422,6 +514,60 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 .is_some_and(|first| first.contains('.'))
             {
                 dependencies.push(GoDependency::new(import.clone()));
+            }
+            if file_per_type && served(import) {
+                continue;
+            }
+            let name = match certain.get(import) {
+                Some(name) => name.as_str(),
+                None => package_of(import),
+            };
+            // Under `file_per_type` the import goes to the files using its
+            // name, so it may not be a local the generated code declares.
+            let local = (file_per_type
+                && ((config.validation && depth_local(name))
+                    || used
+                        .get(name)
+                        .is_some_and(|what| what.starts_with("a name "))))
+            .then_some(name);
+            if let Some(q) = local {
+                return Err(GenerateError::Config(format!(
+                    "substitution import {import:?} is used as `{q}`, a name the generated code declares, which `layout = \"file_per_type\"` would read as its use; import it under another name"
+                )));
+            }
+            if let Some(path) = used.insert(name, import) {
+                return Err(GenerateError::Config(format!(
+                    "substitution import {import:?} is used as `{name}`, which the generated code already imports as {path:?}"
+                )));
+            }
+            imports.push(quote(import));
+            let names = BTreeSet::from([name.to_owned()]);
+            import_names.push(names);
+        }
+        // Under `file_per_type` an extra import goes to the files naming it,
+        // and a name the generated code also declares, or imports, would
+        // send it to files that only use that.
+        if config.layout == Layout::FilePerType {
+            for spec in &config.extra_imports {
+                let name = match super::imports::spec_name(spec) {
+                    super::imports::SpecName::Named(name) => name,
+                    super::imports::SpecName::Unnamed => continue,
+                    super::imports::SpecName::Uncertain => {
+                        return Err(GenerateError::Config(format!(
+                            "`extra_imports` entry {spec:?} does not say the name its package is used under, which `layout = \"file_per_type\"` places it by; give it one, such as `name \"path\"`"
+                        )));
+                    }
+                };
+                let what = if config.validation && depth_local(&name) {
+                    Some("validation's loop variables")
+                } else {
+                    used.get(name.as_str()).copied()
+                };
+                if let Some(what) = what {
+                    return Err(GenerateError::Config(format!(
+                        "`extra_imports` entry {spec:?} is used as `{name}`, which is taken by {what}; under `layout = \"file_per_type\"` give it another name"
+                    )));
+                }
             }
         }
     }
@@ -436,9 +582,34 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             support: builder.support,
             types,
         },
+        import_names,
         dependencies,
         diagnostics: builder.diagnostics,
     })
+}
+
+/// Names the file of every type under `layout = "file_per_type"`: its
+/// name in snake case, never the package file's, one `go build` would
+/// constrain, or one a file system resolves elsewhere.
+fn assign_files(types: &mut [TypeView], config: &Config) {
+    let mut taken = BTreeSet::from([config.go.file.clone()]);
+    for t in types {
+        let base = crate::write::capped_stem(super::naming::go_file_name(
+            &crate::rust::naming::snake(std::slice::from_ref(&t.name)),
+        ));
+        let file = (1u32..)
+            .map(|i| {
+                if i == 1 {
+                    base.clone()
+                } else {
+                    format!("{base}{i}")
+                }
+            })
+            .find(|candidate| !taken.contains(candidate) && super::naming::is_file_stem(candidate))
+            .expect("a free file name");
+        taken.insert(file.clone());
+        t.file = Some(file);
+    }
 }
 
 impl Builder<'_> {
@@ -595,6 +766,10 @@ impl Builder<'_> {
             })?;
         if let Some(import) = &spelling.import {
             self.externs.insert(import.clone());
+            self.extern_names
+                .entry(import.clone())
+                .or_default()
+                .extend(super::imports::qualifiers(&spelling.name));
         }
         Ok(spelling.name.clone())
     }
@@ -700,6 +875,7 @@ impl Builder<'_> {
             from_raw: String::new(),
             validate: None,
             validate_null: Vec::new(),
+            file: None,
         };
         if !self.fill_kind(def, &mut view)? {
             return Ok(None);

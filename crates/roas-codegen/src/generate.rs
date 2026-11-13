@@ -228,6 +228,26 @@ fn check_rust(config: &Config) -> Result<(), GenerateError> {
             config.rust.module
         )));
     }
+    // The types' files go to a directory named after the module, and
+    // Cargo builds every file in `src/bin` as a program of its own.
+    if config.layout == Layout::FilePerType && config.rust.module == "bin" {
+        return Err(GenerateError::Config(
+            "`rust.module = \"bin\"` puts the types' files in a `bin` directory, and in `src/bin` Cargo builds each file as a program; choose another module name".into(),
+        ));
+    }
+    // The header heads every type's file too, which the module includes:
+    // an inner attribute or doc comment, which an included file cannot
+    // hold, is refused. Read as Rust reads it: `# ![a]`, or `#![a]` after
+    // a comment, is one too, and `//!` inside a block comment is not.
+    if config.layout == Layout::FilePerType
+        && let Some(header) = config.header.as_deref()
+        && let Ok(file) = syn::parse_file(header)
+        && (!file.attrs.is_empty() || file.shebang.is_some())
+    {
+        return Err(GenerateError::Config(
+            "`header` holds an inner doc comment or attribute (`//!`, `#![...]`), which a type's file under `layout = \"file_per_type\"` cannot hold, as the module includes it; write it as `//`, or in the module file's template".into(),
+        ));
+    }
     if !matches!(
         config.rust.edition.as_str(),
         "2015" | "2018" | "2021" | "2024"
@@ -251,6 +271,18 @@ fn check_go(config: &Config) -> Result<(), GenerateError> {
         return Err(GenerateError::Config(format!(
             "`go.file = {:?}` must be a lowercase file stem `go build` reads as plain source",
             config.go.file
+        )));
+    }
+    // What a dot import is used for shows in no qualifier, and Go refuses
+    // it in a file that does not use it.
+    if config.layout == Layout::FilePerType
+        && let Some(spec) = config
+            .extra_imports
+            .iter()
+            .find(|spec| spec.trim().starts_with('.'))
+    {
+        return Err(GenerateError::Config(format!(
+            "`extra_imports` entry {spec:?} is a dot import, which `layout = \"file_per_type\"` cannot place: give it a name"
         )));
     }
     Ok(())
@@ -296,11 +328,6 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
     match config.target {
         Target::Rust => check_rust(config)?,
         Target::Go => check_go(config)?,
-    }
-    if config.layout != Layout::OneFilePerModule {
-        return Err(GenerateError::Unsupported(
-            "`layout = \"file_per_type\"`".into(),
-        ));
     }
     let mut diagnostics = document.diagnostics();
 

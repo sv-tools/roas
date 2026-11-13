@@ -15,7 +15,7 @@
 #![recursion_limit = "1024"]
 
 use roas::validation::{IGNORE_UNUSED, Options};
-use roas_codegen::{ConfigFile, Input, SourceDocument, Target, generate, validate};
+use roas_codegen::{ConfigFile, Input, Layout, SourceDocument, Target, generate, validate};
 use std::path::Path;
 use std::process::Command;
 use url::Url;
@@ -300,13 +300,14 @@ fn description() -> serde_json::Value {
     raw
 }
 
-fn generation(target: Target) -> roas_codegen::Generation {
+fn generation(target: Target, layout: Layout) -> roas_codegen::Generation {
     let bytes = serde_json::to_vec(&description()).unwrap();
     let doc =
         SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap()).unwrap();
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     let mut config = ConfigFile::default();
     config.target = Some(target);
+    config.layout = Some(layout);
     let config = config.build().unwrap();
     let generation = generate(&doc, &config).expect("generates");
     assert!(!generation.has_errors(), "{:?}", generation.diagnostics);
@@ -315,51 +316,24 @@ fn generation(target: Target) -> roas_codegen::Generation {
 
 #[test]
 fn generated_rust_compiles_and_behaves() {
-    if std::env::var_os("ROAS_CODEGEN_SKIP_COMPILE").is_some() {
-        eprintln!("skipped: ROAS_CODEGEN_SKIP_COMPILE is set");
-        return;
-    }
-    let generation = generation(Target::Rust);
-
-    let dir = std::env::temp_dir().join(format!("roas-codegen-compile-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("src")).unwrap();
-    let deps: String = generation
-        .dependencies
-        .rust
-        .iter()
-        .map(|d| {
-            format!(
-                "{} = {{ version = \"1\", features = {:?} }}\n",
-                d.name, d.features
-            )
-        })
-        .collect();
-    std::fs::write(
-        dir.join("Cargo.toml"),
-        format!("[package]\nname = \"generated\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\n{deps}"),
-    )
-    .unwrap();
-    for file in &generation.files {
-        std::fs::write(dir.join("src").join(&file.path), &file.contents).unwrap();
-    }
-    std::fs::write(dir.join("src/main.rs"), MAIN).unwrap();
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let output = Command::new(cargo)
-        .args(["run", "--quiet"])
-        .current_dir(&dir)
-        .env("CARGO_TARGET_DIR", dir.join("target"))
-        .output()
-        .expect("cargo runs");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success() && stdout.contains("generated code behaves"),
-        "generated crate failed\n--- stdout\n{stdout}\n--- stderr\n{stderr}\n--- types.rs\n{}",
-        generation.files[0].contents
+    rust_case(
+        "compile",
+        || generation(Target::Rust, Layout::OneFilePerModule),
+        MAIN,
+        "generated code behaves",
+        false,
     );
-    let _ = std::fs::remove_dir_all(&dir);
-    let _ = Path::new("");
+}
+
+#[test]
+fn generated_rust_compiles_and_behaves_file_per_type() {
+    rust_case(
+        "compile-file-per-type",
+        || generation(Target::Rust, Layout::FilePerType),
+        MAIN,
+        "generated code behaves",
+        false,
+    );
 }
 
 const GO_MAIN: &str = r##"package main
@@ -597,6 +571,131 @@ func main() {
 }
 "##;
 
+/// Every generated file, under `root`.
+fn write_files(root: &Path, generation: &roas_codegen::Generation) {
+    for file in &generation.files {
+        let path = root.join(&file.path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, &file.contents).unwrap();
+    }
+}
+
+/// Every generated file, for a failure message.
+fn listing(generation: &roas_codegen::Generation) -> String {
+    generation
+        .files
+        .iter()
+        .map(|f| format!("--- {}\n{}", f.path.display(), f.contents))
+        .collect()
+}
+
+/// Build the generated module into a crate with `main` and run it,
+/// expecting `expect` on stdout; `deny` turns warnings into errors.
+fn rust_case(
+    name: &str,
+    generation: impl FnOnce() -> roas_codegen::Generation,
+    main: &str,
+    expect: &str,
+    deny: bool,
+) {
+    if std::env::var_os("ROAS_CODEGEN_SKIP_COMPILE").is_some() {
+        eprintln!("skipped: ROAS_CODEGEN_SKIP_COMPILE is set");
+        return;
+    }
+    let generation = generation();
+    let dir = std::env::temp_dir().join(format!("roas-codegen-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let deps: String = generation
+        .dependencies
+        .rust
+        .iter()
+        .map(|d| {
+            format!(
+                "{} = {{ version = \"1\", features = {:?} }}\n",
+                d.name, d.features
+            )
+        })
+        .collect();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!("[package]\nname = \"generated\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\n{deps}"),
+    )
+    .unwrap();
+    write_files(&dir.join("src"), &generation);
+    std::fs::write(dir.join("src/main.rs"), main).unwrap();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let mut command = Command::new(cargo);
+    command
+        .args(["run", "--quiet"])
+        .current_dir(&dir)
+        .env("CARGO_TARGET_DIR", dir.join("target"));
+    if deny {
+        command.env("RUSTFLAGS", "-D warnings");
+    }
+    let output = command.output().expect("cargo runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains(expect),
+        "generated crate failed\n--- stdout\n{stdout}\n--- stderr\n{stderr}\n{}",
+        listing(&generation)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Build the generated package into a Go module with `main`, run it
+/// expecting `expect` on stdout, and vet it.
+fn go_case(
+    name: &str,
+    generation: impl FnOnce() -> roas_codegen::Generation,
+    main: &str,
+    expect: &str,
+) {
+    let required = std::env::var_os("ROAS_CODEGEN_REQUIRE_GO").is_some();
+    if std::env::var_os("ROAS_CODEGEN_SKIP_COMPILE").is_some() && !required {
+        eprintln!("skipped: ROAS_CODEGEN_SKIP_COMPILE is set");
+        return;
+    }
+    if let Err(reason) = go_toolchain() {
+        assert!(!required, "ROAS_CODEGEN_REQUIRE_GO is set: {reason}");
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let generation = generation();
+    let dir = std::env::temp_dir().join(format!("roas-codegen-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("api")).unwrap();
+    std::fs::write(dir.join("go.mod"), "module generated\n\ngo 1.27\n").unwrap();
+    write_files(&dir.join("api"), &generation);
+    std::fs::write(dir.join("main.go"), main).unwrap();
+    let run = |args: &[&str]| {
+        Command::new("go")
+            .args(args)
+            .current_dir(&dir)
+            .env("GOTOOLCHAIN", "local")
+            .env("GOFLAGS", "-mod=mod")
+            .env("GOWORK", "off")
+            .output()
+            .expect("go runs")
+    };
+    let output = run(&["run", "."]);
+    let vet = run(&["vet", "./..."]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains(expect),
+        "generated Go failed\n--- stdout\n{stdout}\n--- stderr\n{stderr}\n{}",
+        listing(&generation)
+    );
+    assert!(
+        vet.status.success(),
+        "go vet\n{}",
+        String::from_utf8_lossy(&vet.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Go 1.27 or later, which `encoding/json/v2` without an experiment
 /// needs, or why not.
 fn go_toolchain() -> Result<(), String> {
@@ -618,56 +717,22 @@ fn go_toolchain() -> Result<(), String> {
 
 #[test]
 fn generated_go_compiles_and_behaves() {
-    let required = std::env::var_os("ROAS_CODEGEN_REQUIRE_GO").is_some();
-    if std::env::var_os("ROAS_CODEGEN_SKIP_COMPILE").is_some() && !required {
-        eprintln!("skipped: ROAS_CODEGEN_SKIP_COMPILE is set");
-        return;
-    }
-    if let Err(reason) = go_toolchain() {
-        assert!(!required, "ROAS_CODEGEN_REQUIRE_GO is set: {reason}");
-        eprintln!("skipped: {reason}");
-        return;
-    }
-    let generation = generation(Target::Go);
-    assert!(generation.dependencies.go.is_empty());
+    go_case(
+        "go",
+        || generation(Target::Go, Layout::OneFilePerModule),
+        GO_MAIN,
+        "generated code behaves",
+    );
+}
 
-    let dir = std::env::temp_dir().join(format!("roas-codegen-go-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("api")).unwrap();
-    std::fs::write(dir.join("go.mod"), "module generated\n\ngo 1.27\n").unwrap();
-    for file in &generation.files {
-        std::fs::write(dir.join("api").join(&file.path), &file.contents).unwrap();
-    }
-    std::fs::write(dir.join("main.go"), GO_MAIN).unwrap();
-    let output = Command::new("go")
-        .args(["run", "."])
-        .current_dir(&dir)
-        .env("GOTOOLCHAIN", "local")
-        .env("GOFLAGS", "-mod=mod")
-        .env("GOWORK", "off")
-        .output()
-        .expect("go runs");
-    let vet = Command::new("go")
-        .args(["vet", "./..."])
-        .current_dir(&dir)
-        .env("GOTOOLCHAIN", "local")
-        .env("GOWORK", "off")
-        .output()
-        .expect("go vet runs");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success() && stdout.contains("generated code behaves"),
-        "generated Go failed\n--- stdout\n{stdout}\n--- stderr\n{stderr}\n--- {}\n{}",
-        generation.files[0].path.display(),
-        generation.files[0].contents
+#[test]
+fn generated_go_compiles_and_behaves_file_per_type() {
+    go_case(
+        "go-file-per-type",
+        || generation(Target::Go, Layout::FilePerType),
+        GO_MAIN,
+        "generated code behaves",
     );
-    assert!(
-        vet.status.success(),
-        "go vet\n{}",
-        String::from_utf8_lossy(&vet.stderr)
-    );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A description with a constraint of every checked kind, for the
@@ -1066,7 +1131,7 @@ fn validated_description() -> serde_json::Value {
     })
 }
 
-fn validated_generation(target: Target) -> roas_codegen::Generation {
+fn validated_generation(target: Target, layout: Layout) -> roas_codegen::Generation {
     let bytes = serde_json::to_vec(&validated_description()).unwrap();
     let doc =
         SourceDocument::parse(Input::Json(bytes), Url::parse("file:///v.json").unwrap()).unwrap();
@@ -1090,6 +1155,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     }))
     .unwrap();
     config.target = Some(target);
+    config.layout = Some(layout);
     config.validation = Some(true);
     let generation = generate(&doc, &config.build().unwrap()).expect("generates");
     assert!(!generation.has_errors(), "{:?}", generation.diagnostics);
@@ -1640,50 +1706,24 @@ fn main() {
 
 #[test]
 fn generated_rust_validation_compiles_and_behaves() {
-    if std::env::var_os("ROAS_CODEGEN_SKIP_COMPILE").is_some() {
-        eprintln!("skipped: ROAS_CODEGEN_SKIP_COMPILE is set");
-        return;
-    }
-    let generation = validated_generation(Target::Rust);
-    let dir = std::env::temp_dir().join(format!("roas-codegen-validate-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("src")).unwrap();
-    let deps: String = generation
-        .dependencies
-        .rust
-        .iter()
-        .map(|d| {
-            format!(
-                "{} = {{ version = \"1\", features = {:?} }}\n",
-                d.name, d.features
-            )
-        })
-        .collect();
-    std::fs::write(
-        dir.join("Cargo.toml"),
-        format!("[package]\nname = \"generated\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\n{deps}"),
-    )
-    .unwrap();
-    for file in &generation.files {
-        std::fs::write(dir.join("src").join(&file.path), &file.contents).unwrap();
-    }
-    std::fs::write(dir.join("src/main.rs"), VALIDATE_MAIN).unwrap();
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let output = Command::new(cargo)
-        .args(["run", "--quiet"])
-        .current_dir(&dir)
-        .env("CARGO_TARGET_DIR", dir.join("target"))
-        .env("RUSTFLAGS", "-D warnings")
-        .output()
-        .expect("cargo runs");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success() && stdout.contains("validation behaves"),
-        "generated crate failed\n--- stdout\n{stdout}\n--- stderr\n{stderr}\n--- types.rs\n{}",
-        generation.files[0].contents
+    rust_case(
+        "validate",
+        || validated_generation(Target::Rust, Layout::OneFilePerModule),
+        VALIDATE_MAIN,
+        "validation behaves",
+        true,
     );
-    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn generated_rust_validation_compiles_and_behaves_file_per_type() {
+    rust_case(
+        "validate-file-per-type",
+        || validated_generation(Target::Rust, Layout::FilePerType),
+        VALIDATE_MAIN,
+        "validation behaves",
+        true,
+    );
 }
 
 const GO_VALIDATE_MAIN: &str = r##"package main
@@ -2077,57 +2117,26 @@ func main() {
 
 #[test]
 fn generated_go_validation_compiles_and_behaves() {
-    let required = std::env::var_os("ROAS_CODEGEN_REQUIRE_GO").is_some();
-    if std::env::var_os("ROAS_CODEGEN_SKIP_COMPILE").is_some() && !required {
-        eprintln!("skipped: ROAS_CODEGEN_SKIP_COMPILE is set");
-        return;
-    }
-    if let Err(reason) = go_toolchain() {
-        assert!(!required, "ROAS_CODEGEN_REQUIRE_GO is set: {reason}");
-        eprintln!("skipped: {reason}");
-        return;
-    }
-    let generation = validated_generation(Target::Go);
-    let dir = std::env::temp_dir().join(format!("roas-codegen-go-validate-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("api")).unwrap();
-    std::fs::write(dir.join("go.mod"), "module generated\n\ngo 1.27\n").unwrap();
-    for file in &generation.files {
-        std::fs::write(dir.join("api").join(&file.path), &file.contents).unwrap();
-    }
-    std::fs::write(dir.join("main.go"), GO_VALIDATE_MAIN).unwrap();
-    let output = Command::new("go")
-        .args(["run", "."])
-        .current_dir(&dir)
-        .env("GOTOOLCHAIN", "local")
-        .env("GOWORK", "off")
-        .output()
-        .expect("go runs");
-    let vet = Command::new("go")
-        .args(["vet", "./..."])
-        .current_dir(&dir)
-        .env("GOTOOLCHAIN", "local")
-        .env("GOWORK", "off")
-        .output()
-        .expect("go vet runs");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success() && stdout.contains("validation behaves"),
-        "generated Go failed\n--- stdout\n{stdout}\n--- stderr\n{stderr}\n--- {}\n{}",
-        generation.files[0].path.display(),
-        generation.files[0].contents
+    go_case(
+        "go-validate",
+        || validated_generation(Target::Go, Layout::OneFilePerModule),
+        GO_VALIDATE_MAIN,
+        "validation behaves",
     );
-    assert!(
-        vet.status.success(),
-        "go vet\n{}",
-        String::from_utf8_lossy(&vet.stderr)
+}
+
+#[test]
+fn generated_go_validation_compiles_and_behaves_file_per_type() {
+    go_case(
+        "go-validate-file-per-type",
+        || validated_generation(Target::Go, Layout::FilePerType),
+        GO_VALIDATE_MAIN,
+        "validation behaves",
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[cfg(feature = "exact-numbers")]
-fn exact_generation(target: Target) -> roas_codegen::Generation {
+fn exact_generation(target: Target, layout: Layout) -> roas_codegen::Generation {
     let description = serde_json::json!({
         "openapi": "3.1.0",
         "info": {"title": "t", "version": "1"},
@@ -2179,6 +2188,7 @@ fn exact_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     let mut config = ConfigFile::default();
     config.target = Some(target);
+    config.layout = Some(layout);
     config.validation = Some(true);
     config.exact_numbers = Some(true);
     let generation = generate(&doc, &config.build().unwrap()).expect("generates");
@@ -2309,50 +2319,25 @@ fn main() {
 #[cfg(feature = "exact-numbers")]
 #[test]
 fn generated_rust_exact_numbers_compile_and_behave() {
-    if std::env::var_os("ROAS_CODEGEN_SKIP_COMPILE").is_some() {
-        eprintln!("skipped: ROAS_CODEGEN_SKIP_COMPILE is set");
-        return;
-    }
-    let generation = exact_generation(Target::Rust);
-    let dir = std::env::temp_dir().join(format!("roas-codegen-exact-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("src")).unwrap();
-    let deps: String = generation
-        .dependencies
-        .rust
-        .iter()
-        .map(|d| {
-            format!(
-                "{} = {{ version = \"1\", features = {:?} }}\n",
-                d.name, d.features
-            )
-        })
-        .collect();
-    std::fs::write(
-        dir.join("Cargo.toml"),
-        format!("[package]\nname = \"generated\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\n{deps}"),
-    )
-    .unwrap();
-    for file in &generation.files {
-        std::fs::write(dir.join("src").join(&file.path), &file.contents).unwrap();
-    }
-    std::fs::write(dir.join("src/main.rs"), EXACT_MAIN).unwrap();
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let output = Command::new(cargo)
-        .args(["run", "--quiet"])
-        .current_dir(&dir)
-        .env("CARGO_TARGET_DIR", dir.join("target"))
-        .env("RUSTFLAGS", "-D warnings")
-        .output()
-        .expect("cargo runs");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success() && stdout.contains("exact numbers behave"),
-        "generated crate failed\n--- stdout\n{stdout}\n--- stderr\n{stderr}\n--- types.rs\n{}",
-        generation.files[0].contents
+    rust_case(
+        "exact",
+        || exact_generation(Target::Rust, Layout::OneFilePerModule),
+        EXACT_MAIN,
+        "exact numbers behave",
+        true,
     );
-    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "exact-numbers")]
+#[test]
+fn generated_rust_exact_numbers_compile_and_behave_file_per_type() {
+    rust_case(
+        "exact-file-per-type",
+        || exact_generation(Target::Rust, Layout::FilePerType),
+        EXACT_MAIN,
+        "exact numbers behave",
+        true,
+    );
 }
 
 #[cfg(feature = "exact-numbers")]
@@ -2520,48 +2505,21 @@ func main() {
 #[cfg(feature = "exact-numbers")]
 #[test]
 fn generated_go_exact_numbers_compile_and_behave() {
-    let required = std::env::var_os("ROAS_CODEGEN_REQUIRE_GO").is_some();
-    if std::env::var_os("ROAS_CODEGEN_SKIP_COMPILE").is_some() && !required {
-        eprintln!("skipped: ROAS_CODEGEN_SKIP_COMPILE is set");
-        return;
-    }
-    if let Err(reason) = go_toolchain() {
-        assert!(!required, "ROAS_CODEGEN_REQUIRE_GO is set: {reason}");
-        eprintln!("skipped: {reason}");
-        return;
-    }
-    let generation = exact_generation(Target::Go);
-    let dir = std::env::temp_dir().join(format!("roas-codegen-go-exact-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("api")).unwrap();
-    std::fs::write(dir.join("go.mod"), "module generated\n\ngo 1.27\n").unwrap();
-    for file in &generation.files {
-        std::fs::write(dir.join("api").join(&file.path), &file.contents).unwrap();
-    }
-    std::fs::write(dir.join("main.go"), GO_EXACT_MAIN).unwrap();
-    let run = |args: &[&str]| {
-        Command::new("go")
-            .args(args)
-            .current_dir(&dir)
-            .env("GOTOOLCHAIN", "local")
-            .env("GOWORK", "off")
-            .output()
-            .expect("go runs")
-    };
-    let output = run(&["run", "."]);
-    let vet = run(&["vet", "./..."]);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success() && stdout.contains("exact numbers behave"),
-        "generated Go failed\n--- stdout\n{stdout}\n--- stderr\n{stderr}\n--- {}\n{}",
-        generation.files[0].path.display(),
-        generation.files[0].contents
+    go_case(
+        "go-exact",
+        || exact_generation(Target::Go, Layout::OneFilePerModule),
+        GO_EXACT_MAIN,
+        "exact numbers behave",
     );
-    assert!(
-        vet.status.success(),
-        "go vet\n{}",
-        String::from_utf8_lossy(&vet.stderr)
+}
+
+#[cfg(feature = "exact-numbers")]
+#[test]
+fn generated_go_exact_numbers_compile_and_behave_file_per_type() {
+    go_case(
+        "go-exact-file-per-type",
+        || exact_generation(Target::Go, Layout::FilePerType),
+        GO_EXACT_MAIN,
+        "exact numbers behave",
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
