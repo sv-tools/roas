@@ -78,6 +78,8 @@ fn render(
     needs: &mut Needs,
 ) -> bool {
     let At { e, p, r } = at;
+    // A named number type has none of `Decimal`'s methods: converted.
+    let x = format!("Decimal({e})");
     // Some checks only report that they could not be made, and a bound
     // beyond every value emits nothing: the value is read only when a
     // check that reads it emitted something.
@@ -246,14 +248,14 @@ fn render(
                         set.dedup();
                         // A listed value no decimal holds is no value's.
                         let violation = format!(
-                            "{r}.violation({p}, fmt.Sprintf({}, {e}))",
+                            "{r}.violation({p}, fmt.Sprintf({}, {x}))",
                             lit(&format!("%v is not {what}"))
                         );
                         out.push(if set.is_empty() {
                             violation
                         } else {
                             let list = set.iter().map(decimal).collect::<Vec<_>>().join(", ");
-                            format!("switch {e} {{ case {list}: default: {violation} }}")
+                            format!("switch {x} {{ case {list}: default: {violation} }}")
                         });
                     }
                     ValueKind::Number(FloatWidth::Float) => {
@@ -408,7 +410,7 @@ fn render(
                 let at_least = matches!(check, Check::DecAtLeast { .. });
                 let (op, _, word) = checks::bound_words(at_least, *exclusive);
                 out.push(format!(
-                    "if !({e}.Cmp({}) {op} 0) {{ {r}.violation({p}, fmt.Sprintf({}, {e})) }}",
+                    "if !({x}.Cmp({}) {op} 0) {{ {r}.violation({p}, fmt.Sprintf({}, {x})) }}",
                     decimal(bound),
                     lit(&format!("%v is {word} {keyword} {literal}"))
                 ));
@@ -420,12 +422,12 @@ fn render(
             } => {
                 let (_, keyword, word) = checks::bound_words(*at_least, *exclusive);
                 out.push(format!(
-                    "{r}.violation({p}, fmt.Sprintf({}, {e}))",
+                    "{r}.violation({p}, fmt.Sprintf({}, {x}))",
                     lit(&format!("%v is {word} {keyword} {literal}"))
                 ));
             }
             Check::DecMultipleOf { divisor, literal } => out.push(format!(
-                "if !{e}.IsMultipleOf({}) {{ {r}.violation({p}, fmt.Sprintf({}, {e})) }}",
+                "if !{x}.IsMultipleOf({}) {{ {r}.violation({p}, fmt.Sprintf({}, {x})) }}",
                 decimal(divisor),
                 lit(&format!("%v is not a multiple of {literal}"))
             )),

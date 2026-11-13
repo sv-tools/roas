@@ -255,7 +255,7 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                             violation
                         } else {
                             let list = set.iter().map(decimal).collect::<Vec<_>>().join(", ");
-                            format!("if ![{list}].contains({v}) {{ {violation} }}")
+                            format!("if ![{list}].contains(&*{v}) {{ {violation} }}")
                         });
                     }
                     ValueKind::Number(FloatWidth::Float) => {

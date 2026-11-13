@@ -2144,7 +2144,11 @@ fn exact_generation(target: Target) -> roas_codegen::Generation {
             }},
             "Rates": {"type": "array", "items": {"type": "number", "maximum": 1}},
             "Either": {"oneOf": [{"type": "number"}, {"type": "string"}]},
-            "Pat": {"type": "object", "patternProperties": {"^x": {"type": "number"}}}
+            "Pat": {"type": "object", "patternProperties": {"^x": {"type": "number"}}},
+            "Neg": {"type": "number", "exclusiveMinimum": -1, "maximum": -0.5},
+            "Nul": {"type": ["number", "null"], "enum": [1.5, null]},
+            "Zero": {"type": "number", "const": 0},
+            "Top": {"type": "number", "multipleOf": 0.25}
         }}
     });
     let mut description = description;
@@ -2276,6 +2280,18 @@ fn main() {
     assert_eq!(report::<Either>(r#""s""#), vec![]);
     assert_eq!(report::<Either>(wide), vec![u("")]);
     assert_eq!(report::<Pat>(&format!(r#"{{"x1":{wide}}}"#)), vec![u("/x1")]);
+    // A top-level number is checked as one.
+    assert_eq!(report::<Neg>("-0.75"), vec![]);
+    assert_eq!(report::<Neg>("-1"), vec![v("")]);
+    assert_eq!(report::<Neg>("-0.25"), vec![v("")]);
+    assert_eq!(report::<Nul>("1.50"), vec![]);
+    assert_eq!(report::<Nul>("2"), vec![v("")]);
+    assert_eq!(report::<Zero>("0.0"), vec![]);
+    assert_eq!(report::<Zero>("1"), vec![v("")]);
+    assert_eq!(report::<Top>("1.75"), vec![]);
+    assert_eq!(report::<Top>("1.7"), vec![v("")]);
+    let found = serde_json::from_str::<Top>("1.7").unwrap().validate();
+    assert!(found.findings[0].message.starts_with("1.7 is not"), "{found:?}");
     println!("exact numbers behave");
 }
 "##;
@@ -2467,6 +2483,22 @@ func main() {
 	check("either", report[api.Either](`"s"`))
 	check("either wide", report[api.Either](wide), u(""))
 	check("pattern wide", report[api.Pat](`{"x1":`+wide+`}`), u("/x1"))
+	check("neg", report[api.Neg](`-0.75`))
+	check("neg low", report[api.Neg](`-1`), v(""))
+	check("neg high", report[api.Neg](`-0.25`), v(""))
+	check("nul", report[api.Nul](`1.50`))
+	check("nul off", report[api.Nul](`2`), v(""))
+	check("zero", report[api.Zero](`0.0`))
+	check("zero off", report[api.Zero](`1`), v(""))
+	check("top", report[api.Top](`1.75`))
+	check("top off", report[api.Top](`1.7`), v(""))
+	var top api.Top
+	if err := json.Unmarshal([]byte(`1.7`), &top); err != nil {
+		panic(err)
+	}
+	if got := top.Validate().Findings; len(got) != 1 || !strings.HasPrefix(got[0].Message, "1.7 is not") {
+		panic(fmt.Sprint(got))
+	}
 	fmt.Println("exact numbers behave")
 }
 "##;
