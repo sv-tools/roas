@@ -726,3 +726,14 @@ fn file_per_type_refuses_an_import_named_like_a_validation_local() {
     let error = result.unwrap_err();
     assert!(matches!(error, GenerateError::Config(_)), "{error}");
 }
+
+#[test]
+fn file_per_type_refuses_an_import_named_like_a_substitution_import() {
+    let toml = "layout = \"file_per_type\"\nextra_imports = ['uuid \"example.com/other\"']\n[substitutions.uuid.go]\nname = \"uuid.UUID\"\nimport = \"github.com/google/uuid\"\n";
+    let components = serde_json::json!({"Pet": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}}}});
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let error = result.unwrap_err();
+    assert!(matches!(error, GenerateError::Config(_)), "{error}");
+}

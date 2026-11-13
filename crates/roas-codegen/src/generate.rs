@@ -228,6 +228,19 @@ fn check_rust(config: &Config) -> Result<(), GenerateError> {
             config.rust.module
         )));
     }
+    // The header heads every type's file too, which the module includes:
+    // an inner attribute or doc comment is not allowed there.
+    if config.layout == Layout::FilePerType
+        && let Some(line) = config.header.as_deref().and_then(|header| {
+            header.lines().map(str::trim_start).find(|line| {
+                line.starts_with("//!") || line.starts_with("/*!") || line.starts_with("#!")
+            })
+        })
+    {
+        return Err(GenerateError::Config(format!(
+            "`header` line {line:?} is an inner doc comment or attribute, which a type's file under `layout = \"file_per_type\"` cannot hold, as the module includes it; write it in the module file's template, or as `//`"
+        )));
+    }
     if !matches!(
         config.rust.edition.as_str(),
         "2015" | "2018" | "2021" | "2024"

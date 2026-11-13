@@ -403,6 +403,20 @@ fn file_per_type_writes_a_file_per_type_the_module_includes() {
 }
 
 #[test]
+fn file_per_type_refuses_an_inner_header() {
+    for header in ["//! Copyright", "// SPDX\\n#![allow(clippy::all)]"] {
+        let toml = format!("header = \"{header}\"\n");
+        let error = generate(
+            &document(pet()),
+            &rust_config(&format!("layout = \"file_per_type\"\n{toml}")),
+        )
+        .unwrap_err();
+        assert!(matches!(error, GenerateError::Config(_)), "{error}");
+        generate(&document(pet()), &rust_config(&toml)).unwrap();
+    }
+}
+
+#[test]
 fn file_per_type_keeps_paths_as_the_module_reads_them() {
     // The files are included into the module, so a path relative to it
     // means what it does in one file.
