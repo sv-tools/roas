@@ -23,7 +23,7 @@ where
         type Value = BTreeMap<String, serde_json::Value>;
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("extensions: Option<BTreeMap<String, serde_json::Value>>")
+            formatter.write_str("a map of schema keywords")
         }
 
         fn visit_map<V>(self, mut map: V) -> Result<BTreeMap<String, serde_json::Value>, V::Error>
@@ -101,7 +101,10 @@ mod tests {
 
         let message = deserialize(&mut de).unwrap_err().to_string();
 
-        assert!(message.contains("expected extensions"), "got: {message}");
+        assert!(
+            message.contains("expected a map of schema keywords"),
+            "got: {message}"
+        );
     }
 
     #[test]

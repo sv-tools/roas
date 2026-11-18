@@ -582,9 +582,9 @@ pub struct AllOfSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discriminator: Option<Discriminator>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
     #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -620,9 +620,9 @@ pub struct AnyOfSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
     #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -658,9 +658,9 @@ pub struct OneOfSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
     #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -688,9 +688,9 @@ pub struct NotSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
     #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -836,9 +836,9 @@ pub struct StringSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
     #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -955,9 +955,9 @@ pub struct IntegerSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
     #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1066,9 +1066,9 @@ pub struct NumberSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
     #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1138,9 +1138,9 @@ pub struct BooleanSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
     #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1227,9 +1227,9 @@ pub struct ArraySchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
     #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1381,9 +1381,9 @@ pub struct ObjectSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
     #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1447,9 +1447,9 @@ pub struct NullSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
     #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1534,9 +1534,9 @@ pub struct MultiSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
     #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
