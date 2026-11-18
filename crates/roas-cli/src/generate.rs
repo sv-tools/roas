@@ -4,8 +4,9 @@
 //! The description is read as raw bytes, so that a build with the
 //! `exact-numbers` feature keeps JSON numbers exact, then version-detected, normalized to 3.2, validated with
 //! external references skipped, lowered and rendered. `--apply` overlays
-//! apply before any of that, and the result is written back in the format
-//! it was read in. Files are written
+//! apply before any of that: a JSON description overlaid only by JSON
+//! stays JSON text, anything else goes on as a parsed value of unknown
+//! fidelity. Files are written
 //! under a manifest the target owns: see `roas_codegen::write` for the
 //! ownership rules. `--check` writes nothing and fails when the output
 //! directory is out of date, which is what CI wants.
@@ -200,16 +201,18 @@ fn read_description(source: &InputSource, format: Option<InputFormat>) -> Result
     Ok((input, uri))
 }
 
-/// Apply the `--apply` overlays to the description, in the format it was
-/// read in, so JSON keeps exact numbers and YAML keeps its fidelity.
+/// Apply the `--apply` overlays to the description: a JSON description
+/// overlaid only by JSON stays JSON text, exact under `exact-numbers`;
+/// anything else goes on as a parsed value of unknown fidelity. Also the
+/// first overlay not read as JSON, for `exact_numbers` to name.
 fn overlay_description(
     source: &InputSource,
     input: Input,
     overlays: &[PathBuf],
     options: &[roas_overlay::apply::ApplyOptions],
-) -> Result<Input> {
+) -> Result<(Input, Option<PathBuf>)> {
     if overlays.is_empty() {
-        return Ok(input);
+        return Ok((input, None));
     }
     let options = options.iter().copied().collect();
     let (bytes, yaml) = match input {
@@ -221,16 +224,17 @@ fn overlay_description(
         .context("not UTF-8")
         .and_then(|text| crate::versioned::parse_value(text, yaml))
         .with_context(|| format!("{}: cannot be read", source.display()))?;
-    let all_json = crate::overlay::apply_overlays(&mut value, overlays, options)?;
+    let not_json = crate::overlay::apply_overlays(&mut value, overlays, options)?;
     // Exact only as JSON throughout: a YAML overlay's numbers went through
     // `f64`, and a YAML description is no more exact for being overlaid.
     // Otherwise the value goes on as it is, of no known fidelity, which
     // `exact_numbers` refuses, and with no text to write it back to.
-    Ok(if !yaml && all_json {
+    let input = if !yaml && not_json.is_none() {
         Input::Json(serde_json::to_vec(&value)?)
     } else {
         Input::Value(value)
-    })
+    };
+    Ok((input, not_json))
 }
 
 /// The description's path with its directories resolved and its own name
@@ -572,7 +576,8 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     let (input, uri) = read_description(&source, args.format)?;
     // Before parsing, so validation, generation and every dump see the
     // overlaid description.
-    let input = overlay_description(&source, input, &args.apply, &args.apply_options)?;
+    let (input, yaml_overlay) =
+        overlay_description(&source, input, &args.apply, &args.apply_options)?;
     let document = SourceDocument::parse(input, uri)
         .with_context(|| format!("{}: cannot be read", source.display()))?;
 
@@ -629,6 +634,16 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
         ),
         other => other.into(),
     })?;
+    // Said here rather than as the description's own fidelity: it is the
+    // overlay that took the numbers through `f64`.
+    if config.exact_numbers
+        && let Some(overlay) = &yaml_overlay
+    {
+        bail!(
+            "`exact_numbers` needs every `--apply` overlay to be JSON, its numbers as written; {} is not",
+            overlay.display()
+        );
+    }
 
     if let Some(dir) = &args.dump_scaffold {
         // Not where generated files and their manifests live either.
@@ -1831,7 +1846,7 @@ mod tests {
     }
 
     #[test]
-    fn overlaid_yaml_descriptions_stay_yaml() {
+    fn overlays_apply_to_yaml_descriptions() {
         if !have_rustfmt() {
             return; // the output depends on it
         }
@@ -1971,7 +1986,10 @@ mod tests {
         rounded.config = Some(config);
         rounded.apply = vec![bound_overlay(&dir.0, "b.yaml", bound)];
         let error = format!("{:#}", run_generate(rounded).unwrap_err());
-        assert!(error.contains("fidelity"), "{error}");
+        assert!(
+            error.contains("every `--apply` overlay to be JSON") && error.contains("b.yaml"),
+            "{error}"
+        );
         // A YAML description with an exact JSON number overlaid is still
         // generated, without exact numbers asked for.
         let yaml = dir.0.join("api.yaml");
