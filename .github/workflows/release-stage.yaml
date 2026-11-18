@@ -50,7 +50,7 @@ jobs:
       # triggered this run. For `roas-cli`, `AttachRoasCliBinaries`
       # below appends the prebuilt tarballs to this same draft.
       - name: Create draft GitHub Release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           draft: true
           # The repo carries multiple crates with their own tags; don't
@@ -281,7 +281,7 @@ jobs:
       #     --certificate-oidc-issuer    'https://token.actions.githubusercontent.com' \
       #     <archive>
       - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
           # Pin the cosign binary — the installer action is SHA-pinned
           # but the binary was not, so CI silently moved across the 2.x →
@@ -321,7 +321,7 @@ jobs:
             artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz
 
       - name: Attach prebuilt binaries to draft Release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           # The cosign bundle rides along with the tarballs so consumers
           # don't have to fetch it from a separate location. SLSA
