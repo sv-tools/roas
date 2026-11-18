@@ -71,10 +71,7 @@ pub(crate) fn qualifier_list(text: &str) -> Vec<String> {
                 while i < bytes.len() && ident(bytes[i]) {
                     i += 1;
                 }
-                let mut next = i;
-                while next < bytes.len() && matches!(bytes[next], b' ' | b'\t') {
-                    next += 1;
-                }
+                let next = selector_dot(bytes, i);
                 if !after_dot
                     && bytes.get(next) == Some(&b'.')
                     && bytes.get(next + 1) != Some(&b'.')
@@ -91,6 +88,27 @@ pub(crate) fn qualifier_list(text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Where the token after `at` starts, past spaces, tabs and comments
+/// that stay on the line: a newline or a line comment would end the
+/// statement there, so no selector can follow it.
+fn selector_dot(bytes: &[u8], mut at: usize) -> usize {
+    loop {
+        match bytes.get(at) {
+            Some(b' ' | b'\t') => at += 1,
+            Some(b'/') if bytes.get(at + 1) == Some(&b'*') => {
+                let Some(len) = bytes[at + 2..].windows(2).position(|w| w == b"*/") else {
+                    return at;
+                };
+                if bytes[at + 2..at + 2 + len].contains(&b'\n') {
+                    return at;
+                }
+                at += len + 4;
+            }
+            _ => return at,
+        }
+    }
 }
 
 /// What an `extra_imports` spec is known to be used under, as the spec
@@ -156,6 +174,13 @@ mod tests {
         let text = "package x\nimport (\n\t\"fmt\"\n)\n// strings.Builder\n/* bytes.Buffer */\nvar a = fmt.Errorf(\"errors.New %d\", x.json.y, 1.5, `math.Pi`, '.', f(xs...))\nvar b = time .\n\tNow()\n";
         let found: Vec<_> = qualifiers(text).into_iter().collect();
         assert_eq!(found, ["fmt", "time", "x"]);
+    }
+
+    #[test]
+    fn qualifiers_see_past_a_comment_on_the_line() {
+        let text = "var a time /* at */ .Time\nvar b big/* n */ /**/.Int\nvar c net /* a\nb */ .IP\nvar d url // u\n.URL\nvar e io /* open";
+        let found: Vec<_> = qualifiers(text).into_iter().collect();
+        assert_eq!(found, ["big", "time"]);
     }
 
     #[test]

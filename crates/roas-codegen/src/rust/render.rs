@@ -22,19 +22,23 @@ pub(crate) fn render(
         PathBuf::from(format!("{module}.rs")),
         renderer.render("rust/mod.rs.jinja", file, "")?,
     )];
+    // The module includes each file: its imports, helpers and types are
+    // in scope there already, and an import here would be a second one.
+    // Cloned once, not with every type in each file.
+    let shell = FileView {
+        imports: Vec::new(),
+        extra_imports: Vec::new(),
+        types: Vec::new(),
+        ..file.clone()
+    };
     for t in &file.types {
         let stem = t
             .file
             .as_deref()
             .expect("every type has a file under file_per_type");
-        // The module includes the file: its imports, helpers and types
-        // are in scope there already, and an import here would be a
-        // second one.
         let view = FileView {
-            imports: Vec::new(),
-            extra_imports: Vec::new(),
             types: vec![t.clone()],
-            ..file.clone()
+            ..shell.clone()
         };
         files.push((
             PathBuf::from(module).join(format!("{stem}.rs")),

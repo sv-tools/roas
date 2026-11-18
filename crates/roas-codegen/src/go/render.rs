@@ -34,6 +34,12 @@ pub(crate) fn render(
             &mut placed,
         )?,
     )];
+    // Every view a type file renders, short of its type: cloned once,
+    // not with every type in each file.
+    let shell = FileView {
+        types: Vec::new(),
+        ..file.clone()
+    };
     for t in &file.types {
         let stem = t
             .file
@@ -41,7 +47,7 @@ pub(crate) fn render(
             .expect("every type has a file under file_per_type");
         let view = FileView {
             types: vec![t.clone()],
-            ..file.clone()
+            ..shell.clone()
         };
         files.push((
             PathBuf::from(format!("{stem}.go")),
