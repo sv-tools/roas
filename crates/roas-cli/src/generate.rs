@@ -130,6 +130,14 @@ pub(crate) struct GenerateArgs {
     /// produces code the formatter refuses.
     #[arg(long, conflicts_with = "check")]
     pub(crate) dump_rendered: Option<PathBuf>,
+
+    /// Write a template directory overriding nothing into this existing
+    /// directory, apart from the output directory, and generate nothing:
+    /// for each built-in template this target and layout render, a file
+    /// at the path an override takes, extending the built-in and listing
+    /// every block it declares. Existing files are never overwritten.
+    #[arg(long, conflicts_with_all = ["check", "print_context", "dump_rendered"])]
+    pub(crate) dump_scaffold: Option<PathBuf>,
 }
 
 /// Read the description as bytes, so JSON can keep exact numbers, and give
@@ -481,15 +489,13 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Whether the dump directory, which must exist, is the output directory,
-/// holds it, or sits inside it. Compared by identity along every existing
-/// ancestor, so no spelling of either path can hide the overlap.
-fn overlaps(dump: &Path, out: &Path) -> Result<bool> {
+/// Whether the dump directory `flag` names, which must exist, is the
+/// output directory, holds it, or sits inside it. Compared by identity
+/// along every existing ancestor, so no spelling of either path can hide
+/// the overlap.
+fn overlaps(flag: &str, dump: &Path, out: &Path) -> Result<bool> {
     if !dump.is_dir() {
-        bail!(
-            "--dump-rendered {} must be an existing directory",
-            dump.display()
-        );
+        bail!("{flag} {} must be an existing directory", dump.display());
     }
     let resolved =
         |path: &Path| resolve(path).ok_or_else(|| anyhow!("cannot resolve {}", path.display()));
@@ -575,6 +581,44 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
         other => other.into(),
     })?;
 
+    if let Some(dir) = &args.dump_scaffold {
+        // Not where generated files and their manifests live either.
+        if overlaps("--dump-scaffold", dir, &args.out)? {
+            bail!(
+                "--dump-scaffold {} overlaps the output directory {}; dump somewhere else",
+                dir.display(),
+                args.out.display()
+            );
+        }
+        let files = roas_codegen::scaffold(&config)?;
+        // A scaffold is for editing, so a file already there may be
+        // someone's work: refused before anything is written.
+        if let Some(taken) = files
+            .iter()
+            .map(|file| dir.join(&file.path))
+            .find(|path| std::fs::symlink_metadata(path).is_ok())
+        {
+            bail!(
+                "--dump-scaffold: {} already exists; dump into an empty directory",
+                taken.display()
+            );
+        }
+        for file in files {
+            let path = dir.join(&file.path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, file.contents.as_bytes()))
+                .with_context(|| format!("writing {}", path.display()))?;
+            eprintln!("scaffolded {}", path.display());
+        }
+        return Ok(());
+    }
     if args.print_context {
         let context = roas_codegen::template_context(&document, &config)?;
         println!("{}", serde_json::to_string_pretty(&context.context)?);
@@ -600,7 +644,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     if let Some(dir) = &args.dump_rendered {
         // The dump is raw text with no ownership rules: it must not land
         // where generated files and their manifests live.
-        if overlaps(dir, &args.out)? {
+        if overlaps("--dump-rendered", dir, &args.out)? {
             bail!(
                 "--dump-rendered {} overlaps the output directory {}; dump somewhere else",
                 dir.display(),
@@ -840,6 +884,7 @@ mod tests {
             template_dir: None,
             print_context: false,
             dump_rendered: None,
+            dump_scaffold: None,
         }
     }
 
@@ -1152,6 +1197,89 @@ mod tests {
                     .is_symlink()
             );
             assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "keep me");
+        }
+    }
+
+    #[test]
+    fn dump_scaffold_writes_a_template_dir_that_changes_nothing() {
+        let dir = TempDir::new("scaffold");
+        let spec = dir.0.join("api.json");
+        std::fs::write(&spec, PET).unwrap();
+        let out = dir.0.join("out");
+        let scaffold = dir.0.join("tpl");
+        std::fs::create_dir_all(&scaffold).unwrap();
+        let mut dump = args(&spec, &out);
+        dump.dump_scaffold = Some(scaffold.clone());
+        run_generate(dump).unwrap();
+        // Nothing is generated.
+        assert!(!out.exists());
+        let module = std::fs::read_to_string(scaffold.join("rust/module.rs.jinja")).unwrap();
+        assert!(
+            module.contains("{%- extends \"builtin/rust/module.rs.jinja\" %}")
+                && module.contains("{%- block footer %}{{ super() }}{% endblock %}"),
+            "{module}"
+        );
+        assert!(!scaffold.join("rust/mod.rs.jinja").exists());
+        // Used as the template directory, it renders the defaults.
+        run_generate(args(&spec, &out)).unwrap();
+        let plain = std::fs::read_to_string(out.join("api.rs")).unwrap();
+        let mut through = args(&spec, &out);
+        through.template_dir = Some(scaffold.clone());
+        run_generate(through).unwrap();
+        assert_eq!(std::fs::read_to_string(out.join("api.rs")).unwrap(), plain);
+        // A second dump would overwrite it, and is refused whole.
+        std::fs::write(scaffold.join("rust/module.rs.jinja"), "edited").unwrap();
+        std::fs::remove_file(scaffold.join("roas-templates.toml")).unwrap();
+        let mut again = args(&spec, &out);
+        again.dump_scaffold = Some(scaffold.clone());
+        let error = run_generate(again).unwrap_err().to_string();
+        assert!(error.contains("already exists"), "{error}");
+        assert!(!scaffold.join("roas-templates.toml").exists());
+        assert_eq!(
+            std::fs::read_to_string(scaffold.join("rust/module.rs.jinja")).unwrap(),
+            "edited"
+        );
+        // The directory must exist and be apart from the output.
+        for (target, wanted) in [
+            (dir.0.join("nowhere"), "--dump-scaffold"),
+            (out.clone(), "overlaps the output directory"),
+        ] {
+            let mut bad = args(&spec, &out);
+            bad.dump_scaffold = Some(target);
+            let error = run_generate(bad).unwrap_err().to_string();
+            assert!(error.contains(wanted), "{error}");
+        }
+        assert!(!dir.0.join("nowhere").exists());
+        // It describes the configured target.
+        let go = dir.0.join("go");
+        std::fs::create_dir_all(&go).unwrap();
+        let mut dump = args(&spec, &out);
+        dump.target = Some(GenerateTarget::Go);
+        dump.dump_scaffold = Some(go.clone());
+        run_generate(dump).unwrap();
+        assert!(go.join("go/file.go.jinja").exists());
+    }
+
+    #[test]
+    fn dump_scaffold_conflicts_with_check_and_the_other_dumps() {
+        #[derive(clap::Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            args: GenerateArgs,
+        }
+        use clap::Parser;
+        assert!(
+            TestCli::try_parse_from(["roas", "--out", "o", "--dump-scaffold", "d", "a.json"])
+                .is_ok()
+        );
+        for other in [
+            &["--check"][..],
+            &["--print-context"],
+            &["--dump-rendered", "r"],
+        ] {
+            let mut argv = vec!["roas", "--out", "o", "--dump-scaffold", "d", "a.json"];
+            argv.extend_from_slice(other);
+            assert!(TestCli::try_parse_from(argv).is_err(), "{other:?}");
         }
     }
 

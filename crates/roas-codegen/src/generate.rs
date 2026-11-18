@@ -581,6 +581,22 @@ pub fn render(
     }
 }
 
+/// A template directory that changes nothing, to show what can be
+/// changed: for each default template rendering under `config` (by its
+/// `target` and `layout`), and each one it includes, a template at the
+/// path an override takes, extending the default and filling every block
+/// with the default's content, plus the `roas-templates.toml` manifest.
+/// Used as `template_dir` it renders exactly what the defaults do. It
+/// describes the defaults, whatever `template_dir` says; it is what
+/// `roas openapi generate --dump-scaffold` writes.
+pub fn scaffold(config: &Config) -> Result<Vec<GeneratedFile>, GenerateError> {
+    let entries = match config.target {
+        Target::Rust => rust::entries(config),
+        Target::Go => go::entries(config),
+    };
+    crate::templates::scaffold(&entries)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

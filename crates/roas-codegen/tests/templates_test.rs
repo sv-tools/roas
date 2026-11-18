@@ -4,8 +4,8 @@
 
 use roas::validation::{IGNORE_UNUSED, Options};
 use roas_codegen::{
-    ConfigFile, GenerateError, Input, SourceDocument, TEMPLATE_API, Target, generate, render,
-    template_context, validate,
+    ConfigFile, GenerateError, Input, Layout, SourceDocument, TEMPLATE_API, Target, generate,
+    render, scaffold, template_context, validate,
 };
 use std::path::{Path, PathBuf};
 use url::Url;
@@ -390,4 +390,105 @@ fn hidden_entries_and_odd_links_are_not_templates() {
     std::os::unix::fs::symlink("nowhere", rust.join("gone.jinja")).unwrap();
     let generation = generate(&document(), &config(Target::Rust, Some(&dir.0))).unwrap();
     assert!(generation.files[0].contents.ends_with("// linked\n"));
+}
+
+/// A description reaching every default template: each kind, a
+/// catch-all, a string enum, and validation.
+fn every_kind() -> roas_codegen::ValidatedSourceDocument {
+    let raw = serde_json::json!({
+        "openapi": "3.2.0",
+        "info": {"title": "t", "version": "1"},
+        "paths": {},
+        "components": {"schemas": {
+            "Pet": {"type": "object", "required": ["petType"], "description": "A pet.", "properties": {
+                "petType": {"type": "string", "const": "Pet"},
+                "n": {"type": "integer", "format": "int32", "minimum": 0, "maximum": 10, "description": "How many."}
+            }},
+            "Cat": {"type": "object", "required": ["petType"], "properties": {"petType": {"type": "string", "enum": ["Cat"]}}},
+            "Animal": {"oneOf": [{"$ref": "#/components/schemas/Pet"}, {"$ref": "#/components/schemas/Cat"}], "discriminator": {"propertyName": "petType"}},
+            "Loose": {"oneOf": [{"type": "string"}, {"type": "boolean"}]},
+            "Composed": {"allOf": [{"$ref": "#/components/schemas/Pet"}, {"type": "object", "additionalProperties": false}]},
+            "Open": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "integer"}},
+            "Status": {"type": "string", "enum": ["available", "sold"], "description": "A status."},
+            "Ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+            "Alias": {"$ref": "#/components/schemas/Pet"}
+        }}
+    });
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let doc = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap())
+        .expect("parses");
+    validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid")
+}
+
+#[test]
+fn the_scaffold_lists_every_block_and_renders_the_defaults() {
+    let document = every_kind();
+    for target in [Target::Rust, Target::Go] {
+        for layout in [Layout::OneFilePerModule, Layout::FilePerType] {
+            let configure = |dir: Option<&Path>| {
+                let mut file = ConfigFile::default();
+                file.target = Some(target);
+                file.layout = Some(layout);
+                file.validation = Some(true);
+                file.header = Some("// A header.".into());
+                file.template_dir = dir.map(Path::to_path_buf);
+                file.build().unwrap()
+            };
+            let files = scaffold(&configure(None)).unwrap();
+            let dir = Dir::new("scaffold", &[]);
+            for file in &files {
+                let path = dir.0.join(&file.path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, &file.contents).unwrap();
+            }
+            let defaults = render(&document, &configure(None)).unwrap();
+            let scaffolded = render(&document, &configure(Some(&dir.0))).unwrap();
+            assert_eq!(defaults, scaffolded, "{target:?} {layout:?}");
+
+            let names: Vec<_> = files.iter().map(|f| f.path.to_str().unwrap()).collect();
+            let (lang, entry, other) = match (target, layout) {
+                (Target::Rust, Layout::OneFilePerModule) => ("rust", "module.rs", "mod.rs"),
+                (Target::Rust, _) => ("rust", "mod.rs", "module.rs"),
+                (Target::Go, Layout::OneFilePerModule) => ("go", "file.go", "package.go"),
+                _ => ("go", "package.go", "file.go"),
+            };
+            assert!(names.contains(&"roas-templates.toml"), "{names:?}");
+            assert!(
+                names.contains(&format!("{lang}/{entry}.jinja").as_str()),
+                "{names:?}"
+            );
+            assert!(
+                !names.contains(&format!("{lang}/{other}.jinja").as_str()),
+                "{names:?}"
+            );
+            // Included templates are there, with the loop they are in.
+            let field = files
+                .iter()
+                .find(|f| {
+                    f.path
+                        == Path::new(lang)
+                            .join(format!("field.{}.jinja", &entry[entry.len() - 2..]))
+                })
+                .unwrap_or_else(|| panic!("{names:?}"));
+            assert!(
+                field
+                    .contents
+                    .contains(&format!("Included by {lang}/struct."))
+                    && field.contents.contains("inside `for f in t.fields`"),
+                "{}",
+                field.contents
+            );
+            assert!(
+                field
+                    .contents
+                    .contains("{%- block doc %}{{ super() }}{% endblock %}\n"),
+                "{}",
+                field.contents
+            );
+            assert!(
+                files.iter().all(|f| f.path.starts_with(lang) || f.path == Path::new("roas-templates.toml")),
+                "{names:?}"
+            );
+        }
+    }
 }
