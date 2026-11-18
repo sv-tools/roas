@@ -1,6 +1,6 @@
 # roas-cli
 
-Command-line front-end for [`roas`](https://crates.io/crates/roas): validate and convert OpenAPI specs across versions 2.0 / 3.0.x / 3.1.x / 3.2.x, validate / convert / apply [OpenAPI Overlay](https://spec.openapis.org/overlay/v1.0.0.html) documents (v1.0 / v1.1) via [`roas-overlay`](https://crates.io/crates/roas-overlay), validate / convert [OpenAPI Arazzo](https://spec.openapis.org/arazzo/v1.0.1.html) workflow descriptions (v1.0 / v1.1) via [`roas-arazzo`](https://crates.io/crates/roas-arazzo), and validate / convert [AsyncAPI](https://www.asyncapi.com/docs/reference/specification/v3.1.0) documents (2.6 / 3.0 / 3.1) via [`roas-asyncapi`](https://crates.io/crates/roas-asyncapi).
+Command-line front-end for [`roas`](https://crates.io/crates/roas): validate and convert OpenAPI specs across versions 2.0 / 3.0.x / 3.1.x / 3.2.x, validate / convert / apply [OpenAPI Overlay](https://spec.openapis.org/overlay/v1.0.0.html) documents (v1.0 / v1.1 / v1.2) via [`roas-overlay`](https://crates.io/crates/roas-overlay), validate / convert [OpenAPI Arazzo](https://spec.openapis.org/arazzo/v1.0.1.html) workflow descriptions (v1.0 / v1.1) via [`roas-arazzo`](https://crates.io/crates/roas-arazzo), and validate / convert [AsyncAPI](https://www.asyncapi.com/docs/reference/specification/v3.1.0) documents (2.6 / 3.0 / 3.1) via [`roas-asyncapi`](https://crates.io/crates/roas-asyncapi).
 
 [![crates.io](https://img.shields.io/crates/v/roas-cli.svg)](https://crates.io/crates/roas-cli)
 
@@ -160,7 +160,7 @@ Diagnostics go to stderr. An error suppresses the affected types; by default it 
 
 ### `overlay`
 
-Work with [OpenAPI Overlay](https://spec.openapis.org/overlay/v1.0.0.html) documents (v1.0 and v1.1). The overlay version is auto-detected from the `overlay` field.
+Work with [OpenAPI Overlay](https://spec.openapis.org/overlay/v1.0.0.html) documents (v1.0, v1.1 and v1.2). The overlay version is auto-detected from the `overlay` field.
 
 ```shell
 roas overlay validate overlay.yaml                          # parse + validate
@@ -171,7 +171,7 @@ roas overlay apply --overlay a.yaml --overlay b.yaml spec.json | roas openapi va
 ```
 
 - **`overlay validate`** — checks structure: the `overlay` version, non-empty `actions`, valid RFC 9535 JSONPath in every `target` (and `copy`), and the mutual-exclusivity rules. `--ignore <CHECK>` skips a check (`empty-info-title`, `empty-info-version`); `--print` echoes the parsed overlay.
-- **`overlay convert --to <v1_0|v1_1>`** — upconverts an overlay. Only upconversion is supported (v1.0 → v1.1 adds the `copy` action and `info.description`); downconversion errors.
+- **`overlay convert --to <v1_0|v1_1|v1_2>`** — upconverts an overlay. Only upconversion is supported (v1.0 → v1.1 adds the `copy` action and `info.description`; v1.1 → v1.2 adds reusable actions, `$self` and primitive targets); downconversion errors.
 - **`overlay apply`** — applies overlay(s) to a target spec. The spec is the positional argument (or stdin); `--overlay <FILE>` (repeatable, at least one required) names the overlay(s), applied in order. The spec is treated as untyped JSON, so this works for any OpenAPI version. `--apply-option` (repeatable) accepts `error-on-zero-match` and `error-on-mixed-kind-match`. On any apply error the spec is left untouched and `roas` exits non-zero.
 
 ### `arazzo`

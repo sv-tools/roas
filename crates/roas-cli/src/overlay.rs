@@ -12,7 +12,7 @@ use clap::{Subcommand, ValueEnum};
 use enumset::EnumSet;
 use roas_overlay::apply::{Apply, ApplyError, ApplyOptions, ApplyReport};
 use roas_overlay::validation::{Error as OverlayError, Validate, ValidationOptions};
-use roas_overlay::{v1_0, v1_1};
+use roas_overlay::{v1_0, v1_1, v1_2};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -25,6 +25,8 @@ pub(crate) enum OverlayVersion {
     V1_0,
     #[value(name = "v1_1", alias = "1.1", alias = "v1.1")]
     V1_1,
+    #[value(name = "v1_2", alias = "1.2", alias = "v1.2")]
+    V1_2,
 }
 
 impl OverlayVersion {
@@ -32,6 +34,7 @@ impl OverlayVersion {
         match self {
             OverlayVersion::V1_0 => "Overlay 1.0",
             OverlayVersion::V1_1 => "Overlay 1.1",
+            OverlayVersion::V1_2 => "Overlay 1.2",
         }
     }
 }
@@ -42,6 +45,7 @@ impl OverlayVersion {
 pub(crate) enum DetectedOverlay {
     V1_0(v1_0::Overlay),
     V1_1(v1_1::Overlay),
+    V1_2(v1_2::Overlay),
 }
 
 impl DetectedOverlay {
@@ -49,6 +53,7 @@ impl DetectedOverlay {
         match self {
             DetectedOverlay::V1_0(_) => OverlayVersion::V1_0,
             DetectedOverlay::V1_1(_) => OverlayVersion::V1_1,
+            DetectedOverlay::V1_2(_) => OverlayVersion::V1_2,
         }
     }
 
@@ -60,20 +65,33 @@ impl DetectedOverlay {
         match self {
             DetectedOverlay::V1_0(o) => o.validate(options),
             DetectedOverlay::V1_1(o) => o.validate(options),
+            DetectedOverlay::V1_2(o) => o.validate(options),
         }
     }
 
-    /// Upconvert to `target`. Same-version is the identity; v1.0 → v1.1
-    /// uses the `From` impl. Downconversion is not supported.
+    /// Upconvert to `target`. Same-version is the identity; each step up
+    /// uses the `From` impl (v1.0 → v1.2 goes through v1.1).
+    /// Downconversion is not supported.
     pub(crate) fn convert_to(self, target: OverlayVersion) -> Result<DetectedOverlay> {
+        let source = self.version();
         match (self, target) {
             (DetectedOverlay::V1_0(o), OverlayVersion::V1_0) => Ok(DetectedOverlay::V1_0(o)),
             (DetectedOverlay::V1_0(o), OverlayVersion::V1_1) => {
                 Ok(DetectedOverlay::V1_1(v1_1::Overlay::from(o)))
             }
+            (DetectedOverlay::V1_0(o), OverlayVersion::V1_2) => Ok(DetectedOverlay::V1_2(
+                v1_2::Overlay::from(v1_1::Overlay::from(o)),
+            )),
             (DetectedOverlay::V1_1(o), OverlayVersion::V1_1) => Ok(DetectedOverlay::V1_1(o)),
-            (DetectedOverlay::V1_1(_), OverlayVersion::V1_0) => bail!(
-                "downconversion is not supported: input is Overlay 1.1, target is Overlay 1.0",
+            (DetectedOverlay::V1_1(o), OverlayVersion::V1_2) => {
+                Ok(DetectedOverlay::V1_2(v1_2::Overlay::from(o)))
+            }
+            (DetectedOverlay::V1_2(o), OverlayVersion::V1_2) => Ok(DetectedOverlay::V1_2(o)),
+            (DetectedOverlay::V1_1(_), OverlayVersion::V1_0)
+            | (DetectedOverlay::V1_2(_), OverlayVersion::V1_0 | OverlayVersion::V1_1) => bail!(
+                "downconversion is not supported: input is {}, target is {}",
+                source.label(),
+                target.label(),
             ),
         }
     }
@@ -86,6 +104,7 @@ impl DetectedOverlay {
         match self {
             DetectedOverlay::V1_0(o) => o.apply(target, options),
             DetectedOverlay::V1_1(o) => o.apply(target, options),
+            DetectedOverlay::V1_2(o) => o.apply(target, options),
         }
     }
 
@@ -97,12 +116,15 @@ impl DetectedOverlay {
             DetectedOverlay::V1_1(o) => {
                 serde_json::to_value(o).context("serializing Overlay 1.1 document")
             }
+            DetectedOverlay::V1_2(o) => {
+                serde_json::to_value(o).context("serializing Overlay 1.2 document")
+            }
         }
     }
 }
 
 /// Detect the overlay version by reading the top-level `overlay` field
-/// (`"1.0.x"` → v1.0, `"1.1.x"` → v1.1).
+/// (`"1.0.x"` → v1.0, `"1.1.x"` → v1.1, `"1.2.x"` → v1.2).
 pub(crate) fn detect_overlay(value: &Value) -> Result<OverlayVersion> {
     let obj = value
         .as_object()
@@ -116,6 +138,8 @@ pub(crate) fn detect_overlay(value: &Value) -> Result<OverlayVersion> {
         Ok(OverlayVersion::V1_0)
     } else if overlay.starts_with("1.1.") {
         Ok(OverlayVersion::V1_1)
+    } else if overlay.starts_with("1.2.") {
+        Ok(OverlayVersion::V1_2)
     } else {
         bail!("unsupported overlay version: {overlay}")
     }
@@ -137,6 +161,9 @@ pub(crate) fn detect_or_use_overlay(
         ),
         OverlayVersion::V1_1 => DetectedOverlay::V1_1(
             serde_json::from_value(value).context("deserializing as Overlay 1.1")?,
+        ),
+        OverlayVersion::V1_2 => DetectedOverlay::V1_2(
+            serde_json::from_value(value).context("deserializing as Overlay 1.2")?,
         ),
     })
 }
@@ -340,6 +367,17 @@ mod tests {
         })
     }
 
+    fn v1_2_overlay() -> Value {
+        json!({
+            "overlay": "1.2.0",
+            "info": { "title": "T", "version": "1.0.0" },
+            "actions": [ { "$ref": "#/components/actions/describe", "target": "$.info" } ],
+            "components": {
+                "actions": { "describe": { "fields": { "update": { "description": "d" } } } }
+            }
+        })
+    }
+
     /// A temp file that cleans itself up on drop (mirrors the helper in
     /// `main.rs`'s test module).
     struct TempFile(PathBuf);
@@ -376,6 +414,10 @@ mod tests {
             "actions": [ { "target": "$", "remove": true } ]
         });
         assert_eq!(detect_overlay(&v11).unwrap(), OverlayVersion::V1_1);
+        assert_eq!(
+            detect_overlay(&v1_2_overlay()).unwrap(),
+            OverlayVersion::V1_2
+        );
     }
 
     #[test]
@@ -414,6 +456,41 @@ mod tests {
         let d = detect_or_use_overlay(None, v1_1_overlay()).unwrap();
         let err = d.convert_to(OverlayVersion::V1_0).unwrap_err();
         assert!(err.to_string().contains("downconversion is not supported"));
+    }
+
+    #[test]
+    fn convert_upconverts_to_v1_2_and_rejects_downconvert_from_it() {
+        for (source, from) in [(v1_0_overlay(), "1.0.0"), (v1_1_overlay(), "1.1.0")] {
+            let d = detect_or_use_overlay(None, source).unwrap();
+            let value = d.convert_to(OverlayVersion::V1_2).unwrap().into_value();
+            assert_eq!(value.unwrap()["overlay"], "1.2.0", "from {from}");
+        }
+
+        let d = detect_or_use_overlay(None, v1_2_overlay()).unwrap();
+        assert_eq!(
+            d.convert_to(OverlayVersion::V1_2).unwrap().version(),
+            OverlayVersion::V1_2
+        );
+
+        for target in [OverlayVersion::V1_0, OverlayVersion::V1_1] {
+            let d = detect_or_use_overlay(None, v1_2_overlay()).unwrap();
+            let err = d.convert_to(target).unwrap_err().to_string();
+            assert!(
+                err.contains("input is Overlay 1.2") && err.contains(target.label()),
+                "got: {err}",
+            );
+        }
+    }
+
+    #[test]
+    fn v1_2_overlay_validates_and_applies_through_its_reference() {
+        let d = detect_or_use_overlay(None, v1_2_overlay()).unwrap();
+        assert_eq!(d.label(), "Overlay 1.2");
+        d.validate(EnumSet::empty()).expect("valid v1.2 overlay");
+        let mut spec = json!({ "openapi": "3.1.0", "info": { "title": "API", "version": "1" } });
+        let report = d.apply(&mut spec, EnumSet::empty()).unwrap();
+        assert_eq!(report.actions[0].matched, 1);
+        assert_eq!(spec["info"]["description"], "d");
     }
 
     #[test]

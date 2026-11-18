@@ -5,7 +5,6 @@
 //! RFC 9535 JSONPath in `target` and then either merges `update` into
 //! each match or removes them.
 
-use crate::common::apply::compile_path;
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -44,19 +43,9 @@ impl Action {
     }
 }
 
-/// Validate that `value` is a non-empty, syntactically valid RFC 9535
-/// JSONPath, recording diagnostics under `<current>.<field>`.
-fn validate_jsonpath(value: &str, ctx: &mut Context, field: &str) {
-    if value.is_empty() {
-        ctx.error_field(field, "must not be empty");
-    } else if let Err(msg) = compile_path(value) {
-        ctx.error_field(field, format!("invalid JSONPath query: {msg}"));
-    }
-}
-
 impl ValidateWithContext for Action {
     fn validate_with_context(&self, ctx: &mut Context) {
-        validate_jsonpath(&self.target, ctx, "target");
+        ctx.require_jsonpath("target", &self.target);
         // The spec says `update` "has no impact if the `remove` field
         // of this action object is `true`", but at validation time we
         // reject the combo because it almost certainly indicates an

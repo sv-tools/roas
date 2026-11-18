@@ -1,0 +1,34 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "Pets", "version": "1.0.0" },
+  "paths": {
+    "/pets": {
+      "get": {
+        "summary": "List pets",
+        "tags": ["pets"],
+        "responses": {
+          "200": { "description": "The pets" },
+          "500": { "description": "Server error" }
+        }
+      },
+      "post": {
+        "summary": "Add a pet",
+        "tags": ["pets"],
+        "responses": {
+          "201": { "description": "Added" },
+          "500": { "description": "Server error" }
+        }
+      }
+    },
+    "/pets/{id}": {
+      "get": {
+        "summary": "Get a pet",
+        "tags": ["pets"],
+        "responses": {
+          "200": { "description": "The pet" },
+          "500": { "description": "Server error" }
+        }
+      }
+    }
+  }
+}

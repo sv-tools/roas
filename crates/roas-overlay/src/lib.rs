@@ -2,7 +2,8 @@
 //!
 //! Implements the OpenAPI Overlay Specification
 //! ([v1.0](https://spec.openapis.org/overlay/v1.0.0.html) /
-//! [v1.1](https://spec.openapis.org/overlay/v1.1.0.html)):
+//! [v1.1](https://spec.openapis.org/overlay/v1.1.0.html) /
+//! [v1.2](https://spec.openapis.org/overlay/v1.2.0.html)):
 //! a sidecar document format that transforms OpenAPI documents through
 //! an ordered list of [JSONPath](https://www.rfc-editor.org/rfc/rfc9535)
 //! actions (`update`, `remove`, and v1.1's `copy`).
@@ -20,6 +21,8 @@
 //!   [`ApplyReport`](apply::ApplyReport), [`ApplyError`](apply::ApplyError).
 //! - [`v1_0`] — Overlay v1.0 document model + `Validate` / `Apply` impls.
 //! - [`v1_1`] — Overlay v1.1 document model + `Validate` / `Apply` impls.
+//! - [`v1_2`] — Overlay v1.2 document model (reusable actions, `$self`)
+//!   + `Validate` / `Apply` impls.
 //!
 //! ## Applying an overlay
 //!
@@ -58,17 +61,21 @@
 //!
 //! ## Versions
 //!
-//! v1.0.x ([`v1_0`]) and v1.1.x ([`v1_1`], default feature) are both
-//! implemented; enable whichever you need. With both features enabled,
-//! an `impl From<v1_0::Overlay> for v1_1::Overlay` is available for
-//! upconverting an existing v1.0 document.
+//! v1.0.x ([`v1_0`]), v1.1.x ([`v1_1`], default feature) and v1.2.x
+//! ([`v1_2`]) are implemented; enable whichever you need. With
+//! neighbouring features enabled, `impl From<v1_0::Overlay> for
+//! v1_1::Overlay` and `impl From<v1_1::Overlay> for v1_2::Overlay` are
+//! available for upconverting an existing document.
 
 // Everything internal here is reached through a versioned
 // document: the validation impls, the walkers, the shared
 // helpers. Build with no version feature at all and none of it
 // is called — which is that configuration saying so, not code
 // nobody uses. Every real configuration keeps the lint.
-#![cfg_attr(not(any(feature = "v1_0", feature = "v1_1")), allow(dead_code))]
+#![cfg_attr(
+    not(any(feature = "v1_0", feature = "v1_1", feature = "v1_2")),
+    allow(dead_code)
+)]
 
 pub mod apply;
 pub mod common;
@@ -79,3 +86,6 @@ pub mod v1_0;
 
 #[cfg(feature = "v1_1")]
 pub mod v1_1;
+
+#[cfg(feature = "v1_2")]
+pub mod v1_2;
