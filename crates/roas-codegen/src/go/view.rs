@@ -626,15 +626,81 @@ fn assign_files(types: &mut [TypeView], config: &Config) {
     }
 }
 
+/// Whether a Go type spelling names an unqualified, unexported type that
+/// Go does not predeclare: one a local may shadow.
+fn names_unexported_type(ty: &str) -> bool {
+    const PREDECLARED: &[&str] = &[
+        "any",
+        "bool",
+        "byte",
+        "comparable",
+        "complex64",
+        "complex128",
+        "error",
+        "float32",
+        "float64",
+        "int",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "rune",
+        "string",
+        "uint",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "uintptr",
+    ];
+    let bytes = ty.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
+    let mut i = 0;
+    let mut after_dot = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if ident(b) && !b.is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && ident(bytes[i]) {
+                i += 1;
+            }
+            let word = &ty[start..i];
+            let qualifier = ty[i..].trim_start().starts_with('.');
+            if !after_dot
+                && !qualifier
+                && !word.starts_with(|c: char| c.is_uppercase())
+                && !PREDECLARED.contains(&word)
+                && !super::naming::is_keyword(word)
+            {
+                return true;
+            }
+            after_dot = false;
+        } else if b.is_ascii_digit() {
+            while i < bytes.len() && ident(bytes[i]) {
+                i += 1;
+            }
+            after_dot = false;
+        } else {
+            if !b.is_ascii_whitespace() {
+                after_dot = b == b'.';
+            }
+            i += 1;
+        }
+    }
+    false
+}
+
 impl Builder<'_> {
     /// The spelling validation decodes a member of `view` into: `ty`
-    /// itself, or, when it names a substitution's package, an alias
+    /// itself, or, when it names a substitution's package or a type of
+    /// the package's own spelled in lower case, an alias
     /// `{prefix}{view.name}` declared at package level, where no local of
-    /// `validateInto` shadows that package.
+    /// `validateInto` shadows that name.
     fn member_ty(&self, view: &mut TypeView, prefix: String, ty: String) -> String {
         let substituted = super::imports::qualifiers(&ty)
             .iter()
-            .any(|q| !BUILTIN_IMPORTS.iter().any(|(_, name)| name == q));
+            .any(|q| !BUILTIN_IMPORTS.iter().any(|(_, name)| name == q))
+            || names_unexported_type(&ty);
         if !self.config.validation || !substituted {
             return ty;
         }

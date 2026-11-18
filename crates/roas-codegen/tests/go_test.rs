@@ -1109,3 +1109,52 @@ fn a_substitution_package_named_like_a_member_alias_is_refused() {
     };
     assert!(message.contains("pattern0OfClosed"), "{message}");
 }
+
+#[test]
+fn an_unqualified_substitution_named_like_a_validation_local_compiles() {
+    // A type of the package's own, spelled in lower case, is aliased like
+    // a package's: a local of `validateInto` may shadow it too.
+    for local in ["value", "pointer", "matched", "m", "r"] {
+        let toml = format!("validation = true\n[substitutions.thing.go]\nname = \"{local}\"\n");
+        let thing = serde_json::json!({"type": "string", "format": "thing"});
+        let components = serde_json::json!({
+            "Closed": {"type": "object", "patternProperties": {"^a": thing}, "additionalProperties": false},
+            "Listed": {"type": "object", "patternProperties": {"^a": {"type": "array", "items": thing}}, "additionalProperties": false},
+            "Plain": {"type": "object", "patternProperties": {"^a": {"type": "string", "format": "date"}}, "additionalProperties": false}
+        });
+        let Some(generation) = go(components, &toml) else {
+            return;
+        };
+        let mut generation = match generation {
+            Ok(generation) => generation,
+            Err(GenerateError::Config(_)) if local != "value" => continue,
+            Err(error) => panic!("{local}: {error:?}"),
+        };
+        let code = generation.files.remove(0).contents;
+        let squeezed = squeezed(&code);
+        assert!(
+            squeezed.contains(&format!("type pattern0OfClosed = {local}")),
+            "{squeezed}"
+        );
+        assert!(
+            squeezed.contains(&format!("type pattern0OfListed = []{local}")),
+            "{squeezed}"
+        );
+        assert!(!squeezed.contains("pattern0OfPlain"), "{squeezed}");
+        let own = format!("package {}\n\ntype {local} string\n", package_of(&code));
+        let Some(result) = vet_with(&code, &format!("own-{local}"), &[("own.go", &own)]) else {
+            return;
+        };
+        if let Err(error) = result {
+            panic!("{local}: go vet failed\n{error}\n{code}");
+        }
+    }
+}
+
+/// The package clause of a generated file.
+fn package_of(code: &str) -> &str {
+    code.lines()
+        .find_map(|line| line.strip_prefix("package "))
+        .expect("a package clause")
+        .trim()
+}
