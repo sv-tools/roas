@@ -44,6 +44,11 @@ pub(crate) fn render(
         .collect())
 }
 
+/// The templates rendering starts from, each with what it renders.
+pub(crate) fn entries(config: &Config) -> Vec<(&'static str, String)> {
+    render::entries(config)
+}
+
 pub(crate) fn emit(ir: &Ir, config: &Config, source: &str) -> Result<Output, GenerateError> {
     let built = view::build(ir, config, source)?;
     let mut files = Vec::new();

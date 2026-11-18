@@ -8,6 +8,26 @@ use crate::templates::Renderer;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+const FILE: &str = "go/file.go.jinja";
+const PACKAGE: &str = "go/package.go.jinja";
+const TYPE: &str = "go/type.go.jinja";
+
+/// The templates [`render`] starts from under `config`, each with what it
+/// renders.
+pub(crate) fn entries(config: &Config) -> Vec<(&'static str, String)> {
+    let file = &config.go.file;
+    match config.layout {
+        Layout::OneFilePerModule => vec![(FILE, format!("`{file}.go`, with the package's context"))],
+        Layout::FilePerType => vec![
+            (PACKAGE, format!("`{file}.go`, with the package's context and the imports it uses")),
+            (
+                TYPE,
+                "`<file>.go` for each type, with the package's context holding that type alone and the imports it uses".to_owned(),
+            ),
+        ],
+    }
+}
+
 /// Every file of the package, as the templates render them: one, or under
 /// `layout = "file_per_type"` the package file and a file per type.
 pub(crate) fn render(
@@ -18,21 +38,14 @@ pub(crate) fn render(
     let file = &built.file;
     let package_path = PathBuf::from(format!("{}.go", config.go.file));
     if config.layout == Layout::OneFilePerModule {
-        let text = renderer.render("go/file.go.jinja", file, "\n")?;
+        let text = renderer.render(FILE, file, "\n")?;
         return Ok(vec![(package_path, text)]);
     }
     // The extra imports some file took.
     let mut placed = BTreeSet::new();
     let mut files = vec![(
         package_path,
-        render_used(
-            &renderer,
-            "go/package.go.jinja",
-            file.clone(),
-            built,
-            true,
-            &mut placed,
-        )?,
+        render_used(&renderer, PACKAGE, file.clone(), built, true, &mut placed)?,
     )];
     // Every view a type file renders, short of its type: cloned once,
     // not with every type in each file.
@@ -51,14 +64,7 @@ pub(crate) fn render(
         };
         files.push((
             PathBuf::from(format!("{stem}.go")),
-            render_used(
-                &renderer,
-                "go/type.go.jinja",
-                view,
-                built,
-                false,
-                &mut placed,
-            )?,
+            render_used(&renderer, TYPE, view, built, false, &mut placed)?,
         ));
     }
     // One no file names by the name its path suggests is likely used

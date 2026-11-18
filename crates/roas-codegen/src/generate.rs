@@ -582,6 +582,28 @@ pub fn render(
     }
 }
 
+/// A template directory that changes nothing, to show what can be
+/// changed: for each default template rendering under `config` (by its
+/// `target`, `layout` and `validation`), and each one it includes, a template at the
+/// path an override takes, extending the default and filling every block
+/// with the default's content, plus the `roas-templates.toml` manifest.
+/// Used as `template_dir` it renders exactly what the defaults do. It
+/// describes the defaults, whatever `template_dir` says; it is what
+/// `roas openapi generate --dump-scaffold` writes.
+pub fn scaffold(config: &Config) -> Result<Vec<GeneratedFile>, GenerateError> {
+    let entries = match config.target {
+        Target::Rust => rust::entries(config),
+        Target::Go => go::entries(config),
+    };
+    // Validation renders only when it is on.
+    let unused: &[&str] = if config.validation {
+        &[]
+    } else {
+        &["rust/validate.rs.jinja", "go/validate.go.jinja"]
+    };
+    crate::templates::scaffold(&entries, unused)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
