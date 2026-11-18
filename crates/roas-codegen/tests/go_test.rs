@@ -405,6 +405,12 @@ fn have_go() -> bool {
 /// `go vet` over a generated file in a module of its own; `None` without
 /// Go 1.27 or later.
 fn vet(code: &str, tag: &str) -> Option<Result<(), String>> {
+    vet_with(code, tag, &[])
+}
+
+/// `go vet` over a generated file beside packages of the module's own,
+/// each a path in it and its source.
+fn vet_with(code: &str, tag: &str, packages: &[(&str, &str)]) -> Option<Result<(), String>> {
     if !have_go() {
         return None;
     }
@@ -413,6 +419,11 @@ fn vet(code: &str, tag: &str) -> Option<Result<(), String>> {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("go.mod"), "module vet\n\ngo 1.27\n").unwrap();
     std::fs::write(dir.join("types.go"), code).unwrap();
+    for (path, source) in packages {
+        let file = dir.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, source).unwrap();
+    }
     let output = std::process::Command::new("go")
         .args(["vet", "./..."])
         .current_dir(&dir)
@@ -950,5 +961,239 @@ fn file_per_type_leaves_a_substitution_import_only_to_an_extra_import_of_its_nam
         );
         // The module is a dependency either way.
         assert_eq!(generation.dependencies.go.len(), 1, "{extra}");
+    }
+}
+
+#[test]
+fn a_substitution_package_named_like_a_validation_local_compiles() {
+    // Each package is named like a name in scope where validation decodes
+    // a member: the report, the pointer, whether a pattern matched, and
+    // the match itself, which generate; and the receiver, the member's
+    // name and value, and whether its pattern compiled, which are refused
+    // or compile, never generated to fail.
+    let generating = ["r", "pointer", "matched", "m"];
+    for local in ["r", "pointer", "matched", "m", "v", "name", "value", "ok"] {
+        let toml = format!(
+            "validation = true\n[substitutions.thing.go]\nname = \"{local}.Thing\"\nimport = \"vet/{local}\"\n"
+        );
+        let thing = serde_json::json!({"type": "string", "format": "thing"});
+        let components = serde_json::json!({
+            "Closed": {"type": "object", "patternProperties": {"^a": thing}, "additionalProperties": false},
+            "Open": {"type": "object", "patternProperties": {"^a": {"type": "string"}}, "additionalProperties": thing},
+            "Listed": {"type": "object", "patternProperties": {"^a": {"type": "array", "items": thing}}, "additionalProperties": false},
+            "Field": {"type": "object", "properties": {"a1": {"type": "string"}}, "patternProperties": {"^a": thing}}
+        });
+        let Some(generation) = go(components, &toml) else {
+            return;
+        };
+        let mut generation = match generation {
+            Ok(generation) => generation,
+            Err(GenerateError::Config(_)) if !generating.contains(&local) => continue,
+            Err(error) => panic!("{local}: {error:?}"),
+        };
+        assert!(!generation.has_errors(), "{:?}", generation.diagnostics);
+        let code = generation.files.remove(0).contents;
+        // Only a type naming the package is aliased.
+        let squeezed = squeezed(&code);
+        for alias in [
+            format!("type pattern0OfClosed = {local}.Thing"),
+            format!("type othersOfOpen = {local}.Thing"),
+            format!("type pattern0OfListed = []{local}.Thing"),
+            format!("type pattern0OfField = {local}.Thing"),
+        ] {
+            assert!(squeezed.contains(&alias), "{alias}: {squeezed}");
+        }
+        assert!(!squeezed.contains("pattern0OfOpen"), "{squeezed}");
+        let package = format!("package {local}\n\ntype Thing string\n");
+        let path = format!("{local}/{local}.go");
+        let Some(result) = vet_with(&code, local, &[(&path, &package)]) else {
+            return;
+        };
+        if let Err(error) = result {
+            panic!("{local}: go vet failed\n{error}\n{code}");
+        }
+    }
+}
+
+#[test]
+fn file_per_type_declares_a_member_alias_beside_its_type() {
+    let toml = "layout = \"file_per_type\"\nvalidation = true\n[substitutions.date-time.go]\nname = \"time.Time\"\nimport = \"time\"\n";
+    let components = serde_json::json!({
+        "Log": {"type": "object", "patternProperties": {"^at": {"type": "string", "format": "date-time"}}, "additionalProperties": false},
+        "Other": {"type": "string"}
+    });
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let generation = result.expect("generates");
+    let log = generation
+        .files
+        .iter()
+        .find(|f| f.path == Path::new("log.go"))
+        .unwrap();
+    let code = squeezed(&log.contents);
+    assert!(code.contains("type pattern0OfLog = time.Time"), "{code}");
+    assert!(code.contains("\"time\""), "{code}");
+    assert!(code.contains("new(pattern0OfLog)"), "{code}");
+}
+
+#[test]
+fn a_validate_override_keeps_the_member_aliases() {
+    // An override of the `validate` block written before the aliases
+    // existed: they are declared outside it.
+    let dir = std::env::temp_dir().join(format!(
+        "roas-codegen-validate-override-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("go")).unwrap();
+    std::fs::write(dir.join("roas-templates.toml"), "template_api = 1\n").unwrap();
+    std::fs::write(
+        dir.join("go/validate.go.jinja"),
+        r#"{% extends "builtin/go/validate.go.jinja" %}{% block validate %}
+// Validate is overridden.
+func (v {{ t.name }}) Validate() *ValidationReport {
+	r := &ValidationReport{}
+	v.validateInto("", r)
+	return r
+}
+
+func (v {{ t.name }}) validateInto(pointer string, r *ValidationReport) {
+{% for line in t.validate %}	{{ line }}
+{% endfor %}}
+{% if t.validate_null %}
+func (v {{ t.name }}) validateNull(pointer string, r *ValidationReport) {
+{% for line in t.validate_null %}	{{ line }}
+{% endfor %}}
+{% endif %}{% endblock %}"#,
+    )
+    .unwrap();
+    let toml = format!(
+        "template_dir = {:?}\nvalidation = true\n[substitutions.date-time.go]\nname = \"time.Time\"\nimport = \"time\"\n",
+        dir.to_str().unwrap()
+    );
+    let components = serde_json::json!({
+        "Log": {"type": "object", "patternProperties": {"^at": {"type": "string", "format": "date-time"}}, "additionalProperties": false}
+    });
+    let result = go(components, &toml);
+    let _ = std::fs::remove_dir_all(&dir);
+    let Some(result) = result else {
+        return;
+    };
+    let mut generation = result.expect("generates");
+    let code = generation.files.remove(0).contents;
+    assert!(code.contains("// Validate is overridden."), "{code}");
+    assert!(
+        squeezed(&code).contains("type pattern0OfLog = time.Time"),
+        "{code}"
+    );
+    let Some(result) = vet(&code, "validate-override") else {
+        return;
+    };
+    if let Err(error) = result {
+        panic!("go vet failed\n{error}\n{code}");
+    }
+}
+
+#[test]
+fn a_substitution_package_named_like_a_member_alias_is_refused() {
+    let toml = "validation = true\n[substitutions.thing.go]\nname = \"pattern0OfClosed.Thing\"\nimport = \"example.com/x/pattern0OfClosed\"\n";
+    let components = serde_json::json!({
+        "Closed": {"type": "object", "patternProperties": {"^a": {"type": "string", "format": "thing"}}, "additionalProperties": false}
+    });
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let GenerateError::Config(message) = result.unwrap_err() else {
+        panic!("not a config error");
+    };
+    assert!(message.contains("pattern0OfClosed"), "{message}");
+}
+
+#[test]
+fn an_unqualified_substitution_named_like_a_validation_local_compiles() {
+    // A type of the package's own, spelled in lower case, is aliased like
+    // a package's: a local of `validateInto` may shadow it too.
+    for local in ["value", "pointer", "matched", "m", "r"] {
+        let toml = format!("validation = true\n[substitutions.thing.go]\nname = \"{local}\"\n");
+        let thing = serde_json::json!({"type": "string", "format": "thing"});
+        let components = serde_json::json!({
+            "Closed": {"type": "object", "patternProperties": {"^a": thing}, "additionalProperties": false},
+            "Listed": {"type": "object", "patternProperties": {"^a": {"type": "array", "items": thing}}, "additionalProperties": false},
+            "Plain": {"type": "object", "patternProperties": {"^a": {"type": "string", "format": "date"}}, "additionalProperties": false}
+        });
+        let Some(generation) = go(components, &toml) else {
+            return;
+        };
+        let mut generation = match generation {
+            Ok(generation) => generation,
+            Err(GenerateError::Config(_)) if local != "value" => continue,
+            Err(error) => panic!("{local}: {error:?}"),
+        };
+        let code = generation.files.remove(0).contents;
+        let squeezed = squeezed(&code);
+        assert!(
+            squeezed.contains(&format!("type pattern0OfClosed = {local}")),
+            "{squeezed}"
+        );
+        assert!(
+            squeezed.contains(&format!("type pattern0OfListed = []{local}")),
+            "{squeezed}"
+        );
+        assert!(!squeezed.contains("pattern0OfPlain"), "{squeezed}");
+        let own = format!("package {}\n\ntype {local} string\n", package_of(&code));
+        let Some(result) = vet_with(&code, &format!("own-{local}"), &[("own.go", &own)]) else {
+            return;
+        };
+        if let Err(error) = result {
+            panic!("{local}: go vet failed\n{error}\n{code}");
+        }
+    }
+}
+
+/// The package clause of a generated file.
+fn package_of(code: &str) -> &str {
+    code.lines()
+        .find_map(|line| line.strip_prefix("package "))
+        .expect("a package clause")
+        .trim()
+}
+
+#[test]
+fn an_unqualified_substitution_after_an_ellipsis_is_aliased() {
+    let toml = "validation = true\n[substitutions.thing.go]\nname = \"func(...value) error\"\n";
+    let components = serde_json::json!({
+        "Bag": {"type": "object", "patternProperties": {"^a": {"type": "string", "format": "thing"}}, "additionalProperties": false}
+    });
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let code = squeezed(&result.expect("generates").files.remove(0).contents);
+    assert!(
+        code.contains("type pattern0OfBag = func(...value) error"),
+        "{code}"
+    );
+}
+
+#[test]
+fn a_substitution_spelled_like_a_member_alias_is_refused() {
+    // Aliased itself, or held by a field of another type.
+    for toml in [
+        "validation = true\n[substitutions.thing.go]\nname = \"pattern0OfBag\"\n",
+        "validation = true\n[substitutions.thing.go]\nname = \"value\"\n[substitutions.other.go]\nname = \"pattern0OfBag\"\n",
+        // A package whose path does not say its name.
+        "validation = true\n[substitutions.thing.go]\nname = \"pattern0OfBag.Thing\"\nimport = \"example.com/x/foo\"\n",
+    ] {
+        let components = serde_json::json!({
+            "Bag": {"type": "object", "patternProperties": {"^a": {"type": "string", "format": "thing"}}, "additionalProperties": false},
+            "Other": {"type": "object", "properties": {"o": {"type": "string", "format": "other"}}}
+        });
+        let Some(result) = go(components, toml) else {
+            return;
+        };
+        let GenerateError::Config(message) = result.unwrap_err() else {
+            panic!("not a config error");
+        };
+        assert!(message.contains("pattern0OfBag"), "{message}");
     }
 }

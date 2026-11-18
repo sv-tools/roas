@@ -164,6 +164,13 @@ pub(crate) struct SupportView {
     pub member_patterns: bool,
 }
 
+/// `type {name} = {ty}`.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct AliasView {
+    pub name: String,
+    pub ty: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct FieldView {
     pub name: String,
@@ -249,6 +256,11 @@ pub(crate) struct TypeView {
     /// The Go spelling of the `additionalProperties` schema beside them.
     #[serde(skip)]
     pub others_ty: Option<String>,
+    /// Package-level aliases of the member types validation decodes into
+    /// that name a substitution's package or a lower-case type of the
+    /// package's own: inside `validateInto` a local, such as the report
+    /// `r`, may shadow either.
+    pub validate_aliases: Vec<AliasView>,
     /// A member name no struct tag can carry: the struct writes itself.
     pub marshal: bool,
     /// The raw constructor of a composed holder.
@@ -493,6 +505,35 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 used.insert(local, "a name the generated validation declares");
             }
         }
+        let aliases: BTreeSet<&str> = types
+            .iter()
+            .flat_map(|t| &t.validate_aliases)
+            .map(|alias| alias.name.as_str())
+            .collect();
+        // A substitution spelled like an alias would name the alias, or
+        // the alias be declared as itself.
+        let spellings = config
+            .substitutions
+            .values()
+            .filter_map(|s| s.go.as_ref())
+            .map(|go| go.name.as_str());
+        for spelling in spellings {
+            // Unqualified, or a package qualifier: an import path need
+            // not say the package's name.
+            let qualifiers = super::imports::qualifiers(spelling);
+            if let Some(name) = unqualified_names(spelling)
+                .into_iter()
+                .chain(qualifiers.iter().map(String::as_str))
+                .find(|name| aliases.contains(name))
+            {
+                return Err(GenerateError::Config(format!(
+                    "substitution spelling {spelling:?} names `{name}`, which the generated validation declares"
+                )));
+            }
+        }
+        for alias in &aliases {
+            used.insert(alias, "a name the generated validation declares");
+        }
         // The `Decimal` methods' receiver, in the package file.
         if builder.support.decimal && config.layout == Layout::FilePerType {
             used.insert("x", "a name the generated code declares");
@@ -612,7 +653,102 @@ fn assign_files(types: &mut [TypeView], config: &Config) {
     }
 }
 
+/// The names a Go type spelling uses unqualified: neither a package
+/// qualifier nor a selector after one.
+fn unqualified_names(ty: &str) -> Vec<&str> {
+    let bytes = ty.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut after_dot = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if ident(b) && !b.is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && ident(bytes[i]) {
+                i += 1;
+            }
+            let rest = ty[i..].trim_start();
+            let qualifier = rest.starts_with('.') && !rest.starts_with("...");
+            if !after_dot && !qualifier {
+                out.push(&ty[start..i]);
+            }
+            after_dot = false;
+        } else if b.is_ascii_digit() {
+            while i < bytes.len() && ident(bytes[i]) {
+                i += 1;
+            }
+            after_dot = false;
+        } else if bytes[i..].starts_with(b"...") {
+            // An ellipsis, not a selector.
+            i += 3;
+            after_dot = false;
+        } else {
+            if !b.is_ascii_whitespace() {
+                after_dot = b == b'.';
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Whether a Go type spelling names an unqualified, unexported type that
+/// Go does not predeclare: one a local may shadow.
+fn names_unexported_type(ty: &str) -> bool {
+    const PREDECLARED: &[&str] = &[
+        "any",
+        "bool",
+        "byte",
+        "comparable",
+        "complex64",
+        "complex128",
+        "error",
+        "float32",
+        "float64",
+        "int",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "rune",
+        "string",
+        "uint",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "uintptr",
+    ];
+    unqualified_names(ty).into_iter().any(|word| {
+        !word.starts_with(|c: char| c.is_uppercase())
+            && !PREDECLARED.contains(&word)
+            && !super::naming::is_keyword(word)
+    })
+}
+
 impl Builder<'_> {
+    /// The spelling validation decodes a member of `view` into: `ty`
+    /// itself, or, when it names a substitution's package or a type of
+    /// the package's own spelled in lower case, an alias
+    /// `{prefix}{view.name}` declared at package level, where no local of
+    /// `validateInto` shadows that name.
+    fn member_ty(&self, view: &mut TypeView, prefix: String, ty: String) -> String {
+        let substituted = super::imports::qualifiers(&ty)
+            .iter()
+            .any(|q| !BUILTIN_IMPORTS.iter().any(|(_, name)| name == q))
+            || names_unexported_type(&ty);
+        if !self.config.validation || !substituted {
+            return ty;
+        }
+        let name = format!("{prefix}{}", view.name);
+        view.validate_aliases.push(AliasView {
+            name: name.clone(),
+            ty,
+        });
+        name
+    }
+
     fn allocate_type_names(&mut self) -> Result<(), GenerateError> {
         // The helpers every file may declare.
         for reserved in ["Nullable", "Int64", "Int32", "Null"] {
@@ -871,6 +1007,7 @@ impl Builder<'_> {
             member_patterns: Vec::new(),
             pattern_tys: Vec::new(),
             others_ty: None,
+            validate_aliases: Vec::new(),
             marshal: false,
             from_raw: String::new(),
             validate: None,
@@ -1073,15 +1210,19 @@ impl Builder<'_> {
                     self.support.member_patterns = true;
                     view.member_patterns = patterns.iter().map(|p| quote(p)).collect();
                 }
-                for pattern in &s.patterns {
+                for (i, pattern) in s.patterns.iter().enumerate() {
                     let spelled = match pattern.branch() {
-                        Some(b) => Some(self.spell(unboxed(&b.ty))?),
+                        Some(b) => {
+                            let ty = self.spell(unboxed(&b.ty))?;
+                            Some(self.member_ty(view, format!("pattern{i}Of"), ty))
+                        }
                         None => None,
                     };
                     view.pattern_tys.push(spelled);
                 }
                 if let crate::ir::Others::Schema(b) = &s.others {
-                    view.others_ty = Some(self.spell(unboxed(&b.ty))?);
+                    let ty = self.spell(unboxed(&b.ty))?;
+                    view.others_ty = Some(self.member_ty(view, "othersOf".to_owned(), ty));
                 }
                 if let Additional::CatchAll(ty) = &s.additional {
                     let inner = self.spell(unboxed(ty))?;
