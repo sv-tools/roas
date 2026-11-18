@@ -819,6 +819,19 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     Ok(())
 }
 
+/// Whether the last part of `path` is an entry of its directory spelled
+/// exactly so.
+fn spelled_exactly(path: &std::path::Path) -> bool {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return true;
+    };
+    std::fs::read_dir(parent).is_ok_and(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name() == name)
+    })
+}
+
 /// Refuses a scaffold file at `relative` under `dir` unless the path is
 /// free: every directory on the way is a real one, not a link or a file,
 /// and nothing is at the end.
@@ -844,6 +857,13 @@ fn scaffold_slot(dir: &std::path::Path, relative: &std::path::Path) -> anyhow::R
             ),
             Ok(meta) if !meta.is_dir() => bail!(
                 "--dump-scaffold: {} is not a directory; dump somewhere else",
+                path.display()
+            ),
+            // On a case-insensitive disk another spelling resolves here,
+            // and templates are named by the spelling on disk: written
+            // under it, the overrides would override nothing.
+            Ok(_) if !spelled_exactly(&path) => bail!(
+                "--dump-scaffold: {} exists under another spelling; dump somewhere else",
                 path.display()
             ),
             Ok(_) => {}
@@ -1320,6 +1340,21 @@ mod tests {
             assert!(error.contains("symbolic link"), "{error}");
             assert!(!linked.join("roas-templates.toml").exists());
             assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
+        }
+        // A directory spelled otherwise, which a case-insensitive disk
+        // resolves `rust` to: refused there.
+        let cased = dir.0.join("cased");
+        std::fs::create_dir_all(cased.join("RUST")).unwrap();
+        let mut dump = args(&spec, &out);
+        dump.dump_scaffold = Some(cased.clone());
+        let result = run_generate(dump);
+        if cased.join("rust").exists() {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("another spelling"), "{error}");
+            assert!(!cased.join("roas-templates.toml").exists());
+        } else {
+            result.unwrap();
+            assert!(cased.join("rust/module.rs.jinja").exists());
         }
     }
 
