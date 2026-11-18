@@ -1345,10 +1345,12 @@ mod tests {
         // resolves `rust` to: refused there.
         let cased = dir.0.join("cased");
         std::fs::create_dir_all(cased.join("RUST")).unwrap();
+        // Asked before the run, which creates `rust` where it is distinct.
+        let insensitive = cased.join("rust").exists();
         let mut dump = args(&spec, &out);
         dump.dump_scaffold = Some(cased.clone());
         let result = run_generate(dump);
-        if cased.join("rust").exists() {
+        if insensitive {
             let error = result.unwrap_err().to_string();
             assert!(error.contains("another spelling"), "{error}");
             assert!(!cased.join("roas-templates.toml").exists());
