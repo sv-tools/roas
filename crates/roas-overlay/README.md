@@ -14,8 +14,8 @@ This crate is a sibling of [`roas`](https://crates.io/crates/roas) (the typed pa
 | Overlay version | Feature flag     | Status         | Adds over the previous version                     |
 |-----------------|------------------|----------------|----------------------------------------------------|
 | 1.0             | `v1_0`           | ✅ implemented  | —                                                  |
-| 1.1             | `v1_1` (default) | ✅ implemented  | `copy` action, `info.description`                  |
-| 1.2             | `v1_2`           | ✅ implemented  | reusable actions (`components.actions`, `$ref`), `$self`, primitive targets |
+| 1.1             | `v1_1`           | ✅ implemented  | `copy` action, `info.description`                  |
+| 1.2             | `v1_2` (default) | ✅ implemented  | reusable actions (`components.actions`, `$ref`), `$self`, primitive targets |
 
 The version features are independent — enable whichever you need. With neighbouring versions enabled, `impl From<v1_0::Overlay> for v1_1::Overlay` and `impl From<v1_1::Overlay> for v1_2::Overlay` are available for upconverting an existing document.
 
@@ -30,11 +30,11 @@ The version features are independent — enable whichever you need. With neighbo
 ```rust
 use enumset::EnumSet;
 use roas_overlay::apply::Apply;
-use roas_overlay::v1_1::Overlay;
+use roas_overlay::v1_2::Overlay;
 use roas_overlay::validation::Validate;
 
 let overlay: Overlay = serde_json::from_str(r#"{
-    "overlay": "1.1.0",
+    "overlay": "1.2.0",
     "info": { "title": "Example", "version": "1.0.0" },
     "actions": [
         { "target": "$.info", "update": { "description": "Patched." } },
