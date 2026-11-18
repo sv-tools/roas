@@ -158,6 +158,20 @@ Diagnostics go to stderr. An error suppresses the affected types; by default it 
 
 `--config` takes the TOML file described in the [`roas-codegen` README](https://crates.io/crates/roas-codegen): type substitutions, renames, extra attributes, a header. Flags override it.
 
+`--apply <FILE>` (repeatable) applies OpenAPI Overlay documents to the description before it is validated, as `openapi convert --apply` does, so a description you do not own can be tailored for generation: a `format` a substitution keys on, an `x-rust-attrs` (with `--allow-codegen-extensions`). Overlays apply in order, and `--apply-option` takes `error-on-zero-match` and `error-on-mixed-kind-match`. Everything downstream sees the overlaid description: validation, `--print-context`, `--dump-rendered`, the generated files and `--check`, so pass the same overlays to `--check` as to the run that wrote the output. The manifest still records the description, not the overlays, as the label's source.
+
+```shell
+roas openapi generate --target rust --out src/api --apply formats.yaml spec.yaml
+```
+
+```yaml
+overlay: 1.0.0
+info: {title: formats, version: "1"}
+actions:
+  - target: $.components.schemas.Pet.properties.id
+    update: {format: uuid}
+```
+
 ### `overlay`
 
 Work with [OpenAPI Overlay](https://spec.openapis.org/overlay/v1.0.0.html) documents (v1.0, v1.1 and v1.2). The overlay version is auto-detected from the `overlay` field.

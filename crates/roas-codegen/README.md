@@ -241,7 +241,7 @@ fn save(generation: &Generation) -> Result<(), Box<dyn std::error::Error>> {
 - **One run at a time.** An operating-system lock on the output directory's `.roas-codegen.lock` spans the run, exclusive. Other output roots the run can reach, enclosing or nested, are locked shared, so siblings under one root run side by side while overlapping roots exclude each other. Enclosing roots are looked for up to the first shared, sticky directory such as `/tmp`, so other users' files there cannot block a run. Locks end with the process, so a killed run does not block the next; the lock files stay, as they mark the roots. Ownership is compared case-insensitively, and nothing below the output directory is reached through a symbolic link.
 - **Stale files are removed only if unedited.** A file the previous run wrote and this one does not is deleted when it still holds the generated content, and kept and reported otherwise.
 
-The `roas` command line wraps all of this as `roas openapi generate`, with `--check` for CI.
+The `roas` command line wraps all of this as `roas openapi generate`, with `--check` for CI and `--apply` to apply OpenAPI Overlays to the description first.
 
 ## License
 

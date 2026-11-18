@@ -317,7 +317,7 @@ fn run_overlay_apply(args: OverlayApplyArgs) -> Result<()> {
 }
 
 /// Apply each overlay at `paths` to `spec` in order. Shared by
-/// `overlay apply` and `convert --apply`. Each overlay is loaded with
+/// `overlay apply`, `convert --apply` and `generate --apply`. Each overlay is loaded with
 /// extension-based format detection and its version detected from the
 /// `overlay` field.
 pub(crate) fn apply_overlays(
