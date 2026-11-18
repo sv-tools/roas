@@ -968,8 +968,11 @@ fn file_per_type_leaves_a_substitution_import_only_to_an_extra_import_of_its_nam
 fn a_substitution_package_named_like_a_validation_local_compiles() {
     // Each package is named like a name in scope where validation decodes
     // a member: the report, the pointer, whether a pattern matched, and
-    // the match itself.
-    for local in ["r", "pointer", "matched", "m"] {
+    // the match itself, which generate; and the receiver, the member's
+    // name and value, and whether its pattern compiled, which are refused
+    // or compile, never generated to fail.
+    let generating = ["r", "pointer", "matched", "m"];
+    for local in ["r", "pointer", "matched", "m", "v", "name", "value", "ok"] {
         let toml = format!(
             "validation = true\n[substitutions.thing.go]\nname = \"{local}.Thing\"\nimport = \"vet/{local}\"\n"
         );
@@ -983,7 +986,11 @@ fn a_substitution_package_named_like_a_validation_local_compiles() {
         let Some(generation) = go(components, &toml) else {
             return;
         };
-        let mut generation = generation.expect("generates");
+        let mut generation = match generation {
+            Ok(generation) => generation,
+            Err(GenerateError::Config(_)) if !generating.contains(&local) => continue,
+            Err(error) => panic!("{local}: {error:?}"),
+        };
         assert!(!generation.has_errors(), "{:?}", generation.diagnostics);
         let code = generation.files.remove(0).contents;
         // Only a type naming the package is aliased.
@@ -1028,4 +1035,62 @@ fn file_per_type_declares_a_member_alias_beside_its_type() {
     assert!(code.contains("type pattern0OfLog = time.Time"), "{code}");
     assert!(code.contains("\"time\""), "{code}");
     assert!(code.contains("new(pattern0OfLog)"), "{code}");
+}
+
+#[test]
+fn a_validate_override_keeps_the_member_aliases() {
+    // An override of the `validate` block written before the aliases
+    // existed: they are declared outside it.
+    let dir = std::env::temp_dir().join(format!(
+        "roas-codegen-validate-override-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("go")).unwrap();
+    std::fs::write(dir.join("roas-templates.toml"), "template_api = 1\n").unwrap();
+    std::fs::write(
+        dir.join("go/validate.go.jinja"),
+        r#"{% extends "builtin/go/validate.go.jinja" %}{% block validate %}
+// Validate is overridden.
+func (v {{ t.name }}) Validate() *ValidationReport {
+	r := &ValidationReport{}
+	v.validateInto("", r)
+	return r
+}
+
+func (v {{ t.name }}) validateInto(pointer string, r *ValidationReport) {
+{% for line in t.validate %}	{{ line }}
+{% endfor %}}
+{% if t.validate_null %}
+func (v {{ t.name }}) validateNull(pointer string, r *ValidationReport) {
+{% for line in t.validate_null %}	{{ line }}
+{% endfor %}}
+{% endif %}{% endblock %}"#,
+    )
+    .unwrap();
+    let toml = format!(
+        "template_dir = {:?}\nvalidation = true\n[substitutions.date-time.go]\nname = \"time.Time\"\nimport = \"time\"\n",
+        dir.to_str().unwrap()
+    );
+    let components = serde_json::json!({
+        "Log": {"type": "object", "patternProperties": {"^at": {"type": "string", "format": "date-time"}}, "additionalProperties": false}
+    });
+    let result = go(components, &toml);
+    let _ = std::fs::remove_dir_all(&dir);
+    let Some(result) = result else {
+        return;
+    };
+    let mut generation = result.expect("generates");
+    let code = generation.files.remove(0).contents;
+    assert!(code.contains("// Validate is overridden."), "{code}");
+    assert!(
+        squeezed(&code).contains("type pattern0OfLog = time.Time"),
+        "{code}"
+    );
+    let Some(result) = vet(&code, "validate-override") else {
+        return;
+    };
+    if let Err(error) = result {
+        panic!("go vet failed\n{error}\n{code}");
+    }
 }

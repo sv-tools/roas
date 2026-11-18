@@ -1,8 +1,4 @@
-{% block validate %}{% for alias in t.validate_aliases %}
-// {{ alias.name }} is a member type of {{ t.name }} that validation decodes
-// into, named here, where no local of validateInto shadows its package.
-type {{ alias.name }} = {{ alias.ty }}
-{% endfor %}
+{% block validate %}
 // Validate checks a {{ t.name }} against the constraints its schema declares
 // that its type cannot express.
 func (v {{ t.name }}) Validate() *ValidationReport {
