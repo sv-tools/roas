@@ -504,6 +504,9 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 used.insert(local, "a name the generated validation declares");
             }
         }
+        for alias in types.iter().flat_map(|t| &t.validate_aliases) {
+            used.insert(&alias.name, "a name the generated validation declares");
+        }
         // The `Decimal` methods' receiver, in the package file.
         if builder.support.decimal && config.layout == Layout::FilePerType {
             used.insert("x", "a name the generated code declares");

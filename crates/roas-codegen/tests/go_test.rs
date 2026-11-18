@@ -1094,3 +1094,18 @@ func (v {{ t.name }}) validateNull(pointer string, r *ValidationReport) {
         panic!("go vet failed\n{error}\n{code}");
     }
 }
+
+#[test]
+fn a_substitution_package_named_like_a_member_alias_is_refused() {
+    let toml = "validation = true\n[substitutions.thing.go]\nname = \"pattern0OfClosed.Thing\"\nimport = \"example.com/x/pattern0OfClosed\"\n";
+    let components = serde_json::json!({
+        "Closed": {"type": "object", "patternProperties": {"^a": {"type": "string", "format": "thing"}}, "additionalProperties": false}
+    });
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let GenerateError::Config(message) = result.unwrap_err() else {
+        panic!("not a config error");
+    };
+    assert!(message.contains("pattern0OfClosed"), "{message}");
+}
