@@ -518,8 +518,12 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             .filter_map(|s| s.go.as_ref())
             .map(|go| go.name.as_str());
         for spelling in spellings {
+            // Unqualified, or a package qualifier: an import path need
+            // not say the package's name.
+            let qualifiers = super::imports::qualifiers(spelling);
             if let Some(name) = unqualified_names(spelling)
                 .into_iter()
+                .chain(qualifiers.iter().map(String::as_str))
                 .find(|name| aliases.contains(name))
             {
                 return Err(GenerateError::Config(format!(

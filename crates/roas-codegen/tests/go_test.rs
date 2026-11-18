@@ -1181,6 +1181,8 @@ fn a_substitution_spelled_like_a_member_alias_is_refused() {
     for toml in [
         "validation = true\n[substitutions.thing.go]\nname = \"pattern0OfBag\"\n",
         "validation = true\n[substitutions.thing.go]\nname = \"value\"\n[substitutions.other.go]\nname = \"pattern0OfBag\"\n",
+        // A package whose path does not say its name.
+        "validation = true\n[substitutions.thing.go]\nname = \"pattern0OfBag.Thing\"\nimport = \"example.com/x/foo\"\n",
     ] {
         let components = serde_json::json!({
             "Bag": {"type": "object", "patternProperties": {"^a": {"type": "string", "format": "thing"}}, "additionalProperties": false},
