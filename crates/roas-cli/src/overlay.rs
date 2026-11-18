@@ -391,20 +391,25 @@ impl TargetDocument {
 }
 
 /// Apply each overlay at `paths` to `spec` in order. Shared by
-/// `overlay apply` and `convert --apply`. Each overlay is loaded with
+/// `overlay apply`, `convert --apply` and `generate --apply`. Each overlay is loaded with
 /// extension-based format detection and its version detected from the
 /// `overlay` field. An Overlay 1.2 overlay whose `extends` does not
-/// identify `target` is a warning, or an error when `strict`.
+/// identify `target` is a warning, or an error when `strict`. Returns the
+/// first overlay not read as JSON, whose numbers went through `f64`.
 pub(crate) fn apply_overlays(
     spec: &mut Value,
     target: &TargetDocument,
     paths: &[PathBuf],
     options: EnumSet<ApplyOptions>,
     strict: bool,
-) -> Result<()> {
+) -> Result<Option<PathBuf>> {
+    let mut not_json = None;
     for path in paths {
-        let (value, _format) = read_input(&InputSource::File(path.clone()), None)
+        let (value, format) = read_input(&InputSource::File(path.clone()), None)
             .with_context(|| format!("reading overlay {}", path.display()))?;
+        if format != InputFormat::Json && not_json.is_none() {
+            not_json = Some(path.clone());
+        }
         let overlay = detect_or_use_overlay(None, value)
             .with_context(|| format!("parsing overlay {}", path.display()))?;
         if let Some(reason) = target.mismatch(&overlay, path) {
@@ -423,7 +428,7 @@ pub(crate) fn apply_overlays(
             .apply(spec, options)
             .map_err(|e| anyhow!("applying overlay {}: {e}", path.display()))?;
     }
-    Ok(())
+    Ok(not_json)
 }
 
 #[cfg(test)]

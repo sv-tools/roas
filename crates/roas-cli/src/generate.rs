@@ -3,7 +3,10 @@
 //!
 //! The description is read as raw bytes, so that a build with the
 //! `exact-numbers` feature keeps JSON numbers exact, then version-detected, normalized to 3.2, validated with
-//! external references skipped, lowered and rendered. Files are written
+//! external references skipped, lowered and rendered. `--apply` overlays
+//! apply before any of that: a JSON description overlaid only by JSON
+//! stays JSON text, anything else goes on as a parsed value of unknown
+//! fidelity. Files are written
 //! under a manifest the target owns: see `roas_codegen::write` for the
 //! ownership rules. `--check` writes nothing and fails when the output
 //! directory is out of date, which is what CI wants.
@@ -74,6 +77,18 @@ pub(crate) struct GenerateArgs {
     /// `roas openapi validate --ignore` does. Repeatable.
     #[arg(long, value_enum)]
     pub(crate) ignore: Vec<Options>,
+
+    /// Path to an OpenAPI Overlay document to apply to the description as
+    /// written, at its own OpenAPI version, before it is validated and
+    /// generated (`roas openapi convert --apply` applies to the converted
+    /// spec instead). Repeat the flag to apply several overlays in order.
+    #[arg(long)]
+    pub(crate) apply: Vec<PathBuf>,
+
+    /// Per-call overlay apply option (repeatable). Requires at least one
+    /// `--apply`.
+    #[arg(long = "apply-option", value_enum, requires = "apply")]
+    pub(crate) apply_options: Vec<roas_overlay::apply::ApplyOptions>,
 
     /// Generate validation: every type gets a `validate` that checks the
     /// constraints its type cannot express. Overrides `validation` in the
@@ -185,6 +200,50 @@ fn read_description(source: &InputSource, format: Option<InputFormat>) -> Result
         Input::Json(bytes)
     };
     Ok((input, uri))
+}
+
+/// Apply the `--apply` overlays to the description: a JSON description
+/// overlaid only by JSON stays JSON text, exact under `exact-numbers`;
+/// anything else goes on as a parsed value of unknown fidelity. Also, for
+/// a JSON description, the first overlay not read as JSON: the one cause
+/// for `exact_numbers` to name.
+fn overlay_description(
+    source: &InputSource,
+    input: Input,
+    overlays: &[PathBuf],
+    options: &[roas_overlay::apply::ApplyOptions],
+    strict: bool,
+) -> Result<(Input, Option<PathBuf>)> {
+    if overlays.is_empty() {
+        return Ok((input, None));
+    }
+    let options = options.iter().copied().collect();
+    let (bytes, yaml) = match input {
+        Input::Json(bytes) => (bytes, false),
+        Input::Yaml(bytes) => (bytes, true),
+        _ => unreachable!("descriptions are read as text"),
+    };
+    let mut value = std::str::from_utf8(&bytes)
+        .context("not UTF-8")
+        .and_then(|text| crate::versioned::parse_value(text, yaml))
+        .with_context(|| format!("{}: cannot be read", source.display()))?;
+    // A pipe (`<(curl …)`) is read as stdin: no path to match `extends`.
+    let target_source = match source {
+        InputSource::File(path) if !is_regular_file(path) => &InputSource::Stdin,
+        source => source,
+    };
+    let target = crate::overlay::TargetDocument::new(target_source, &value);
+    let not_json = crate::overlay::apply_overlays(&mut value, &target, overlays, options, strict)?;
+    // Exact only as JSON throughout: a YAML overlay's numbers went through
+    // `f64`, and a YAML description is no more exact for being overlaid.
+    // Otherwise the value goes on as it is, of no known fidelity, which
+    // `exact_numbers` refuses, and with no text to write it back to.
+    let input = if !yaml && not_json.is_none() {
+        Input::Json(serde_json::to_vec(&value)?)
+    } else {
+        Input::Value(value)
+    };
+    Ok((input, if yaml { None } else { not_json }))
 }
 
 /// The description's path with its directories resolved and its own name
@@ -524,8 +583,23 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
         );
     }
     let (input, uri) = read_description(&source, args.format)?;
+    // Before parsing, so validation, generation and every dump see the
+    // overlaid description.
+    let (input, yaml_overlay) = overlay_description(
+        &source,
+        input,
+        &args.apply,
+        &args.apply_options,
+        args.strict,
+    )?;
+    // Overlaid, what fails may be what an overlay wrote.
+    let overlaid = if args.apply.is_empty() {
+        ""
+    } else {
+        " after applying the --apply overlays"
+    };
     let document = SourceDocument::parse(input, uri)
-        .with_context(|| format!("{}: cannot be read", source.display()))?;
+        .with_context(|| format!("{}: cannot be read{overlaid}", source.display()))?;
 
     // Lint-only checks say nothing about the generated types, so they never
     // block generation; `--ignore` relaxes further.
@@ -540,7 +614,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
                 eprintln!("- {e}");
             }
             bail!(
-                "{}: validation failed ({} error{}); nothing generated",
+                "{}: validation failed{overlaid} ({} error{}); nothing generated",
                 source.display(),
                 error.errors.len(),
                 if error.errors.len() == 1 { "" } else { "s" }
@@ -580,7 +654,6 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
         ),
         other => other.into(),
     })?;
-
     if let Some(dir) = &args.dump_scaffold {
         // Not where generated files and their manifests live either.
         if overlaps("--dump-scaffold", dir, &args.out)? {
@@ -617,6 +690,20 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
             eprintln!("scaffolded {}", path.display());
         }
         return Ok(());
+    }
+    // Said here rather than as the description's own fidelity: it is the
+    // overlay that took the numbers through `f64`. A scaffold reads no
+    // numbers, so it comes first.
+    // Without the feature, or with a YAML description, the cause is
+    // another, which `roas_codegen` names.
+    if cfg!(feature = "exact-numbers")
+        && config.exact_numbers
+        && let Some(overlay) = &yaml_overlay
+    {
+        bail!(
+            "`exact_numbers` needs every `--apply` overlay to be JSON, its numbers as written; {} is not",
+            overlay.display()
+        );
     }
     if args.print_context {
         let context = roas_codegen::template_context(&document, &config)?;
@@ -926,6 +1013,8 @@ mod tests {
             label: None,
             format: None,
             ignore: vec![Options::IgnoreUnusedSchemas],
+            apply: vec![],
+            apply_options: vec![],
             allow_codegen_extensions: false,
             validate: false,
             strict: false,
@@ -1662,5 +1751,400 @@ mod tests {
             source_id(&InputSource::File(link.clone()), &out).as_deref(),
             Some("../openapi")
         );
+    }
+
+    /// An overlay adding `age` to `Pet`, with `format` as given.
+    fn age_overlay(dir: &Path, name: &str, format: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"overlay": "1.0.0", "info": {{"title": "age", "version": "1"}}, "actions": [
+                    {{"target": "$.components.schemas.Pet.properties", "update": {{"age": {{"type": "integer", "format": "{format}"}}}}}}
+                ]}}"#
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn overlays_apply_before_generating_checking_and_dumping() {
+        if !have_rustfmt() {
+            return; // the output and --check depend on it
+        }
+        let dir = TempDir::new("apply");
+        let spec = dir.0.join("api.json");
+        std::fs::write(&spec, PET).unwrap();
+        let overlay = age_overlay(&dir.0, "age.json", "int32");
+        let out = dir.0.join("out");
+        let dump = dir.0.join("dump");
+        std::fs::create_dir_all(&dump).unwrap();
+        let mut overlaid = args(&spec, &out);
+        overlaid.apply = vec![overlay.clone()];
+        overlaid.dump_rendered = Some(dump.clone());
+        run_generate(overlaid).unwrap();
+        let code = std::fs::read_to_string(out.join("api.rs")).unwrap();
+        assert!(code.contains("pub age: Option<Int32>"), "{code}");
+        let rendered = std::fs::read_to_string(dump.join("api.rs")).unwrap();
+        assert!(rendered.contains("age"), "{rendered}");
+
+        // `--check` compares against the overlaid description: clean with
+        // the overlay, out of date without it.
+        let mut check = args(&spec, &out);
+        check.apply = vec![overlay.clone()];
+        check.check = true;
+        run_generate(check).unwrap();
+        let mut plain = args(&spec, &out);
+        plain.check = true;
+        let error = run_generate(plain).unwrap_err().to_string();
+        assert!(error.contains("out of date"), "{error}");
+
+        // The overlay is not the source: the label still belongs to the
+        // description, so dropping the overlay regenerates in place.
+        run_generate(args(&spec, &out)).unwrap();
+        let code = std::fs::read_to_string(out.join("api.rs")).unwrap();
+        assert!(!code.contains("age"), "{code}");
+
+        if have_gofmt() {
+            let mut go = args(&spec, &out);
+            go.target = Some(GenerateTarget::Go);
+            go.apply = vec![overlay];
+            run_generate(go).unwrap();
+            let code = std::fs::read_dir(&out)
+                .unwrap()
+                .flatten()
+                .find(|e| e.path().extension().is_some_and(|x| x == "go"))
+                .map(|e| std::fs::read_to_string(e.path()).unwrap())
+                .unwrap();
+            assert!(code.contains("Age"), "{code}");
+            assert!(code.contains("int32"), "{code}");
+        } else {
+            assert!(
+                std::env::var_os("ROAS_CODEGEN_REQUIRE_GO").is_none(),
+                "ROAS_CODEGEN_REQUIRE_GO is set but gofmt is missing"
+            );
+        }
+    }
+
+    #[test]
+    fn several_overlays_apply_in_order() {
+        if !have_rustfmt() {
+            return; // the output depends on it
+        }
+        let dir = TempDir::new("apply-order");
+        let spec = dir.0.join("api.json");
+        std::fs::write(&spec, PET).unwrap();
+        let add = age_overlay(&dir.0, "add.json", "int32");
+        // Matches only once `age` exists.
+        let widen = dir.0.join("widen.yaml");
+        std::fs::write(
+            &widen,
+            "overlay: 1.0.0\ninfo: {title: widen, version: '1'}\nactions:\n  - target: $.components.schemas.Pet.properties.age\n    update: {format: int64}\n",
+        )
+        .unwrap();
+        let out = dir.0.join("out");
+        let mut ordered = args(&spec, &out);
+        ordered.apply = vec![add.clone(), widen.clone()];
+        run_generate(ordered).unwrap();
+        let code = std::fs::read_to_string(out.join("api.rs")).unwrap();
+        assert!(code.contains("pub age: Option<Int64>"), "{code}");
+
+        // The other way round, `widen` matches nothing yet.
+        let mut reversed = args(&spec, &out);
+        reversed.apply = vec![widen.clone(), add.clone()];
+        run_generate(reversed).unwrap();
+        let code = std::fs::read_to_string(out.join("api.rs")).unwrap();
+        assert!(code.contains("pub age: Option<Int32>"), "{code}");
+
+        // Which `--apply-option error-on-zero-match` refuses, naming it.
+        let mut strict = args(&spec, &out);
+        strict.apply = vec![widen.clone(), add];
+        strict.apply_options = vec![roas_overlay::apply::ApplyOptions::ErrorOnZeroMatch];
+        let error = run_generate(strict).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("applying overlay {}", widen.display())),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn overlays_apply_to_yaml_descriptions() {
+        if !have_rustfmt() {
+            return; // the output depends on it
+        }
+        let dir = TempDir::new("apply-yaml");
+        let spec = dir.0.join("api.yaml");
+        std::fs::write(
+            &spec,
+            "openapi: 3.2.0\ninfo: {title: t, version: '1'}\npaths: {}\ncomponents:\n  schemas:\n    Pet: {type: object, properties: {name: {type: string}}}\n",
+        )
+        .unwrap();
+        let out = dir.0.join("out");
+        let mut overlaid = args(&spec, &out);
+        overlaid.apply = vec![age_overlay(&dir.0, "age.json", "int32")];
+        run_generate(overlaid).unwrap();
+        let code = std::fs::read_to_string(out.join("api.rs")).unwrap();
+        assert!(code.contains("pub age: Option<Int32>"), "{code}");
+    }
+
+    #[test]
+    fn overlay_errors_name_the_file() {
+        let dir = TempDir::new("apply-bad");
+        let spec = dir.0.join("api.json");
+        std::fs::write(&spec, PET).unwrap();
+        let out = dir.0.join("out");
+
+        let broken = dir.0.join("broken.json");
+        std::fs::write(&broken, "{not json").unwrap();
+        let mut bad = args(&spec, &out);
+        bad.apply = vec![broken.clone()];
+        let error = run_generate(bad).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("reading overlay {}", broken.display())),
+            "{error}"
+        );
+
+        let not_overlay = dir.0.join("not-overlay.json");
+        std::fs::write(&not_overlay, r#"{"openapi": "3.2.0"}"#).unwrap();
+        let mut bad = args(&spec, &out);
+        bad.apply = vec![not_overlay.clone()];
+        let error = run_generate(bad).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("parsing overlay {}", not_overlay.display())),
+            "{error}"
+        );
+
+        // A description that does not parse is named before any overlay.
+        std::fs::write(&spec, "{not json").unwrap();
+        let mut bad = args(&spec, &out);
+        bad.apply = vec![broken];
+        let error = run_generate(bad).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("{}: cannot be read", spec.display())),
+            "{error}"
+        );
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn apply_options_need_an_overlay() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: GenerateArgs,
+        }
+        let parsed = Cli::try_parse_from([
+            "roas",
+            "api.json",
+            "-o",
+            "out",
+            "--apply",
+            "a.json",
+            "--apply",
+            "b.yaml",
+            "--apply-option",
+            "error-on-zero-match",
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed.args.apply,
+            [PathBuf::from("a.json"), PathBuf::from("b.yaml")]
+        );
+        assert!(
+            Cli::try_parse_from([
+                "roas",
+                "api.json",
+                "-o",
+                "out",
+                "--apply-option",
+                "error-on-zero-match"
+            ])
+            .is_err()
+        );
+    }
+
+    /// An overlay putting a bound on `Pet.properties.n`, as JSON or YAML.
+    #[cfg(feature = "exact-numbers")]
+    fn bound_overlay(dir: &Path, name: &str, bound: &str) -> PathBuf {
+        let path = dir.join(name);
+        let text = if name.ends_with(".json") {
+            format!(
+                r#"{{"overlay": "1.0.0", "info": {{"title": "b", "version": "1"}}, "actions": [
+                    {{"target": "$.components.schemas.Pet.properties", "update": {{"n": {{"type": "number", "maximum": {bound}}}}}}}
+                ]}}"#
+            )
+        } else {
+            format!(
+                "overlay: 1.0.0\ninfo: {{title: b, version: '1'}}\nactions:\n  - target: $.components.schemas.Pet.properties\n    update: {{n: {{type: number, maximum: {bound}}}}}\n"
+            )
+        };
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    #[cfg(feature = "exact-numbers")]
+    fn overlays_keep_number_fidelity_honest() {
+        if !have_rustfmt() {
+            return; // the output depends on it
+        }
+        let dir = TempDir::new("apply-exact");
+        let spec = dir.0.join("api.json");
+        std::fs::write(&spec, PET).unwrap();
+        let config = dir.0.join("roas.toml");
+        std::fs::write(&config, "exact_numbers = true\n").unwrap();
+        let out = dir.0.join("out");
+        let bound = "0.10000000000000000001";
+        // JSON throughout: exact, the bound as written.
+        let mut exact = args(&spec, &out);
+        exact.config = Some(config.clone());
+        exact.apply = vec![bound_overlay(&dir.0, "b.json", bound)];
+        run_generate(exact).unwrap();
+        let code = std::fs::read_to_string(out.join("api.rs")).unwrap();
+        assert!(code.contains(bound), "{code}");
+        // A YAML overlay read its numbers through f64: refused, not rounded.
+        let mut rounded = args(&spec, &out);
+        rounded.config = Some(config);
+        rounded.apply = vec![bound_overlay(&dir.0, "b.yaml", bound)];
+        let error = format!("{:#}", run_generate(rounded).unwrap_err());
+        assert!(
+            error.contains("every `--apply` overlay to be JSON") && error.contains("b.yaml"),
+            "{error}"
+        );
+        // A scaffold reads no numbers: written all the same.
+        let scaffold = dir.0.join("scaffold");
+        std::fs::create_dir_all(&scaffold).unwrap();
+        let mut dump = args(&spec, &out);
+        dump.config = Some(dir.0.join("roas.toml"));
+        dump.apply = vec![dir.0.join("b.yaml")];
+        dump.dump_scaffold = Some(scaffold.clone());
+        run_generate(dump).unwrap();
+        assert!(scaffold.join("roas-templates.toml").exists());
+        // A YAML description with an exact JSON number overlaid is still
+        // generated, without exact numbers asked for.
+        let yaml = dir.0.join("api.yaml");
+        std::fs::write(
+            &yaml,
+            "openapi: 3.2.0\ninfo: {title: t, version: '1'}\npaths: {}\ncomponents:\n  schemas:\n    Pet: {type: object, properties: {name: {type: string}}}\n",
+        )
+        .unwrap();
+        let out = dir.0.join("out-yaml");
+        let mut overlaid = args(&yaml, &out);
+        overlaid.apply = vec![bound_overlay(&dir.0, "b2.json", bound)];
+        run_generate(overlaid).unwrap();
+        // Under `exact_numbers` a YAML description is the cause, not its
+        // YAML overlay.
+        let mut both = args(&yaml, &out);
+        both.config = Some(dir.0.join("roas.toml"));
+        both.apply = vec![bound_overlay(&dir.0, "b3.yaml", bound)];
+        let error = format!("{:#}", run_generate(both).unwrap_err());
+        assert!(!error.contains("b3.yaml"), "{error}");
+        assert!(error.contains("fidelity"), "{error}");
+    }
+
+    #[test]
+    #[cfg(not(feature = "exact-numbers"))]
+    fn without_the_feature_a_yaml_overlay_is_not_blamed() {
+        let dir = TempDir::new("apply-no-exact");
+        let spec = dir.0.join("api.json");
+        std::fs::write(&spec, PET).unwrap();
+        let config = dir.0.join("roas.toml");
+        std::fs::write(&config, "exact_numbers = true\n").unwrap();
+        let overlay = dir.0.join("o.yaml");
+        std::fs::write(
+            &overlay,
+            "overlay: 1.0.0\ninfo: {title: o, version: '1'}\nactions:\n  - target: $.info\n    update: {x-note: n}\n",
+        )
+        .unwrap();
+        let mut run = args(&spec, &dir.0.join("out"));
+        run.config = Some(config);
+        run.apply = vec![overlay];
+        let error = format!("{:#}", run_generate(run).unwrap_err());
+        assert!(!error.contains("o.yaml"), "{error}");
+        assert!(error.contains("exact-numbers"), "{error}");
+    }
+
+    #[test]
+    fn a_description_an_overlay_breaks_says_so() {
+        let dir = TempDir::new("apply-breaks");
+        let spec = dir.0.join("api.json");
+        std::fs::write(&spec, PET).unwrap();
+        let bad = dir.0.join("bad.json");
+        std::fs::write(
+            &bad,
+            r#"{"overlay": "1.0.0", "info": {"title": "b", "version": "1"}, "actions": [
+                {"target": "$.components.schemas.Pet", "update": {"type": "bogus"}}
+            ]}"#,
+        )
+        .unwrap();
+        let mut run = args(&spec, &dir.0.join("out"));
+        run.apply = vec![bad];
+        let error = run_generate(run).unwrap_err().to_string();
+        assert!(
+            error.contains("after applying the --apply overlays"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_overlay_written_for_another_description_warns_or_fails_strict() {
+        let dir = TempDir::new("apply-extends");
+        let spec = dir.0.join("api.json");
+        std::fs::write(&spec, PET).unwrap();
+        let other = dir.0.join("other.yaml");
+        std::fs::write(
+            &other,
+            "overlay: 1.2.0\ninfo: {title: o, version: '1'}\nextends: https://example.com/other.yaml\nactions:\n  - target: $.info\n    update: {x-note: n}\n",
+        )
+        .unwrap();
+        let mut lax = args(&spec, &dir.0.join("out"));
+        lax.apply = vec![other.clone()];
+        run_generate(lax).unwrap();
+        let mut strict = args(&spec, &dir.0.join("out-strict"));
+        strict.apply = vec![other.clone()];
+        strict.strict = true;
+        let error = run_generate(strict).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!(
+                "overlay {} was not written for this spec",
+                other.display()
+            )),
+            "{error}"
+        );
+        // Written for this one: no refusal, strict or not.
+        let matching = dir.0.join("match.yaml");
+        std::fs::write(
+            &matching,
+            "overlay: 1.2.0\ninfo: {title: o, version: '1'}\nextends: api.json\nactions:\n  - target: $.info\n    update: {x-note: n}\n",
+        )
+        .unwrap();
+        let mut strict = args(&spec, &dir.0.join("out-match"));
+        strict.apply = vec![matching];
+        strict.strict = true;
+        run_generate(strict).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_piped_description_is_no_file_for_extends() {
+        let dir = TempDir::new("apply-pipe");
+        let overlay = dir.0.join("ext.yaml");
+        std::fs::write(
+            &overlay,
+            "overlay: 1.2.0\ninfo: {title: o, version: '1'}\nextends: api.json\nactions:\n  - target: $.info\n    update: {x-note: n}\n",
+        )
+        .unwrap();
+        // Read from a device, as from `<(…)`: like stdin, nothing to refuse.
+        let source = InputSource::File(PathBuf::from("/dev/null"));
+        overlay_description(
+            &source,
+            Input::Json(PET.as_bytes().to_vec()),
+            &[overlay],
+            &[],
+            true,
+        )
+        .unwrap();
     }
 }
