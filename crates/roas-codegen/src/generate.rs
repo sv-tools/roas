@@ -583,7 +583,7 @@ pub fn render(
 
 /// A template directory that changes nothing, to show what can be
 /// changed: for each default template rendering under `config` (by its
-/// `target` and `layout`), and each one it includes, a template at the
+/// `target`, `layout` and `validation`), and each one it includes, a template at the
 /// path an override takes, extending the default and filling every block
 /// with the default's content, plus the `roas-templates.toml` manifest.
 /// Used as `template_dir` it renders exactly what the defaults do. It

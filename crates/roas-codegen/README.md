@@ -206,7 +206,7 @@ The defaults include one another by plain name, so an override of an included te
 | `rust/catch_all.rs.jinja` (a struct with a catch-all) | `catch_all` |
 | `rust/string_only.rs.jinja` (a string enum) | `string_only` |
 
-`scaffold` (or `roas openapi generate --dump-scaffold DIR`) writes this list for one target and layout as a template directory to start from: every default that run renders, included ones too, at the path its override takes, extending the default and filling each block with `{{ super() }}`, plus the manifest. Unchanged, it renders exactly the defaults; edit the blocks you want and delete the rest.
+`scaffold` (or `roas openapi generate --dump-scaffold DIR`) writes these blocks for one target, layout and `validation` as a template directory to start from: every default that run renders, included ones too (those declaring no blocks as well, to be replaced whole), at the path its override takes, extending the default and filling each block with `{{ super() }}`, plus the manifest. Unchanged, it renders exactly the defaults; edit the blocks you want and delete the rest.
 
 The generated-code marker is written first in every file by the renderer, whatever the templates do, and a `header` override with `{{ super() }}` keeps the configuration's `header` rather than replacing it.
 

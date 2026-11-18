@@ -441,7 +441,7 @@ fn scaffold_of(
         // minijinja refuses a block declared twice, so each is once.
         let blocks = &shape.all;
         text.push_str(if blocks.is_empty() {
-            "\n    It declares no blocks: to change it, write the whole template here."
+            "\n    It declares no blocks: to change it, replace the `extends` line below\n    with the whole template; anything written beside it is dropped."
         } else {
             "\n    Each block renders the default through `super()`: change the ones\n    you need, and delete the rest."
         });

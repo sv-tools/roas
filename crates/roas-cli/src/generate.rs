@@ -133,7 +133,7 @@ pub(crate) struct GenerateArgs {
 
     /// Write a template directory overriding nothing into this existing
     /// directory, apart from the output directory, and generate nothing:
-    /// for each built-in template this target and layout render, a file
+    /// for each built-in template this target, layout and validation render, a file
     /// at the path an override takes, extending the built-in and listing
     /// every block it declares. Existing files are never overwritten.
     #[arg(long, conflicts_with_all = ["check", "print_context", "dump_rendered"])]
