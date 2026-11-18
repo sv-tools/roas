@@ -221,11 +221,15 @@ fn overlay_description(
         .context("not UTF-8")
         .and_then(|text| crate::versioned::parse_value(text, yaml))
         .with_context(|| format!("{}: cannot be read", source.display()))?;
-    crate::overlay::apply_overlays(&mut value, overlays, options)?;
-    Ok(if yaml {
-        Input::Yaml(crate::yaml::to_string(&value)?.into_bytes())
-    } else {
+    let all_json = crate::overlay::apply_overlays(&mut value, overlays, options)?;
+    // Exact only as JSON throughout: a YAML overlay's numbers went through
+    // `f64`, and a YAML description is no more exact for being overlaid.
+    // Otherwise the value goes on as it is, of no known fidelity, which
+    // `exact_numbers` refuses, and with no text to write it back to.
+    Ok(if !yaml && all_json {
         Input::Json(serde_json::to_vec(&value)?)
+    } else {
+        Input::Value(value)
     })
 }
 
@@ -1921,5 +1925,64 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    /// An overlay putting a bound on `Pet.properties.n`, as JSON or YAML.
+    #[cfg(feature = "exact-numbers")]
+    fn bound_overlay(dir: &Path, name: &str, bound: &str) -> PathBuf {
+        let path = dir.join(name);
+        let text = if name.ends_with(".json") {
+            format!(
+                r#"{{"overlay": "1.0.0", "info": {{"title": "b", "version": "1"}}, "actions": [
+                    {{"target": "$.components.schemas.Pet.properties", "update": {{"n": {{"type": "number", "maximum": {bound}}}}}}}
+                ]}}"#
+            )
+        } else {
+            format!(
+                "overlay: 1.0.0\ninfo: {{title: b, version: '1'}}\nactions:\n  - target: $.components.schemas.Pet.properties\n    update: {{n: {{type: number, maximum: {bound}}}}}\n"
+            )
+        };
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    #[cfg(feature = "exact-numbers")]
+    fn overlays_keep_number_fidelity_honest() {
+        if !have_rustfmt() {
+            return; // the output depends on it
+        }
+        let dir = TempDir::new("apply-exact");
+        let spec = dir.0.join("api.json");
+        std::fs::write(&spec, PET).unwrap();
+        let config = dir.0.join("roas.toml");
+        std::fs::write(&config, "exact_numbers = true\n").unwrap();
+        let out = dir.0.join("out");
+        let bound = "0.10000000000000000001";
+        // JSON throughout: exact, the bound as written.
+        let mut exact = args(&spec, &out);
+        exact.config = Some(config.clone());
+        exact.apply = vec![bound_overlay(&dir.0, "b.json", bound)];
+        run_generate(exact).unwrap();
+        let code = std::fs::read_to_string(out.join("api.rs")).unwrap();
+        assert!(code.contains(bound), "{code}");
+        // A YAML overlay read its numbers through f64: refused, not rounded.
+        let mut rounded = args(&spec, &out);
+        rounded.config = Some(config);
+        rounded.apply = vec![bound_overlay(&dir.0, "b.yaml", bound)];
+        let error = format!("{:#}", run_generate(rounded).unwrap_err());
+        assert!(error.contains("fidelity"), "{error}");
+        // A YAML description with an exact JSON number overlaid is still
+        // generated, without exact numbers asked for.
+        let yaml = dir.0.join("api.yaml");
+        std::fs::write(
+            &yaml,
+            "openapi: 3.2.0\ninfo: {title: t, version: '1'}\npaths: {}\ncomponents:\n  schemas:\n    Pet: {type: object, properties: {name: {type: string}}}\n",
+        )
+        .unwrap();
+        let out = dir.0.join("out-yaml");
+        let mut overlaid = args(&yaml, &out);
+        overlaid.apply = vec![bound_overlay(&dir.0, "b2.json", bound)];
+        run_generate(overlaid).unwrap();
     }
 }

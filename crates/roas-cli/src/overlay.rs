@@ -319,22 +319,25 @@ fn run_overlay_apply(args: OverlayApplyArgs) -> Result<()> {
 /// Apply each overlay at `paths` to `spec` in order. Shared by
 /// `overlay apply`, `convert --apply` and `generate --apply`. Each overlay is loaded with
 /// extension-based format detection and its version detected from the
-/// `overlay` field.
+/// `overlay` field. Returns whether every overlay was read as JSON, so
+/// its numbers as written.
 pub(crate) fn apply_overlays(
     spec: &mut Value,
     paths: &[PathBuf],
     options: EnumSet<ApplyOptions>,
-) -> Result<()> {
+) -> Result<bool> {
+    let mut all_json = true;
     for path in paths {
-        let (value, _format) = read_input(&InputSource::File(path.clone()), None)
+        let (value, format) = read_input(&InputSource::File(path.clone()), None)
             .with_context(|| format!("reading overlay {}", path.display()))?;
+        all_json &= format == InputFormat::Json;
         let overlay = detect_or_use_overlay(None, value)
             .with_context(|| format!("parsing overlay {}", path.display()))?;
         overlay
             .apply(spec, options)
             .map_err(|e| anyhow!("applying overlay {}: {e}", path.display()))?;
     }
-    Ok(())
+    Ok(all_json)
 }
 
 #[cfg(test)]
