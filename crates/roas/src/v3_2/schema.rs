@@ -1459,11 +1459,10 @@ pub struct MultiSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
-    /// Declares the value of the header that the server will use if none is provided.
-    ///
-    /// **Note**: "default" has no meaning for required headers.
+    /// The value an instance takes when none is provided. A type array allows several
+    /// types, so the default may be any JSON value (`false` for `["boolean", "null"]`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub default: Option<String>,
+    pub default: Option<serde_json::Value>,
 
     /// Relevant only for Schema "properties" definitions.
     /// Declares the property as "read only".
@@ -1902,6 +1901,21 @@ fn bool_item<S, R>(b: Option<&BoolOr<RefOr<S, R>>>) -> Option<&RefOr<S, R>> {
 mod tests {
     use super::*;
     use crate::validation::ValidationErrorsExt;
+
+    #[test]
+    fn multi_schema_default_may_be_any_json_value() {
+        // A nullable boolean or number with a default, as OpenAPI 3.0's `nullable` becomes.
+        for default in [serde_json::json!(false), serde_json::json!(1.5)] {
+            let value =
+                serde_json::json!({ "type": ["boolean", "number", "null"], "default": default });
+            let schema: Schema = serde_json::from_value(value.clone()).unwrap();
+            let Schema::Multi(multi) = &schema else {
+                panic!("expected Schema::Multi, got {schema:?}");
+            };
+            assert_eq!(multi.default.as_ref(), Some(&default));
+            assert_eq!(serde_json::to_value(&schema).unwrap(), value);
+        }
+    }
 
     #[test]
     fn test_single_deserialize() {

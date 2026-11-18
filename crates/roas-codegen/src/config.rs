@@ -31,7 +31,9 @@ pub enum Layout {
     /// says.
     #[default]
     OneFilePerModule,
-    /// One file per generated type.
+    /// One file per generated type: in Rust, a file per type below the
+    /// module file, which keeps the helpers and includes them; in Go, a
+    /// file per type beside the package file.
     FilePerType,
 }
 

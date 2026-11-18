@@ -1,0 +1,17 @@
+{% block header %}{% if header %}{{ header }}
+
+{% endif %}{% endblock %}// Package {{ package }} holds the types generated from `{{ source }}`.
+//
+// They read and write JSON through encoding/json/v2, so they need Go
+// 1.27 or later. Their decoders enforce what struct tags cannot: required
+// members, members that must not be null, integers read exactly from
+// their tokens, and enum membership.
+package {{ package }}
+{% set import_specs %}{% block imports %}{% for line in imports %}	{{ line }}
+{% endfor %}{% for line in extra_imports %}	{{ line }}
+{% endfor %}{% endblock %}{% endset %}{% if import_specs | trim %}
+import (
+{{ import_specs }})
+{% endif %}
+{% block body %}{% if types %}{% include "go/support.go.jinja" %}{% endif %}{% endblock %}
+{% block footer %}{% endblock %}
