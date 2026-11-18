@@ -211,6 +211,7 @@ fn overlay_description(
     input: Input,
     overlays: &[PathBuf],
     options: &[roas_overlay::apply::ApplyOptions],
+    strict: bool,
 ) -> Result<(Input, Option<PathBuf>)> {
     if overlays.is_empty() {
         return Ok((input, None));
@@ -226,7 +227,7 @@ fn overlay_description(
         .and_then(|text| crate::versioned::parse_value(text, yaml))
         .with_context(|| format!("{}: cannot be read", source.display()))?;
     let target = crate::overlay::TargetDocument::new(source, &value);
-    let not_json = crate::overlay::apply_overlays(&mut value, &target, overlays, options, false)?;
+    let not_json = crate::overlay::apply_overlays(&mut value, &target, overlays, options, strict)?;
     // Exact only as JSON throughout: a YAML overlay's numbers went through
     // `f64`, and a YAML description is no more exact for being overlaid.
     // Otherwise the value goes on as it is, of no known fidelity, which
@@ -578,8 +579,13 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     let (input, uri) = read_description(&source, args.format)?;
     // Before parsing, so validation, generation and every dump see the
     // overlaid description.
-    let (input, yaml_overlay) =
-        overlay_description(&source, input, &args.apply, &args.apply_options)?;
+    let (input, yaml_overlay) = overlay_description(
+        &source,
+        input,
+        &args.apply,
+        &args.apply_options,
+        args.strict,
+    )?;
     // Overlaid, what fails may be what an overlay wrote.
     let overlaid = if args.apply.is_empty() {
         ""
@@ -2065,5 +2071,43 @@ mod tests {
             error.contains("after applying the --apply overlays"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn an_overlay_written_for_another_description_warns_or_fails_strict() {
+        let dir = TempDir::new("apply-extends");
+        let spec = dir.0.join("api.json");
+        std::fs::write(&spec, PET).unwrap();
+        let other = dir.0.join("other.yaml");
+        std::fs::write(
+            &other,
+            "overlay: 1.2.0\ninfo: {title: o, version: '1'}\nextends: https://example.com/other.yaml\nactions:\n  - target: $.info\n    update: {x-note: n}\n",
+        )
+        .unwrap();
+        let mut lax = args(&spec, &dir.0.join("out"));
+        lax.apply = vec![other.clone()];
+        run_generate(lax).unwrap();
+        let mut strict = args(&spec, &dir.0.join("out-strict"));
+        strict.apply = vec![other.clone()];
+        strict.strict = true;
+        let error = run_generate(strict).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!(
+                "overlay {} was not written for this spec",
+                other.display()
+            )),
+            "{error}"
+        );
+        // Written for this one: no refusal, strict or not.
+        let matching = dir.0.join("match.yaml");
+        std::fs::write(
+            &matching,
+            "overlay: 1.2.0\ninfo: {title: o, version: '1'}\nextends: api.json\nactions:\n  - target: $.info\n    update: {x-note: n}\n",
+        )
+        .unwrap();
+        let mut strict = args(&spec, &dir.0.join("out-match"));
+        strict.apply = vec![matching];
+        strict.strict = true;
+        run_generate(strict).unwrap();
     }
 }
