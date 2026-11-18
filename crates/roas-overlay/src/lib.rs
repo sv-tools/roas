@@ -27,18 +27,18 @@
 //! ## Applying an overlay
 //!
 //! ```no_run
-//! # // Gate the example on the v1_1 feature so it stays valid under any
+//! # // Gate the example on the v1_2 feature so it stays valid under any
 //! # // feature combination (e.g. `--no-default-features --features v1_0`).
-//! # // The hidden cfg block is removed entirely when v1_1 is off, so the
+//! # // The hidden cfg block is removed entirely when v1_2 is off, so the
 //! # // doctest compiles to an empty `fn main()` in that case.
-//! # #[cfg(feature = "v1_1")] {
+//! # #[cfg(feature = "v1_2")] {
 //! use enumset::EnumSet;
 //! use roas_overlay::apply::Apply;
-//! use roas_overlay::v1_1::Overlay;
+//! use roas_overlay::v1_2::Overlay;
 //!
 //! // Parse the overlay document (JSON or YAML).
 //! let overlay: Overlay = serde_json::from_str(r#"{
-//!     "overlay": "1.1.0",
+//!     "overlay": "1.2.0",
 //!     "info": { "title": "Example", "version": "1.0.0" },
 //!     "actions": [
 //!         { "target": "$.info", "update": { "description": "Patched." } }
@@ -61,8 +61,8 @@
 //!
 //! ## Versions
 //!
-//! v1.0.x ([`v1_0`]), v1.1.x ([`v1_1`], default feature) and v1.2.x
-//! ([`v1_2`]) are implemented; enable whichever you need. With
+//! v1.0.x ([`v1_0`]), v1.1.x ([`v1_1`]) and v1.2.x ([`v1_2`], default
+//! feature) are implemented; enable whichever you need. With
 //! neighbouring features enabled, `impl From<v1_0::Overlay> for
 //! v1_1::Overlay` and `impl From<v1_1::Overlay> for v1_2::Overlay` are
 //! available for upconverting an existing document.

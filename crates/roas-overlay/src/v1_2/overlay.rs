@@ -11,6 +11,7 @@ use enumset::EnumSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use url::Url;
 
 /// Root Overlay v1.2 document.
 ///
@@ -49,7 +50,50 @@ pub struct Overlay {
     pub extensions: Option<BTreeMap<String, Value>>,
 }
 
+/// The URI that identifies a document, per
+/// [Establishing the Base URI](https://spec.openapis.org/overlay/v1.2.0.html#establishing-the-base-uri):
+/// its `$self` resolved against the URI it was retrieved from, or that
+/// retrieval URI when it sets no `$self`.
+///
+/// For an overlay this is its base URI ([`Overlay::base_uri`]); for a
+/// target document, such as an OpenAPI 3.2 description with its own
+/// `$self`, it is what an overlay's `extends` should match.
+///
+/// # Errors
+///
+/// [`url::ParseError`] when `$self` cannot be resolved against
+/// `retrieval`.
+pub fn document_uri(self_uri: Option<&str>, retrieval: &Url) -> Result<Url, url::ParseError> {
+    match self_uri {
+        Some(self_uri) => retrieval.join(self_uri),
+        None => Ok(retrieval.clone()),
+    }
+}
+
 impl Overlay {
+    /// The base URI relative references in this overlay resolve
+    /// against: `$self`, resolved against `retrieval` when relative, or
+    /// `retrieval` itself. See [`document_uri`].
+    ///
+    /// # Errors
+    ///
+    /// [`url::ParseError`] when `$self` cannot be resolved.
+    pub fn base_uri(&self, retrieval: &Url) -> Result<Url, url::ParseError> {
+        document_uri(self.self_uri.as_deref(), retrieval)
+    }
+
+    /// `extends` resolved against [`Overlay::base_uri`]: the URI of the
+    /// document this overlay was written for, which should match that
+    /// document's [`document_uri`]. `None` when there is no `extends`.
+    ///
+    /// # Errors
+    ///
+    /// [`url::ParseError`] when `$self` or `extends` cannot be resolved.
+    pub fn extends_uri(&self, retrieval: &Url) -> Option<Result<Url, url::ParseError>> {
+        let extends = self.extends.as_deref()?;
+        Some(self.base_uri(retrieval).and_then(|base| base.join(extends)))
+    }
+
     fn validate_inner(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error> {
         let mut ctx = Context::new(options);
 
@@ -213,6 +257,73 @@ mod tests {
             Ok(()) => Vec::new(),
             Err(err) => err.errors.iter().map(ToString::to_string).collect(),
         }
+    }
+
+    fn url(s: &str) -> Url {
+        Url::parse(s).unwrap()
+    }
+
+    fn with_self_and_extends(self_uri: Option<&str>, extends: Option<&str>) -> Overlay {
+        let mut o = overlay_with(json!([{ "target": "$", "remove": true }]), json!({}));
+        o.self_uri = self_uri.map(Into::into);
+        o.extends = extends.map(Into::into);
+        o
+    }
+
+    #[test]
+    fn base_uri_is_self_resolved_against_retrieval_or_retrieval() {
+        let retrieval = url("file:///work/overlays/pets.yaml");
+        // Spec B.1: an absolute `$self` is the base.
+        let absolute = with_self_and_extends(
+            Some("https://example.com/overlays/pets.yaml"),
+            Some("../openapi/petstore.yaml"),
+        );
+        assert_eq!(
+            absolute.extends_uri(&retrieval).unwrap().unwrap(),
+            url("https://example.com/openapi/petstore.yaml"),
+        );
+        // Spec B.5: a relative `$self` is resolved first.
+        let relative = with_self_and_extends(Some("v2/pets.yaml"), Some("../openapi.yaml"));
+        assert_eq!(
+            relative.base_uri(&retrieval).unwrap(),
+            url("file:///work/overlays/v2/pets.yaml"),
+        );
+        assert_eq!(
+            relative.extends_uri(&retrieval).unwrap().unwrap(),
+            url("file:///work/overlays/openapi.yaml"),
+        );
+        // No `$self`: the retrieval URI is the base.
+        let bare = with_self_and_extends(None, Some("../openapi.yaml"));
+        assert_eq!(bare.base_uri(&retrieval).unwrap(), retrieval);
+        assert_eq!(
+            bare.extends_uri(&retrieval).unwrap().unwrap(),
+            url("file:///work/openapi.yaml"),
+        );
+        assert!(
+            with_self_and_extends(None, None)
+                .extends_uri(&retrieval)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn extends_matches_a_target_by_its_document_uri() {
+        // Spec B.6: the target is identified by its own `$self`.
+        let overlay = with_self_and_extends(None, Some("https://example.com/openapi.yaml"));
+        let extends = overlay
+            .extends_uri(&url("file:///o/overlay.yaml"))
+            .unwrap()
+            .unwrap();
+        let target = document_uri(
+            Some("https://example.com/openapi.yaml"),
+            &url("file:///elsewhere/copy.yaml"),
+        )
+        .unwrap();
+        assert_eq!(extends, target);
+        assert_eq!(
+            document_uri(None, &url("file:///elsewhere/copy.yaml")).unwrap(),
+            url("file:///elsewhere/copy.yaml"),
+        );
     }
 
     #[test]

@@ -14,15 +14,15 @@ This crate is a sibling of [`roas`](https://crates.io/crates/roas) (the typed pa
 | Overlay version | Feature flag     | Status         | Adds over the previous version                     |
 |-----------------|------------------|----------------|----------------------------------------------------|
 | 1.0             | `v1_0`           | ✅ implemented  | —                                                  |
-| 1.1             | `v1_1` (default) | ✅ implemented  | `copy` action, `info.description`                  |
-| 1.2             | `v1_2`           | ✅ implemented  | reusable actions (`components.actions`, `$ref`), `$self`, primitive targets |
+| 1.1             | `v1_1`           | ✅ implemented  | `copy` action, `info.description`                  |
+| 1.2             | `v1_2` (default) | ✅ implemented  | reusable actions (`components.actions`, `$ref`), `$self`, primitive targets |
 
 The version features are independent — enable whichever you need. With neighbouring versions enabled, `impl From<v1_0::Overlay> for v1_1::Overlay` and `impl From<v1_1::Overlay> for v1_2::Overlay` are available for upconverting an existing document.
 
 ### Overlay 1.2
 
 - **Reusable actions.** `components.actions` holds named action fields without a `target`; an `actions` entry `{ "$ref": "#/components/actions/<name>", "target": … }` applies them to its own target. Apply resolves each reference into a plain action first: the referenced `fields`, then the reference's `target`, its `description` when set, and its `x-` extensions merged over those of `fields`. A reference may not set `update`, `copy` or `remove` (the schema forbids it), and deserializing one that does fails rather than dropping them.
-- **`$self` and `extends`** are parsed, serialized and validated (neither may contain a fragment). Resolving `extends` against the base URI, or matching it to a target document's `$self`, is left to the caller.
+- **`$self` and `extends`** are parsed, serialized and validated (neither may contain a fragment). `Overlay::base_uri` and `Overlay::extends_uri` resolve them per the spec's base URI rules, given the URI the overlay was retrieved from; `extends` should then match the target's `v1_2::document_uri` (its own `$self`, or where it was read from). Applying an overlay does not check `extends`: that is left to the caller.
 - **Primitive targets.** `update` and `copy` replace a selected primitive (or `null`) with their value, which must then be a primitive too (`NonPrimitiveValueForPrimitiveTarget`), and `remove` removes primitive array elements.
 
 ## Quick start
@@ -30,11 +30,11 @@ The version features are independent — enable whichever you need. With neighbo
 ```rust
 use enumset::EnumSet;
 use roas_overlay::apply::Apply;
-use roas_overlay::v1_1::Overlay;
+use roas_overlay::v1_2::Overlay;
 use roas_overlay::validation::Validate;
 
 let overlay: Overlay = serde_json::from_str(r#"{
-    "overlay": "1.1.0",
+    "overlay": "1.2.0",
     "info": { "title": "Example", "version": "1.0.0" },
     "actions": [
         { "target": "$.info", "update": { "description": "Patched." } },
