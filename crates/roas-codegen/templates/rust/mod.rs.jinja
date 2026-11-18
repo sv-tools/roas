@@ -1,0 +1,20 @@
+{% block header %}{% if header %}{{ header }}
+{% endif %}{% endblock %}//! Types generated from `{{ source }}`.
+//!
+//! These types read and write JSON only. Their decoders read raw JSON
+//! tokens, so deserialize them from JSON text or a reader with
+//! `serde_json` — not through another serde format, and not through
+//! `serde_json::from_value`, which has already lost the tokens.
+//!
+//! A deprecated schema's type is marked `#[deprecated]` for the code that
+//! uses it; the code generated around it here is not warned about.
+#![allow(deprecated)]
+
+{% block imports %}{% for line in imports %}{{ line }}
+{% endfor %}{% for line in extra_imports %}{{ line }}
+{% endfor %}{% endblock %}
+{% block body %}{% include "rust/support.rs.jinja" %}
+{% for t in types %}
+include!("{{ module }}/{{ t.file }}.rs");
+{% endfor %}{% endblock %}
+{% block footer %}{% endblock %}

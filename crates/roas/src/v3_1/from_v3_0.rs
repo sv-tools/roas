@@ -668,6 +668,25 @@ mod tests {
     }
 
     #[test]
+    fn nullable_boolean_with_a_default_converts() {
+        // `nullable` becomes a type array, which must take the boolean default.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Flag": { "type": "boolean", "nullable": true, "default": false }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let flag = &value["components"]["schemas"]["Flag"];
+        assert_eq!(flag["type"], serde_json::json!(["boolean", "null"]));
+        assert_eq!(flag["default"], serde_json::json!(false));
+    }
+
+    #[test]
     fn nullable_string_with_constraints_round_trips_via_extensions() {
         // A nullable string with constraints (`minLength`, `pattern`,
         // `enum`) becomes a `MultiSchema` whose first-class fields
