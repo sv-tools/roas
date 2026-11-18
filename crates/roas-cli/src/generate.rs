@@ -203,8 +203,9 @@ fn read_description(source: &InputSource, format: Option<InputFormat>) -> Result
 
 /// Apply the `--apply` overlays to the description: a JSON description
 /// overlaid only by JSON stays JSON text, exact under `exact-numbers`;
-/// anything else goes on as a parsed value of unknown fidelity. Also the
-/// first overlay not read as JSON, for `exact_numbers` to name.
+/// anything else goes on as a parsed value of unknown fidelity. Also, for
+/// a JSON description, the first overlay not read as JSON: the one cause
+/// for `exact_numbers` to name.
 fn overlay_description(
     source: &InputSource,
     input: Input,
@@ -234,7 +235,7 @@ fn overlay_description(
     } else {
         Input::Value(value)
     };
-    Ok((input, not_json))
+    Ok((input, if yaml { None } else { not_json }))
 }
 
 /// The description's path with its directories resolved and its own name
@@ -636,7 +637,10 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     })?;
     // Said here rather than as the description's own fidelity: it is the
     // overlay that took the numbers through `f64`.
-    if config.exact_numbers
+    // Without the feature, or with a YAML description, the cause is
+    // another, which `roas_codegen` names.
+    if cfg!(feature = "exact-numbers")
+        && config.exact_numbers
         && let Some(overlay) = &yaml_overlay
     {
         bail!(
@@ -2002,5 +2006,35 @@ mod tests {
         let mut overlaid = args(&yaml, &out);
         overlaid.apply = vec![bound_overlay(&dir.0, "b2.json", bound)];
         run_generate(overlaid).unwrap();
+        // Under `exact_numbers` a YAML description is the cause, not its
+        // YAML overlay.
+        let mut both = args(&yaml, &out);
+        both.config = Some(dir.0.join("roas.toml"));
+        both.apply = vec![bound_overlay(&dir.0, "b3.yaml", bound)];
+        let error = format!("{:#}", run_generate(both).unwrap_err());
+        assert!(!error.contains("b3.yaml"), "{error}");
+        assert!(error.contains("fidelity"), "{error}");
+    }
+
+    #[test]
+    #[cfg(not(feature = "exact-numbers"))]
+    fn without_the_feature_a_yaml_overlay_is_not_blamed() {
+        let dir = TempDir::new("apply-no-exact");
+        let spec = dir.0.join("api.json");
+        std::fs::write(&spec, PET).unwrap();
+        let config = dir.0.join("roas.toml");
+        std::fs::write(&config, "exact_numbers = true\n").unwrap();
+        let overlay = dir.0.join("o.yaml");
+        std::fs::write(
+            &overlay,
+            "overlay: 1.0.0\ninfo: {title: o, version: '1'}\nactions:\n  - target: $.info\n    update: {x-note: n}\n",
+        )
+        .unwrap();
+        let mut run = args(&spec, &dir.0.join("out"));
+        run.config = Some(config);
+        run.apply = vec![overlay];
+        let error = format!("{:#}", run_generate(run).unwrap_err());
+        assert!(!error.contains("o.yaml"), "{error}");
+        assert!(error.contains("exact-numbers"), "{error}");
     }
 }
