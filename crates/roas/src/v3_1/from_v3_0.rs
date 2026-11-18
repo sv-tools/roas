@@ -46,6 +46,8 @@
 
 use crate::conversion::{Conversion, ConversionError};
 use crate::v3_0::spec::Spec as V30Spec;
+use crate::v3_1::discriminator::Discriminator;
+use crate::v3_1::external_documentation::ExternalDocumentation;
 use crate::v3_1::spec::Spec as V31Spec;
 use serde_json::{Map, Value};
 
@@ -167,6 +169,7 @@ fn walk_link_object(obj: &mut Map<String, Value>) {
 }
 
 fn walk_schema_object(obj: &mut Map<String, Value>) {
+    drop_keywords_v3_1_cannot_hold(obj);
     normalize_nullable(obj);
     normalize_exclusive_bound(obj, "exclusiveMinimum", "minimum");
     normalize_exclusive_bound(obj, "exclusiveMaximum", "maximum");
@@ -227,6 +230,37 @@ fn walk_generic_object(obj: &mut Map<String, Value>) {
             _ => walk(v, Pos::Generic),
         }
     }
+}
+
+/// Drop the keywords a v3.0 schema keeps unchecked but the v3.1 model
+/// types, when their value does not fit that type.
+///
+/// A v3.0 schema keeps every keyword its model does not claim, so a
+/// keyword v3.0 never defined (`examples`, `patternProperties`, …) or
+/// one only some v3.0 schemas claim (`externalDocs` beside `allOf`,
+/// `discriminator` on a nullable string) arrives here unchecked. The
+/// v3.1 model claims them with a type, and a value that does not fit
+/// would fail the whole conversion — `examples` written as a map, the
+/// Media Type style, is a common case. Such a value carries no
+/// meaning v3.1 can express, so it is dropped, as v3.0 parsing did
+/// before it kept unclaimed keywords; a value that fits is kept.
+fn drop_keywords_v3_1_cannot_hold(obj: &mut Map<String, Value>) {
+    obj.retain(|k, v| match k.as_str() {
+        "examples" => v.is_array(),
+        "externalDocs" => fits::<ExternalDocumentation>(v),
+        "discriminator" => fits::<Discriminator>(v),
+        "patternProperties" => v
+            .as_object()
+            .is_some_and(|map| map.values().all(Value::is_object)),
+        "propertyNames" => v.is_object(),
+        "unevaluatedProperties" => v.is_object() || v.is_boolean(),
+        _ => true,
+    });
+}
+
+/// Whether `value` deserializes as a `T`.
+fn fits<T: serde::de::DeserializeOwned>(value: &Value) -> bool {
+    T::deserialize(value).is_ok()
 }
 
 /// Per OAS / JSON Schema, fields with the `x-` prefix are
@@ -565,6 +599,7 @@ mod tests {
     use crate::v3_0::spec::Spec as V30Spec;
     use crate::v3_1::spec::Spec as V31Spec;
     use crate::validation::{IGNORE_UNUSED, Options, Validate};
+    use serde_json::json;
 
     fn v30_from_json(s: &str) -> V30Spec {
         serde_json::from_str(s).expect("v3.0 spec parses")
@@ -574,6 +609,126 @@ mod tests {
         let v30: V30Spec = v30_from_json(raw);
         let v31 = V31Spec::try_from(v30).unwrap();
         serde_json::to_value(&v31).unwrap()
+    }
+
+    /// Every schema shape v3.0 parses, with each keyword v3.1 types set
+    /// to a value of the wrong shape, converts to v3.1 (and on to
+    /// v3.2): the misfit keyword is dropped rather than failing the
+    /// conversion.
+    #[test]
+    fn misfit_kept_keywords_do_not_fail_the_conversion() {
+        let bases = [
+            json!({ "type": "string" }),
+            json!({ "type": "string", "nullable": true }),
+            json!({ "type": "integer" }),
+            json!({ "type": "number" }),
+            json!({ "type": "boolean" }),
+            json!({ "type": "array", "items": { "type": "string" } }),
+            json!({ "type": "object" }),
+            json!({ "type": "object", "nullable": true }),
+            json!({ "allOf": [{ "type": "string" }] }),
+            json!({ "allOf": [{ "type": "string" }], "nullable": true }),
+            json!({ "anyOf": [{ "type": "string" }] }),
+            json!({ "oneOf": [{ "type": "string" }] }),
+            json!({ "not": { "type": "string" } }),
+        ];
+        let keywords = [
+            "examples",
+            "externalDocs",
+            "discriminator",
+            "patternProperties",
+            "propertyNames",
+            "unevaluatedProperties",
+        ];
+        let misfits = [
+            json!({ "a": { "value": "x" } }),
+            json!({ "a": 1 }),
+            json!("s"),
+            json!(5),
+            json!([1]),
+            json!(true),
+        ];
+        let mut failures = Vec::new();
+        for base in &bases {
+            for keyword in keywords {
+                for misfit in &misfits {
+                    let mut schema = base.clone();
+                    schema[keyword] = misfit.clone();
+                    let doc = json!({
+                        "openapi": "3.0.3",
+                        "info": { "title": "t", "version": "1" },
+                        "paths": {},
+                        "components": { "schemas": { "S": schema } }
+                    });
+                    let Ok(v30) = serde_json::from_value::<V30Spec>(doc) else {
+                        continue;
+                    };
+                    match V31Spec::try_from(v30) {
+                        Err(err) => failures.push(format!("{schema} to v3.1: {err:?}")),
+                        #[cfg(feature = "v3_2")]
+                        Ok(v31) => {
+                            if let Err(err) = crate::v3_2::spec::Spec::try_from(v31) {
+                                failures.push(format!("{schema} to v3.2: {err:?}"));
+                            }
+                        }
+                        #[cfg(not(feature = "v3_2"))]
+                        Ok(_) => {}
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn examples_map_is_dropped_and_example_carried_over() {
+        let out = convert(
+            r#"{
+                "openapi": "3.0.3",
+                "info": { "title": "t", "version": "1" },
+                "paths": {},
+                "components": { "schemas": {
+                    "S": { "type": "string", "example": "x", "examples": { "a": { "value": "y" } } },
+                    "A": { "allOf": [{ "type": "string" }], "examples": { "a": 1 } }
+                } }
+            }"#,
+        );
+        let schemas = &out["components"]["schemas"];
+        assert_eq!(schemas["S"]["examples"], json!(["x"]));
+        assert!(schemas["A"].get("examples").is_none(), "{}", schemas["A"]);
+    }
+
+    #[test]
+    fn fitting_kept_keywords_survive_the_conversion() {
+        let out = convert(
+            r#"{
+                "openapi": "3.0.3",
+                "info": { "title": "t", "version": "1" },
+                "paths": {},
+                "components": { "schemas": {
+                    "A": {
+                        "allOf": [{ "type": "string" }],
+                        "examples": ["a"],
+                        "externalDocs": { "url": "https://example.com" }
+                    },
+                    "O": {
+                        "type": "object",
+                        "patternProperties": { "^x": { "type": "string", "nullable": true } },
+                        "propertyNames": { "pattern": "^[a-z]+$" },
+                        "unevaluatedProperties": false
+                    }
+                } }
+            }"#,
+        );
+        let schemas = &out["components"]["schemas"];
+        assert_eq!(schemas["A"]["examples"], json!(["a"]));
+        assert_eq!(schemas["A"]["externalDocs"]["url"], "https://example.com");
+        assert_eq!(
+            schemas["O"]["patternProperties"]["^x"]["type"],
+            json!(["string", "null"]),
+        );
+        assert_eq!(schemas["O"]["propertyNames"]["pattern"], "^[a-z]+$");
+        assert_eq!(schemas["O"]["unevaluatedProperties"], json!(false));
     }
 
     #[test]
