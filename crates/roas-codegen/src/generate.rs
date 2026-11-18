@@ -359,6 +359,7 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
         source_pointer,
         legacy_nullable: matches!(document.version(), SourceVersion::V2 | SourceVersion::V3_0),
         report_lost: config.validation,
+        v3_0_source: matches!(document.version(), SourceVersion::V3_0),
     }
     .translate(document.spec());
     let mut ir = lower::lower(&front, config);

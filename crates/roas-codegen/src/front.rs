@@ -9,11 +9,13 @@ use crate::diagnostic::{SchemaId, push_token, source_of, synthetic};
 use roas::common::bool_or::BoolOr;
 use roas::common::formats::{IntegerFormat, NumberFormat, SchemaType, StringFormat};
 use roas::common::reference::RefOr;
+use roas::v3_0::schema::{Schema as V30Schema, SingleSchema as V30Single};
 use roas::v3_2::discriminator::Discriminator;
 use roas::v3_2::schema::{
     AllOfSchema, AnyOfSchema, ArraySchema, BooleanSchema, IntegerSchema, MultiSchema, NullSchema,
     NumberSchema, ObjectSchema, OneOfSchema, Schema, SchemaRef, SingleSchema, StringSchema,
 };
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use url::Url;
@@ -321,6 +323,11 @@ pub(crate) struct Translator<'a> {
     /// so the values it checks are not passed for what it never read.
     /// Without validation they go unmentioned, as they always did.
     pub report_lost: bool,
+    /// The source is OpenAPI 3.0. Its model keeps the schema keywords it
+    /// does not claim, and conversion carries them forward; they are
+    /// set aside here so they are read under the same lenient rules as
+    /// the keywords the 2.0 model drops.
+    pub v3_0_source: bool,
 }
 
 impl Translator<'_> {
@@ -555,7 +562,60 @@ impl Translator<'_> {
         Some(Box::new(names))
     }
 
+    /// The keywords the 3.0 source wrote on this schema that its model
+    /// does not claim: kept in the model's catch-all and carried through
+    /// conversion, unlike the 2.0 model, which drops them.
+    fn kept_by_v3_0(&self, pointer: &str) -> Vec<String> {
+        if !self.v3_0_source {
+            return Vec::new();
+        }
+        let source = (self.source_pointer)(&source_of(pointer));
+        let Some(raw) = self.raw.pointer(&source) else {
+            return Vec::new();
+        };
+        if raw.get("$ref").is_some() {
+            return Vec::new();
+        }
+        let Ok(schema) = roas::v3_0::schema::Schema::deserialize(raw) else {
+            return Vec::new();
+        };
+        let catch_all = match &schema {
+            V30Schema::AllOf(s) => &s.extensions,
+            V30Schema::AnyOf(s) => &s.extensions,
+            V30Schema::OneOf(s) => &s.extensions,
+            V30Schema::Not(s) => &s.extensions,
+            V30Schema::Single(single) => match single.as_ref() {
+                V30Single::String(s) => &s.extensions,
+                V30Single::Integer(s) => &s.extensions,
+                V30Single::Number(s) => &s.extensions,
+                V30Single::Boolean(s) => &s.extensions,
+                V30Single::Array(s) => &s.extensions,
+                V30Single::Null(s) => &s.extensions,
+                V30Single::Object(s) => &s.extensions,
+            },
+        };
+        catch_all
+            .iter()
+            .flatten()
+            .map(|(key, _)| key)
+            .filter(|key| !key.starts_with("x-"))
+            .cloned()
+            .collect()
+    }
+
     fn schema(&self, schema: &Schema, pointer: String) -> FrontSchema {
+        // A 3.0 source's kept keywords are set aside, so the schema reads
+        // as the 3.0 model once had it and `lost_in_conversion` reports
+        // them under the legacy rules: only with validation, a `type` its
+        // branches imply exempt.
+        let kept = self.kept_by_v3_0(&pointer);
+        let without_kept;
+        let schema = if kept.is_empty() {
+            schema
+        } else {
+            without_kept = without_keywords(schema, &kept);
+            &without_kept
+        };
         let lost = self.lost_in_conversion(schema, &pointer);
         let mut front = self.schema_kind(schema, pointer);
         for keyword in lost {
@@ -1192,6 +1252,35 @@ fn fits(schema_type: &SchemaType, value: &Value) -> bool {
     }
 }
 
+/// `schema` with `keywords` taken out of its catch-all.
+fn without_keywords(schema: &Schema, keywords: &[String]) -> Schema {
+    let mut schema = schema.clone();
+    let catch_all = match &mut schema {
+        Schema::Bool(_) | Schema::Empty(_) => return schema,
+        Schema::AllOf(s) => &mut s.extensions,
+        Schema::AnyOf(s) => &mut s.extensions,
+        Schema::OneOf(s) => &mut s.extensions,
+        Schema::Not(s) => &mut s.extensions,
+        Schema::Multi(s) => &mut s.extensions,
+        Schema::Single(single) => match single.as_mut() {
+            SingleSchema::String(s) => &mut s.extensions,
+            SingleSchema::Integer(s) => &mut s.extensions,
+            SingleSchema::Number(s) => &mut s.extensions,
+            SingleSchema::Boolean(s) => &mut s.extensions,
+            SingleSchema::Array(s) => &mut s.extensions,
+            SingleSchema::Null(s) => &mut s.extensions,
+            SingleSchema::Object(s) => &mut s.extensions,
+        },
+    };
+    if let Some(map) = catch_all {
+        map.retain(|key, _| !keywords.contains(key));
+        if map.is_empty() {
+            *catch_all = None;
+        }
+    }
+    schema
+}
+
 fn catch_all_keywords(
     extensions: &Option<BTreeMap<String, Value>>,
     keep: &mut BTreeMap<String, Value>,
@@ -1282,6 +1371,7 @@ mod tests {
             source_pointer: |p| p.to_owned(),
             legacy_nullable: false,
             report_lost: false,
+            v3_0_source: false,
         };
         translator.translate(&spec)
     }

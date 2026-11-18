@@ -2181,6 +2181,7 @@ mod tests {
             source_pointer: |p| p.to_owned(),
             legacy_nullable: false,
             report_lost: false,
+            v3_0_source: false,
         }
         .translate(&spec);
         let config = ConfigFile {
@@ -2483,6 +2484,7 @@ mod tests {
             source_pointer: |p| p.to_owned(),
             legacy_nullable: false,
             report_lost: false,
+            v3_0_source: false,
         }
         .translate(&spec);
         let config = ConfigFile::from_toml(
