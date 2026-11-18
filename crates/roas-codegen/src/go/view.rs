@@ -510,15 +510,20 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             .flat_map(|t| &t.validate_aliases)
             .map(|alias| alias.name.as_str())
             .collect();
-        // A substitution spelled like an alias would be declared as itself.
-        for alias in types.iter().flat_map(|t| &t.validate_aliases) {
-            if let Some(name) = unqualified_names(&alias.ty)
+        // A substitution spelled like an alias would name the alias, or
+        // the alias be declared as itself.
+        let spellings = config
+            .substitutions
+            .values()
+            .filter_map(|s| s.go.as_ref())
+            .map(|go| go.name.as_str());
+        for spelling in spellings {
+            if let Some(name) = unqualified_names(spelling)
                 .into_iter()
                 .find(|name| aliases.contains(name))
             {
                 return Err(GenerateError::Config(format!(
-                    "substitution spelling {:?} names `{name}`, which the generated validation declares",
-                    alias.ty
+                    "substitution spelling {spelling:?} names `{name}`, which the generated validation declares"
                 )));
             }
         }

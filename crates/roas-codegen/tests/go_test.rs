@@ -1177,15 +1177,21 @@ fn an_unqualified_substitution_after_an_ellipsis_is_aliased() {
 
 #[test]
 fn a_substitution_spelled_like_a_member_alias_is_refused() {
-    let toml = "validation = true\n[substitutions.thing.go]\nname = \"pattern0OfBag\"\n";
-    let components = serde_json::json!({
-        "Bag": {"type": "object", "patternProperties": {"^a": {"type": "string", "format": "thing"}}, "additionalProperties": false}
-    });
-    let Some(result) = go(components, toml) else {
-        return;
-    };
-    let GenerateError::Config(message) = result.unwrap_err() else {
-        panic!("not a config error");
-    };
-    assert!(message.contains("pattern0OfBag"), "{message}");
+    // Aliased itself, or held by a field of another type.
+    for toml in [
+        "validation = true\n[substitutions.thing.go]\nname = \"pattern0OfBag\"\n",
+        "validation = true\n[substitutions.thing.go]\nname = \"value\"\n[substitutions.other.go]\nname = \"pattern0OfBag\"\n",
+    ] {
+        let components = serde_json::json!({
+            "Bag": {"type": "object", "patternProperties": {"^a": {"type": "string", "format": "thing"}}, "additionalProperties": false},
+            "Other": {"type": "object", "properties": {"o": {"type": "string", "format": "other"}}}
+        });
+        let Some(result) = go(components, toml) else {
+            return;
+        };
+        let GenerateError::Config(message) = result.unwrap_err() else {
+            panic!("not a config error");
+        };
+        assert!(message.contains("pattern0OfBag"), "{message}");
+    }
 }
