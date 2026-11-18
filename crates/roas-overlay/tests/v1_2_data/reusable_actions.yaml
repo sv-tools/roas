@@ -1,0 +1,24 @@
+overlay: 1.2.0
+$self: https://example.com/overlays/public.yaml
+info:
+  title: Public pets API
+  version: 1.0.0
+extends: ./base.json
+actions:
+  - $ref: '#/components/actions/error-responses'
+    target: $.paths.*.get.responses
+    description: Error responses for reads
+  - $ref: '#/components/actions/error-responses'
+    target: $.paths.*.post.responses
+  - target: $.info.title
+    update: Pets
+  - target: $.paths.*.*.tags[?@ == 'internal']
+    remove: true
+components:
+  actions:
+    error-responses:
+      description: The error responses every operation documents
+      fields:
+        update:
+          '500':
+            description: Server error

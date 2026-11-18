@@ -2,7 +2,7 @@
 //! for Rust, every name is final, every attribute is decided. A
 //! template lays this out and nothing more.
 
-use crate::config::{Config, FieldConfig, TypeConfig};
+use crate::config::{Config, FieldConfig, Layout, TypeConfig};
 use crate::diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity};
 use crate::front::{Constraints, FloatWidth, IntWidth};
 use crate::generate::GenerateError;
@@ -154,6 +154,10 @@ pub(crate) struct TypeView {
     /// The type's conditional-compilation gates (`#[cfg(...)]` among its
     /// configured attributes), repeated on every impl generated beside it.
     pub cfg: Vec<String>,
+    /// Under `layout = "file_per_type"`, the stem of the file the type is
+    /// written to, below the module's directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -166,6 +170,10 @@ pub(crate) struct FileView {
     pub extra_imports: Vec<String>,
     pub support: SupportView,
     pub types: Vec<TypeView>,
+    /// Under `layout = "file_per_type"`, the module: the directory the
+    /// types' files are in, which the module file includes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
 }
 
 /// A Rust dependency the generated code needs.
@@ -274,6 +282,10 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         }
     }
     let uses_regex = super::validation::take_uses_regex();
+    let module = (config.layout == Layout::FilePerType).then(|| {
+        assign_files(&mut types);
+        config.rust.module.clone()
+    });
     let mut dependencies = vec![
         RustDependency {
             name: "serde".into(),
@@ -317,10 +329,36 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             extra_imports: config.extra_imports.clone(),
             support: builder.support,
             types,
+            module,
         },
         dependencies,
         diagnostics: builder.diagnostics,
     })
+}
+
+/// Names the file of every type under `layout = "file_per_type"`: its name
+/// in snake case, unique and lowercase, so distinct on a case-insensitive
+/// disk too, and never one a Windows file system resolves elsewhere. The
+/// module includes the files, so their names are not Rust names.
+fn assign_files(types: &mut [TypeView]) {
+    let mut taken = std::collections::BTreeSet::new();
+    for t in types {
+        let base = crate::write::capped_stem(crate::config::rust_module_name(&snake(
+            std::slice::from_ref(&t.name),
+        )));
+        let file = (1u32..)
+            .map(|i| {
+                if i == 1 {
+                    base.clone()
+                } else {
+                    format!("{base}{i}")
+                }
+            })
+            .find(|candidate| !taken.contains(candidate) && crate::write::windows_safe(candidate))
+            .expect("a free file name");
+        taken.insert(file.clone());
+        t.file = Some(file);
+    }
 }
 
 /// Every `types.<Name>` and `fields.<prop>` in the configuration must
@@ -751,6 +789,7 @@ impl Builder<'_> {
             pattern_tys: Vec::new(),
             others_ty: None,
             cfg,
+            file: None,
         };
         let result = self.fill_kind(def, &mut view)?;
         if !result {

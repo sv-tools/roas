@@ -39,19 +39,32 @@
 //!   v3.0 always had it.
 //!
 //! The conversion serializes the v3.0 input with serde, runs the
-//! transforms, and deserializes as a v3.1 spec. If the input is a
-//! valid v3.0 document the output is a structurally valid v3.1
-//! document; semantic regressions are surfaced by `Spec::validate`.
+//! transforms, and deserializes as a v3.1 spec. A transformed document
+//! the v3.1 model cannot hold — a gap in the conversion, not an invalid
+//! input — fails with a [`ConversionError`] instead of panicking;
+//! semantic regressions are surfaced by `Spec::validate`.
 
+use crate::conversion::{Conversion, ConversionError};
 use crate::v3_0::spec::Spec as V30Spec;
 use crate::v3_1::spec::Spec as V31Spec;
 use serde_json::{Map, Value};
 
-impl From<V30Spec> for V31Spec {
-    fn from(v30: V30Spec) -> Self {
-        let mut value = serde_json::to_value(v30).expect("v3_0::Spec serializes");
+impl TryFrom<V30Spec> for V31Spec {
+    type Error = ConversionError;
+
+    /// The v3.0 description as v3.1.
+    ///
+    /// # Errors
+    ///
+    /// [`ConversionError`] when the transformed document does not fit the v3.1 model.
+    fn try_from(v30: V30Spec) -> Result<Self, Self::Error> {
+        let conversion = Conversion {
+            from: "v3.0",
+            to: "v3.1",
+        };
+        let mut value = conversion.to_json(v30)?;
         transform_spec(&mut value);
-        serde_json::from_value(value).expect("transformed spec deserializes as v3_1::Spec")
+        conversion.to_target(value)
     }
 }
 
@@ -559,7 +572,7 @@ mod tests {
 
     fn convert(raw: &str) -> Value {
         let v30: V30Spec = v30_from_json(raw);
-        let v31: V31Spec = v30.into();
+        let v31 = V31Spec::try_from(v30).unwrap();
         serde_json::to_value(&v31).unwrap()
     }
 
@@ -651,7 +664,7 @@ mod tests {
         // drop `nullable` without synthesising a `type: ["null"]` —
         // that would change semantics from "any" to "null only".
         //
-        // The typed `From<v3_0::Spec>` path can't actually deliver a
+        // The typed `TryFrom<v3_0::Spec>` path can't actually deliver a
         // typeless schema to `normalize_nullable` (v3_0's
         // `ObjectSchema` re-serializes an explicit `type: object`),
         // so exercise the walker directly on hand-built JSON to pin
@@ -665,6 +678,25 @@ mod tests {
         );
         assert!(free.get("nullable").is_none(), "nullable removed");
         assert_eq!(free["description"], "free-form");
+    }
+
+    #[test]
+    fn nullable_boolean_with_a_default_converts() {
+        // `nullable` becomes a type array, which must take the boolean default.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Flag": { "type": "boolean", "nullable": true, "default": false }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let flag = &value["components"]["schemas"]["Flag"];
+        assert_eq!(flag["type"], serde_json::json!(["boolean", "null"]));
+        assert_eq!(flag["default"], serde_json::json!(false));
     }
 
     #[test]
@@ -1711,7 +1743,7 @@ mod tests {
             )
             .unwrap()
         });
-        let _v31: V31Spec = v30.into();
+        let _v31 = V31Spec::try_from(v30).unwrap();
     }
 
     // ── rewrite_string_binary_subschemas: keyword paths ──────────────────────
@@ -1872,7 +1904,7 @@ mod tests {
         for (name, raw) in fixtures {
             let v30: V30Spec =
                 serde_json::from_str(raw).unwrap_or_else(|e| panic!("{name}: parse: {e}"));
-            let v31: V31Spec = v30.into();
+            let v31 = V31Spec::try_from(v30).unwrap();
             assert_eq!(v31.openapi.as_str(), "3.1.2", "{name} openapi version");
             if let Err(e) = v31.validate(opts, None) {
                 panic!("{name}: converted spec did not validate cleanly:\n{e}");

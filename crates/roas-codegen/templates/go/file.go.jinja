@@ -15,6 +15,6 @@ import (
 {% endif %}
 {% block body %}{% if types %}{% include "go/support.go.jinja" %}{% endif %}
 {% for t in types %}
-{% if t.kind == "struct" %}{% include "go/struct.go.jinja" %}{% elif t.kind == "enum" %}{% include "go/enum.go.jinja" %}{% elif t.kind == "union_tagged" %}{% include "go/union_tagged.go.jinja" %}{% elif t.kind == "union_open" %}{% include "go/union_open.go.jinja" %}{% elif t.kind == "composed_open" %}{% include "go/composed_open.go.jinja" %}{% else %}{% include "go/alias.go.jinja" %}{% endif %}{% if t.validate is not none %}{% include "go/validate.go.jinja" %}{% endif %}
+{% include "go/type_body.go.jinja" %}
 {% endfor %}{% endblock %}
 {% block footer %}{% endblock %}

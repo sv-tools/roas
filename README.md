@@ -73,8 +73,9 @@ One typed tree per version behind a feature flag (`v2`, `v3_0`, `v3_1`,
   carries — `$ref` resolution, discriminator and mapping correctness, the
   per-keyword rules — and is usable on its own or as part of the description
   validator.
-- **Conversion** is a chain of `From<v_X::Spec> for v_Y::Spec` migrations in
-  pure Rust, so an upconvert is a total function rather than a script.
+- **Conversion** is a chain of `TryFrom<v_X::Spec> for v_Y::Spec` migrations in
+  pure Rust rather than a script; a document a migration cannot carry fails with
+  a `ConversionError` instead of panicking.
 - **Merging and collapsing** combine several specs into one, and lift inline
   components into `components` / `definitions` with strict dedup.
 
