@@ -78,9 +78,10 @@ pub(crate) struct GenerateArgs {
     #[arg(long, value_enum)]
     pub(crate) ignore: Vec<Options>,
 
-    /// Path to an OpenAPI Overlay document to apply to the description
-    /// before it is validated and generated, as `roas openapi convert
-    /// --apply` does. Repeat the flag to apply several overlays in order.
+    /// Path to an OpenAPI Overlay document to apply to the description as
+    /// written, at its own OpenAPI version, before it is validated and
+    /// generated (`roas openapi convert --apply` applies to the converted
+    /// spec instead). Repeat the flag to apply several overlays in order.
     #[arg(long)]
     pub(crate) apply: Vec<PathBuf>,
 
