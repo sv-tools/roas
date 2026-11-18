@@ -582,11 +582,11 @@ pub struct AllOfSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discriminator: Option<Discriminator>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -620,11 +620,11 @@ pub struct AnyOfSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -658,11 +658,11 @@ pub struct OneOfSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -688,11 +688,11 @@ pub struct NotSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -831,11 +831,11 @@ pub struct StringSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -945,11 +945,11 @@ pub struct IntegerSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -1051,11 +1051,11 @@ pub struct NumberSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -1123,11 +1123,11 @@ pub struct BooleanSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -1212,11 +1212,11 @@ pub struct ArraySchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -1356,11 +1356,11 @@ pub struct ObjectSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -1422,11 +1422,11 @@ pub struct NullSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -1509,11 +1509,11 @@ pub struct MultiSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
-    /// Allows extensions to the Swagger Schema.
-    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
-    /// The value can be null, a primitive, an array or an object.
+    /// Specification Extensions (`x-` keys) and every other keyword the
+    /// typed fields do not claim, kept so the schema round-trips and a
+    /// conversion carries them forward.
     #[serde(flatten)]
-    #[serde(with = "extensions")]
+    #[serde(with = "crate::common::schema_keywords")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
@@ -1782,70 +1782,6 @@ impl ValidateWithContext<Spec> for MultiSchema {
         }
         if let Some(discriminator) = &self.discriminator {
             discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
-        }
-    }
-}
-
-mod extensions {
-    use std::collections::BTreeMap;
-    use std::fmt;
-
-    use serde::de::{Error, MapAccess, Visitor};
-    use serde::ser::SerializeMap;
-    use serde::{Deserializer, Serialize, Serializer};
-
-    pub(super) fn deserialize<'de, D>(
-        deserializer: D,
-    ) -> Result<Option<BTreeMap<String, serde_json::Value>>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct ExtensionsVisitor;
-        impl<'de> Visitor<'de> for ExtensionsVisitor {
-            type Value = BTreeMap<String, serde_json::Value>;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("extensions: Option<BTreeMap<String, serde_json::Value>>")
-            }
-
-            fn visit_map<V>(
-                self,
-                mut map: V,
-            ) -> Result<BTreeMap<String, serde_json::Value>, V::Error>
-            where
-                V: MapAccess<'de>,
-            {
-                let mut ext: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-                while let Some(key) = map.next_key::<String>()? {
-                    if ext.contains_key(key.as_str()) {
-                        return Err(Error::custom(format_args!("duplicate field `{key}`")));
-                    }
-                    let value: serde_json::Value = map.next_value()?;
-                    ext.insert(key, value);
-                }
-                Ok(ext)
-            }
-        }
-
-        let map = deserializer.deserialize_map(ExtensionsVisitor)?;
-        Ok(if map.is_empty() { None } else { Some(map) })
-    }
-
-    pub(super) fn serialize<S>(
-        ext: &Option<BTreeMap<String, serde_json::Value>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        if let Some(ext) = ext {
-            let mut map = serializer.serialize_map(Some(ext.len()))?;
-            for (k, v) in ext.clone() {
-                map.serialize_entry(&k, &v)?;
-            }
-            map.end()
-        } else {
-            None::<BTreeMap<String, serde_json::Value>>.serialize(serializer)
         }
     }
 }
@@ -3475,44 +3411,6 @@ mod tests {
         let s3: SingleSchema = serde_json::from_value(serde_json::json!({"type": "array"}))
             .expect("must parse as SingleSchema array");
         assert!(matches!(s3, SingleSchema::Array(_)));
-    }
-
-    #[test]
-    fn schema_extensions_visitor_expecting_on_non_map() {
-        // lines 1523-1525: ExtensionsVisitor::expecting is called when the input
-        // to `extensions::deserialize` is not a map.
-        let mut de = serde_json::Deserializer::from_str(r#""not-a-map""#);
-        let err = super::extensions::deserialize(&mut de).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("map") || msg.contains("expected") || msg.contains("extensions"),
-            "expected a type-mismatch serde error, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn schema_extensions_duplicate_key_errors() {
-        // line 1537: `ext.contains_key(key)` returns true → duplicate-field error.
-        // serde_json normalises duplicate keys, so we must use a raw byte stream
-        // with a repeated key to exercise this path.
-        let json_bytes = br#"{"x-foo": 1, "x-foo": 2}"#;
-        let mut de = serde_json::Deserializer::from_slice(json_bytes);
-        let result = super::extensions::deserialize(&mut de);
-        // serde_json actually de-duplicates in-stream; the duplicate may or may not
-        // trigger our error depending on the serde_json version. Either way the
-        // call must not panic.
-        let _ = result;
-    }
-
-    #[test]
-    fn schema_extensions_serialize_none_branch() {
-        // line 1564: `None::<BTreeMap<…>>.serialize(serializer)` — the else branch
-        // when extensions are absent.  Call the serialize function directly.
-        let none: Option<std::collections::BTreeMap<String, serde_json::Value>> = None;
-        let ser = serde_json::value::Serializer;
-        let result = super::extensions::serialize(&none, ser);
-        let val = result.unwrap();
-        assert_eq!(val, serde_json::Value::Null);
     }
 
     // ── `$ref` with sibling keywords (OpenAPI 3.1+) ─────────────────────

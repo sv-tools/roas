@@ -1278,6 +1278,34 @@ fn keywords_a_3_0_model_drops_go_unmentioned_without_validation() {
 }
 
 #[test]
+fn keywords_a_3_0_model_keeps_unclaimed_read_as_before() {
+    // `const` is no 3.0 keyword: the model keeps it, but codegen reads
+    // it as it did when the model dropped it, and so reports nothing
+    // without validation.
+    let raw = serde_json::json!({
+        "openapi": "3.0.3",
+        "info": {"title": "t", "version": "1"},
+        "paths": {},
+        "components": {"schemas": {
+            "S": {"type": "integer", "const": 5, "maxProperties": 3}
+        }}
+    });
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let doc = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap())
+        .expect("parses");
+    let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid");
+    let generation = generate(&doc, &rust_config("")).expect("generates");
+    assert!(
+        !generation
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d.kind, DiagnosticKind::UnsupportedKeyword { .. })),
+        "{:?}",
+        generation.diagnostics
+    );
+}
+
+#[test]
 fn items_beside_prefix_items_is_reported_not_applied() {
     let g = generate(
         &document(serde_json::json!({
