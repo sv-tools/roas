@@ -1551,13 +1551,7 @@ fn scoped_base_urls(
 /// OpenAPI document — and run the workflow against a different API.
 fn base_uri(from: &InputSource, self_: Option<&str>) -> Result<Url> {
     let retrieval = match from {
-        InputSource::File(path) => {
-            let absolute = path
-                .canonicalize()
-                .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(path));
-            Url::from_file_path(&absolute)
-                .map_err(|()| anyhow!("`{}` is not a path a URL can name", absolute.display()))?
-        }
+        InputSource::File(path) => crate::file_url(path)?,
         // Nothing to have been retrieved from: resolve from the working
         // directory.
         InputSource::Stdin => {

@@ -225,7 +225,8 @@ fn overlay_description(
         .context("not UTF-8")
         .and_then(|text| crate::versioned::parse_value(text, yaml))
         .with_context(|| format!("{}: cannot be read", source.display()))?;
-    let not_json = crate::overlay::apply_overlays(&mut value, overlays, options)?;
+    let target = crate::overlay::TargetDocument::new(source, &value);
+    let not_json = crate::overlay::apply_overlays(&mut value, &target, overlays, options, false)?;
     // Exact only as JSON throughout: a YAML overlay's numbers went through
     // `f64`, and a YAML description is no more exact for being overlaid.
     // Otherwise the value goes on as it is, of no known fidelity, which

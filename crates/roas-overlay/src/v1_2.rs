@@ -10,7 +10,10 @@
 //!   own `target`). [`Apply`](crate::apply::Apply) resolves each
 //!   reference into a plain [`Action`] before applying it.
 //! - The root gains `$self`, a URI reference identifying the overlay;
-//!   neither it nor `extends` may contain a fragment.
+//!   neither it nor `extends` may contain a fragment. A relative
+//!   `extends` resolves against the base URI `$self` sets
+//!   ([`Overlay::extends_uri`]), and should match the target document's
+//!   own `$self` ([`document_uri`]).
 //! - An action's `target` may select primitive nodes: `update` and
 //!   `copy` replace them with a primitive value, `remove` removes them.
 //! - `overlay` version regex becomes `^1\.2\.\d+$`.
@@ -24,5 +27,5 @@ pub mod version;
 pub use action::{Action, ActionItem, ReusableActionReference};
 pub use components::{Components, ReusableAction, ReusableActionFields};
 pub use info::Info;
-pub use overlay::Overlay;
+pub use overlay::{Overlay, document_uri};
 pub use version::Version;

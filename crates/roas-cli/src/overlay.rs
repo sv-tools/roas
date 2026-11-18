@@ -15,6 +15,7 @@ use roas_overlay::validation::{Error as OverlayError, Validate, ValidationOption
 use roas_overlay::{v1_0, v1_1, v1_2};
 use serde_json::Value;
 use std::path::PathBuf;
+use url::Url;
 
 use crate::{InputFormat, InputSource, read_input, resolve_input_source, serialize_spec};
 
@@ -105,6 +106,16 @@ impl DetectedOverlay {
             DetectedOverlay::V1_0(o) => o.apply(target, options),
             DetectedOverlay::V1_1(o) => o.apply(target, options),
             DetectedOverlay::V1_2(o) => o.apply(target, options),
+        }
+    }
+
+    /// `extends` resolved against the overlay's base URI, for an
+    /// Overlay 1.2 document that sets it. Earlier versions define no
+    /// base URI, so their `extends` is not resolved.
+    fn extends_uri(&self, retrieval: &Url) -> Option<Result<Url, url::ParseError>> {
+        match self {
+            DetectedOverlay::V1_2(o) => o.extends_uri(retrieval),
+            DetectedOverlay::V1_0(_) | DetectedOverlay::V1_1(_) => None,
         }
     }
 
@@ -245,6 +256,11 @@ pub(crate) struct OverlayApplyArgs {
     /// Output format. Defaults to the spec's input format.
     #[arg(long, value_enum)]
     output_format: Option<InputFormat>,
+
+    /// Fail, instead of warning, when an Overlay 1.2 overlay's
+    /// `extends` does not identify the spec.
+    #[arg(long)]
+    strict: bool,
 }
 
 pub(crate) fn run_overlay(cmd: OverlayCommand) -> Result<()> {
@@ -309,22 +325,83 @@ fn run_overlay_apply(args: OverlayApplyArgs) -> Result<()> {
         options |= *opt;
     }
 
-    apply_overlays(&mut spec, &args.overlay, options)?;
+    let target = TargetDocument::new(&source, &spec);
+    apply_overlays(&mut spec, &target, &args.overlay, options, args.strict)?;
 
     let out_format = args.output_format.unwrap_or(input_format);
     print!("{}", serialize_spec(&spec, out_format, true)?);
     Ok(())
 }
 
+/// The URIs that identify the spec an overlay is applied to, for
+/// matching an Overlay 1.2 `extends`: its own `$self`, resolved against
+/// where it was read from, and that retrieval URI. A spec piped on stdin
+/// has no retrieval URI, so only an absolute `$self` identifies it.
+pub(crate) struct TargetDocument {
+    uris: Vec<Url>,
+}
+
+impl TargetDocument {
+    pub(crate) fn new(source: &InputSource, spec: &Value) -> Self {
+        let self_uri = spec.get("$self").and_then(Value::as_str);
+        let retrieval = match source {
+            InputSource::File(path) => crate::file_url(path).ok(),
+            InputSource::Stdin => None,
+        };
+        let mut uris = Vec::new();
+        match (retrieval, self_uri) {
+            (Some(retrieval), self_uri) => {
+                if let Some(self_uri) = self_uri
+                    && let Ok(uri) = v1_2::document_uri(Some(self_uri), &retrieval)
+                {
+                    uris.push(uri);
+                }
+                uris.push(retrieval);
+            }
+            (None, Some(self_uri)) => uris.extend(Url::parse(self_uri).ok()),
+            (None, None) => {}
+        }
+        Self { uris }
+    }
+
+    /// Why `overlay`, read from `path`, was not written for this spec,
+    /// or `None` when it was, sets no `extends`, or the spec cannot be
+    /// identified.
+    fn mismatch(&self, overlay: &DetectedOverlay, path: &std::path::Path) -> Option<String> {
+        if self.uris.is_empty() {
+            return None;
+        }
+        let retrieval = match crate::file_url(path) {
+            Ok(retrieval) => retrieval,
+            Err(err) => return Some(format!("{err:#}")),
+        };
+        match overlay.extends_uri(&retrieval)? {
+            Err(err) => Some(format!("cannot resolve `extends`: {err}")),
+            Ok(extends) if self.uris.contains(&extends) => None,
+            Ok(extends) => Some(format!(
+                "`extends` is {extends}, but the spec is {}",
+                self.uris
+                    .iter()
+                    .map(Url::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" or "),
+            )),
+        }
+    }
+}
+
 /// Apply each overlay at `paths` to `spec` in order. Shared by
 /// `overlay apply`, `convert --apply` and `generate --apply`. Each overlay is loaded with
 /// extension-based format detection and its version detected from the
-/// `overlay` field. Returns the first overlay not read as JSON, whose
-/// numbers went through `f64`.
+/// `overlay` field. An Overlay 1.2 overlay whose `extends` does not
+/// identify `target` is a warning, or an error when `strict`. Returns the
+/// first overlay not read as JSON, whose numbers went through `f64`.
 pub(crate) fn apply_overlays(
     spec: &mut Value,
+    target: &TargetDocument,
     paths: &[PathBuf],
     options: EnumSet<ApplyOptions>,
+    strict: bool,
 ) -> Result<Option<PathBuf>> {
     let mut not_json = None;
     for path in paths {
@@ -335,6 +412,18 @@ pub(crate) fn apply_overlays(
         }
         let overlay = detect_or_use_overlay(None, value)
             .with_context(|| format!("parsing overlay {}", path.display()))?;
+        if let Some(reason) = target.mismatch(&overlay, path) {
+            if strict {
+                bail!(
+                    "overlay {} was not written for this spec: {reason}",
+                    path.display()
+                );
+            }
+            eprintln!(
+                "warning: overlay {} may not be written for this spec: {reason}",
+                path.display()
+            );
+        }
         overlay
             .apply(spec, options)
             .map_err(|e| anyhow!("applying overlay {}: {e}", path.display()))?;
@@ -381,6 +470,10 @@ mod tests {
                 "actions": { "describe": { "fields": { "update": { "description": "d" } } } }
             }
         })
+    }
+
+    fn no_target() -> TargetDocument {
+        TargetDocument::new(&InputSource::Stdin, &json!({}))
     }
 
     /// A temp file that cleans itself up on drop (mirrors the helper in
@@ -519,8 +612,115 @@ mod tests {
         });
         // Write the v1.0 overlay to a temp file and apply it.
         let f = TempFile::write("apply.json", &v1_0_overlay());
-        apply_overlays(&mut spec, std::slice::from_ref(&f.0), EnumSet::empty()).unwrap();
+        apply_overlays(
+            &mut spec,
+            &no_target(),
+            std::slice::from_ref(&f.0),
+            EnumSet::empty(),
+            false,
+        )
+        .unwrap();
         assert_eq!(spec["info"]["description"], "d");
+    }
+
+    fn extending(extends: &str) -> Value {
+        json!({
+            "overlay": "1.2.0",
+            "info": {"title": "t", "version": "1"},
+            "extends": extends,
+            "actions": [{"target": "$.info", "update": {"x-applied": true}}]
+        })
+    }
+
+    fn file_name(path: &std::path::Path) -> String {
+        path.file_name().unwrap().to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn extends_relative_to_the_overlay_matches_the_spec_file() {
+        let spec_file = TempFile::write("spec.json", &json!({"openapi": "3.2.0"}));
+        let overlay = TempFile::write("o.json", &extending(&file_name(&spec_file.0)));
+        let target = TargetDocument::new(&InputSource::File(spec_file.0.clone()), &json!({}));
+        let detected = detect_or_use_overlay(None, extending(&file_name(&spec_file.0))).unwrap();
+        assert_eq!(target.mismatch(&detected, &overlay.0), None);
+
+        let mut spec = json!({"info": {}});
+        apply_overlays(
+            &mut spec,
+            &target,
+            std::slice::from_ref(&overlay.0),
+            EnumSet::empty(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(spec["info"]["x-applied"], json!(true));
+    }
+
+    #[test]
+    fn extends_matches_the_spec_by_its_self() {
+        let spec = json!({"openapi": "3.2.0", "$self": "https://example.com/api/openapi.yaml"});
+        let overlay = TempFile::write("o.json", &json!({}));
+        let detected =
+            detect_or_use_overlay(None, extending("https://example.com/api/openapi.yaml")).unwrap();
+        // Read from a file elsewhere, or piped in: `$self` identifies it.
+        let spec_file = TempFile::write("copy.json", &spec);
+        for source in [InputSource::File(spec_file.0.clone()), InputSource::Stdin] {
+            let target = TargetDocument::new(&source, &spec);
+            assert_eq!(target.mismatch(&detected, &overlay.0), None);
+        }
+    }
+
+    #[test]
+    fn extends_naming_another_spec_warns_or_fails_when_strict() {
+        let spec_file = TempFile::write("spec.json", &json!({"info": {}}));
+        let overlay = TempFile::write("o.json", &extending("other.yaml"));
+        let target = TargetDocument::new(&InputSource::File(spec_file.0.clone()), &json!({}));
+
+        let mut spec = json!({"info": {}});
+        let err = apply_overlays(
+            &mut spec,
+            &target,
+            std::slice::from_ref(&overlay.0),
+            EnumSet::empty(),
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("was not written for this spec"), "{err}");
+        assert!(err.contains("other.yaml"), "{err}");
+        assert_eq!(spec, json!({"info": {}}), "strict fails before applying");
+
+        apply_overlays(
+            &mut spec,
+            &target,
+            std::slice::from_ref(&overlay.0),
+            EnumSet::empty(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            spec["info"]["x-applied"],
+            json!(true),
+            "a warning still applies"
+        );
+    }
+
+    #[test]
+    fn extends_is_not_checked_when_the_spec_cannot_be_identified() {
+        let overlay = TempFile::write("o.json", &json!({}));
+        let detected = detect_or_use_overlay(None, extending("other.yaml")).unwrap();
+        // Piped in without `$self`, or with a relative one.
+        for spec in [json!({}), json!({"$self": "openapi.yaml"})] {
+            let target = TargetDocument::new(&InputSource::Stdin, &spec);
+            assert_eq!(target.mismatch(&detected, &overlay.0), None);
+        }
+        // An Overlay 1.1 `extends` is not resolved.
+        let spec_file = TempFile::write("spec.json", &json!({}));
+        let target = TargetDocument::new(&InputSource::File(spec_file.0.clone()), &json!({}));
+        let mut v1_1 = extending("other.yaml");
+        v1_1["overlay"] = json!("1.1.0");
+        let detected = detect_or_use_overlay(None, v1_1).unwrap();
+        assert_eq!(target.mismatch(&detected, &overlay.0), None);
     }
 
     #[test]
@@ -533,8 +733,14 @@ mod tests {
             "actions": [ { "target": "$.info.title", "update": { "x": 1 } } ]
         });
         let f = TempFile::write("bad.json", &bad);
-        let err =
-            apply_overlays(&mut spec, std::slice::from_ref(&f.0), EnumSet::empty()).unwrap_err();
+        let err = apply_overlays(
+            &mut spec,
+            &no_target(),
+            std::slice::from_ref(&f.0),
+            EnumSet::empty(),
+            false,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("applying overlay"));
     }
 
@@ -715,6 +921,7 @@ mod tests {
             apply_options: vec![],
             format: None,
             output_format: Some(InputFormat::Yaml), // exercise output-format override
+            strict: false,
         };
         run_overlay(OverlayCommand::Apply(args)).expect("apply must succeed");
     }
@@ -735,6 +942,7 @@ mod tests {
             apply_options: vec![ApplyOptions::ErrorOnZeroMatch],
             format: None,
             output_format: None,
+            strict: false,
         };
         let err = run_overlay(OverlayCommand::Apply(args)).unwrap_err();
         assert!(err.to_string().contains("applying overlay"));
