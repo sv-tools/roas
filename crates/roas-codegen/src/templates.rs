@@ -362,17 +362,22 @@ pub(crate) fn environment(
 
 /// A template directory overriding nothing: for each default template
 /// rendered from `entries` (a template and what it renders), and each one
-/// they include, a template at its name extending the default and filling
+/// they include, short of those in `unused` (the configuration never
+/// renders them), a template at its name extending the default and filling
 /// every block it declares with the default's own content. As a template
 /// directory it renders what the defaults do; it is there to show what
 /// can be overridden, and to copy from.
-pub(crate) fn scaffold(entries: &[(&str, String)]) -> Result<Vec<GeneratedFile>, GenerateError> {
-    scaffold_of(&embedded()?, entries)
+pub(crate) fn scaffold(
+    entries: &[(&str, String)],
+    unused: &[&str],
+) -> Result<Vec<GeneratedFile>, GenerateError> {
+    scaffold_of(&embedded()?, entries, unused)
 }
 
 fn scaffold_of(
     defaults: &BTreeMap<String, String>,
     entries: &[(&str, String)],
+    unused: &[&str],
 ) -> Result<Vec<GeneratedFile>, GenerateError> {
     let mut roles: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut shapes = BTreeMap::new();
@@ -398,6 +403,9 @@ fn scaffold_of(
                     "{name} includes a template named by an expression, which the scaffold cannot follow"
                 )));
             };
+            if unused.contains(&included.as_str()) {
+                continue;
+            }
             let role = match include.loops.as_slice() {
                 [] => format!("Included by {name}."),
                 loops => format!(
@@ -565,7 +573,7 @@ mod tests {
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
         .collect();
-        let files = scaffold_of(&defaults, &[("a", "`a.rs`".into())]).unwrap();
+        let files = scaffold_of(&defaults, &[("a", "`a.rs`".into())], &[]).unwrap();
         let names: Vec<_> = files.iter().map(|f| f.path.to_str().unwrap()).collect();
         assert_eq!(names, [TEMPLATE_MANIFEST, "a", "b"]);
         assert!(
@@ -593,7 +601,7 @@ mod tests {
             ("e", "e:"),
             ("nope", "no default template nope"),
         ] {
-            let error = scaffold_of(&defaults, &[(entry, String::new())]).unwrap_err();
+            let error = scaffold_of(&defaults, &[(entry, String::new())], &[]).unwrap_err();
             assert!(error.to_string().contains(wanted), "{error}");
         }
     }

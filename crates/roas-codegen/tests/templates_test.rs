@@ -492,3 +492,20 @@ fn the_scaffold_lists_every_block_and_renders_the_defaults() {
         }
     }
 }
+
+#[test]
+fn the_scaffold_lists_validation_only_when_it_renders() {
+    for (target, path) in [
+        (Target::Rust, "rust/validate.rs.jinja"),
+        (Target::Go, "go/validate.go.jinja"),
+    ] {
+        for validation in [true, false] {
+            let mut file = ConfigFile::default();
+            file.target = Some(target);
+            file.validation = Some(validation);
+            let files = scaffold(&file.build().unwrap()).unwrap();
+            let listed = files.iter().any(|f| f.path == Path::new(path));
+            assert_eq!(listed, validation, "{target:?} validation={validation}");
+        }
+    }
+}

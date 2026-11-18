@@ -594,7 +594,13 @@ pub fn scaffold(config: &Config) -> Result<Vec<GeneratedFile>, GenerateError> {
         Target::Rust => rust::entries(config),
         Target::Go => go::entries(config),
     };
-    crate::templates::scaffold(&entries)
+    // Validation renders only when it is on.
+    let unused: &[&str] = if config.validation {
+        &[]
+    } else {
+        &["rust/validate.rs.jinja", "go/validate.go.jinja"]
+    };
+    crate::templates::scaffold(&entries, unused)
 }
 
 #[cfg(test)]
