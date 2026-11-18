@@ -22,7 +22,7 @@ The version features are independent — enable whichever you need. With neighbo
 ### Overlay 1.2
 
 - **Reusable actions.** `components.actions` holds named action fields without a `target`; an `actions` entry `{ "$ref": "#/components/actions/<name>", "target": … }` applies them to its own target. Apply resolves each reference into a plain action first: the referenced `fields`, then the reference's `target`, its `description` when set, and its `x-` extensions merged over those of `fields`. A reference may not set `update`, `copy` or `remove` (the schema forbids it), and deserializing one that does fails rather than dropping them.
-- **`$self` and `extends`** are parsed, serialized and validated (neither may contain a fragment). Resolving `extends` against the base URI, or matching it to a target document's `$self`, is left to the caller.
+- **`$self` and `extends`** are parsed, serialized and validated (neither may contain a fragment). `Overlay::base_uri` and `Overlay::extends_uri` resolve them per the spec's base URI rules, given the URI the overlay was retrieved from; `extends` should then match the target's `v1_2::document_uri` (its own `$self`, or where it was read from). Applying an overlay does not check `extends`: that is left to the caller.
 - **Primitive targets.** `update` and `copy` replace a selected primitive (or `null`) with their value, which must then be a primitive too (`NonPrimitiveValueForPrimitiveTarget`), and `remove` removes primitive array elements.
 
 ## Quick start

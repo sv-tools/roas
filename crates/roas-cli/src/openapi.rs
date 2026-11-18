@@ -273,6 +273,7 @@ fn run_validate(args: ValidateArgs) -> Result<()> {
 fn run_convert(args: ConvertArgs) -> Result<()> {
     let source = resolve_input_source(args.file.as_deref())?;
     let (value, input_format) = read_input(&source, args.format)?;
+    let document = overlay::TargetDocument::new(&source, &value);
     let detected = versioned::detect_or_use(args.from, value)?;
 
     let target = args.to;
@@ -361,7 +362,7 @@ fn run_convert(args: ConvertArgs) -> Result<()> {
             apply_options |= *opt;
         }
         let mut value = converted.into_value()?;
-        overlay::apply_overlays(&mut value, &args.apply, apply_options)?;
+        overlay::apply_overlays(&mut value, &document, &args.apply, apply_options, false)?;
 
         // 4) Collapse the overlaid spec. Re-parse at the target
         //    version first, since collapse needs the typed model.

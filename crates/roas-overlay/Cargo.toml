@@ -28,7 +28,7 @@ v1_1 = []
 # Support for OpenAPI Overlay v1.2.x. Independent of the others; enable
 # `v1_1` too to get the additional `From<v1_1::Overlay> for
 # v1_2::Overlay` upconversion impl.
-v1_2 = ["dep:percent-encoding"]
+v1_2 = ["dep:percent-encoding", "dep:url"]
 
 # `clap::ValueEnum` impls for `apply::ApplyOptions` and
 # `validation::ValidationOptions`, for downstream CLIs.
@@ -41,6 +41,7 @@ percent-encoding = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 serde_json_path.workspace = true
+url = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde-saphyr.workspace = true

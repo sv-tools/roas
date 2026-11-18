@@ -218,6 +218,17 @@ impl InputSource {
     }
 }
 
+/// The `file:` URL naming `path`, made absolute first: the retrieval
+/// URI relative references in a document read from `path` resolve
+/// against.
+pub(crate) fn file_url(path: &Path) -> Result<url::Url> {
+    let absolute = path
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(path));
+    url::Url::from_file_path(&absolute)
+        .map_err(|()| anyhow::anyhow!("`{}` is not a path a URL can name", absolute.display()))
+}
+
 /// Resolve the positional `file` argument into a concrete source. Honors
 /// the `-` sentinel and the "no arg + piped stdin" shortcut. Returns
 /// `Err` only when neither was provided and stdin is a TTY.
