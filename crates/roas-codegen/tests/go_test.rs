@@ -405,6 +405,12 @@ fn have_go() -> bool {
 /// `go vet` over a generated file in a module of its own; `None` without
 /// Go 1.27 or later.
 fn vet(code: &str, tag: &str) -> Option<Result<(), String>> {
+    vet_with(code, tag, &[])
+}
+
+/// `go vet` over a generated file beside packages of the module's own,
+/// each a path in it and its source.
+fn vet_with(code: &str, tag: &str, packages: &[(&str, &str)]) -> Option<Result<(), String>> {
     if !have_go() {
         return None;
     }
@@ -413,6 +419,11 @@ fn vet(code: &str, tag: &str) -> Option<Result<(), String>> {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("go.mod"), "module vet\n\ngo 1.27\n").unwrap();
     std::fs::write(dir.join("types.go"), code).unwrap();
+    for (path, source) in packages {
+        let file = dir.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, source).unwrap();
+    }
     let output = std::process::Command::new("go")
         .args(["vet", "./..."])
         .current_dir(&dir)
@@ -951,4 +962,70 @@ fn file_per_type_leaves_a_substitution_import_only_to_an_extra_import_of_its_nam
         // The module is a dependency either way.
         assert_eq!(generation.dependencies.go.len(), 1, "{extra}");
     }
+}
+
+#[test]
+fn a_substitution_package_named_like_a_validation_local_compiles() {
+    // Each package is named like a name in scope where validation decodes
+    // a member: the report, the pointer, whether a pattern matched, and
+    // the match itself.
+    for local in ["r", "pointer", "matched", "m"] {
+        let toml = format!(
+            "validation = true\n[substitutions.thing.go]\nname = \"{local}.Thing\"\nimport = \"vet/{local}\"\n"
+        );
+        let thing = serde_json::json!({"type": "string", "format": "thing"});
+        let components = serde_json::json!({
+            "Closed": {"type": "object", "patternProperties": {"^a": thing}, "additionalProperties": false},
+            "Open": {"type": "object", "patternProperties": {"^a": {"type": "string"}}, "additionalProperties": thing},
+            "Listed": {"type": "object", "patternProperties": {"^a": {"type": "array", "items": thing}}, "additionalProperties": false},
+            "Field": {"type": "object", "properties": {"a1": {"type": "string"}}, "patternProperties": {"^a": thing}}
+        });
+        let Some(generation) = go(components, &toml) else {
+            return;
+        };
+        let mut generation = generation.expect("generates");
+        assert!(!generation.has_errors(), "{:?}", generation.diagnostics);
+        let code = generation.files.remove(0).contents;
+        // Only a type naming the package is aliased.
+        let squeezed = squeezed(&code);
+        for alias in [
+            format!("type pattern0OfClosed = {local}.Thing"),
+            format!("type othersOfOpen = {local}.Thing"),
+            format!("type pattern0OfListed = []{local}.Thing"),
+            format!("type pattern0OfField = {local}.Thing"),
+        ] {
+            assert!(squeezed.contains(&alias), "{alias}: {squeezed}");
+        }
+        assert!(!squeezed.contains("pattern0OfOpen"), "{squeezed}");
+        let package = format!("package {local}\n\ntype Thing string\n");
+        let path = format!("{local}/{local}.go");
+        let Some(result) = vet_with(&code, local, &[(&path, &package)]) else {
+            return;
+        };
+        if let Err(error) = result {
+            panic!("{local}: go vet failed\n{error}\n{code}");
+        }
+    }
+}
+
+#[test]
+fn file_per_type_declares_a_member_alias_beside_its_type() {
+    let toml = "layout = \"file_per_type\"\nvalidation = true\n[substitutions.date-time.go]\nname = \"time.Time\"\nimport = \"time\"\n";
+    let components = serde_json::json!({
+        "Log": {"type": "object", "patternProperties": {"^at": {"type": "string", "format": "date-time"}}, "additionalProperties": false},
+        "Other": {"type": "string"}
+    });
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let generation = result.expect("generates");
+    let log = generation
+        .files
+        .iter()
+        .find(|f| f.path == Path::new("log.go"))
+        .unwrap();
+    let code = squeezed(&log.contents);
+    assert!(code.contains("type pattern0OfLog = time.Time"), "{code}");
+    assert!(code.contains("\"time\""), "{code}");
+    assert!(code.contains("new(pattern0OfLog)"), "{code}");
 }

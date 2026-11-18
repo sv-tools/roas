@@ -164,6 +164,13 @@ pub(crate) struct SupportView {
     pub member_patterns: bool,
 }
 
+/// `type {name} = {ty}`.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct AliasView {
+    pub name: String,
+    pub ty: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct FieldView {
     pub name: String,
@@ -249,6 +256,10 @@ pub(crate) struct TypeView {
     /// The Go spelling of the `additionalProperties` schema beside them.
     #[serde(skip)]
     pub others_ty: Option<String>,
+    /// Package-level aliases of the member types validation decodes into
+    /// that name a substitution's package: inside `validateInto` a local,
+    /// such as the report `r`, may shadow it.
+    pub validate_aliases: Vec<AliasView>,
     /// A member name no struct tag can carry: the struct writes itself.
     pub marshal: bool,
     /// The raw constructor of a composed holder.
@@ -613,6 +624,25 @@ fn assign_files(types: &mut [TypeView], config: &Config) {
 }
 
 impl Builder<'_> {
+    /// The spelling validation decodes a member of `view` into: `ty`
+    /// itself, or, when it names a substitution's package, an alias
+    /// `{prefix}{view.name}` declared at package level, where no local of
+    /// `validateInto` shadows that package.
+    fn member_ty(&self, view: &mut TypeView, prefix: String, ty: String) -> String {
+        let substituted = super::imports::qualifiers(&ty)
+            .iter()
+            .any(|q| !BUILTIN_IMPORTS.iter().any(|(_, name)| name == q));
+        if !self.config.validation || !substituted {
+            return ty;
+        }
+        let name = format!("{prefix}{}", view.name);
+        view.validate_aliases.push(AliasView {
+            name: name.clone(),
+            ty,
+        });
+        name
+    }
+
     fn allocate_type_names(&mut self) -> Result<(), GenerateError> {
         // The helpers every file may declare.
         for reserved in ["Nullable", "Int64", "Int32", "Null"] {
@@ -871,6 +901,7 @@ impl Builder<'_> {
             member_patterns: Vec::new(),
             pattern_tys: Vec::new(),
             others_ty: None,
+            validate_aliases: Vec::new(),
             marshal: false,
             from_raw: String::new(),
             validate: None,
@@ -1073,15 +1104,19 @@ impl Builder<'_> {
                     self.support.member_patterns = true;
                     view.member_patterns = patterns.iter().map(|p| quote(p)).collect();
                 }
-                for pattern in &s.patterns {
+                for (i, pattern) in s.patterns.iter().enumerate() {
                     let spelled = match pattern.branch() {
-                        Some(b) => Some(self.spell(unboxed(&b.ty))?),
+                        Some(b) => {
+                            let ty = self.spell(unboxed(&b.ty))?;
+                            Some(self.member_ty(view, format!("pattern{i}Of"), ty))
+                        }
                         None => None,
                     };
                     view.pattern_tys.push(spelled);
                 }
                 if let crate::ir::Others::Schema(b) = &s.others {
-                    view.others_ty = Some(self.spell(unboxed(&b.ty))?);
+                    let ty = self.spell(unboxed(&b.ty))?;
+                    view.others_ty = Some(self.member_ty(view, "othersOf".to_owned(), ty));
                 }
                 if let Additional::CatchAll(ty) = &s.additional {
                     let inner = self.spell(unboxed(ty))?;
