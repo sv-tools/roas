@@ -6,9 +6,10 @@
 
 use crate::apply::ActionReferenceError;
 use crate::common::apply::unescape_pointer_segment;
-use crate::v1_2::action::validate_operation_fields;
+use crate::v1_2::action::{present_value, validate_operation_fields};
 use crate::validation::{Context, ValidateWithContext};
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -46,11 +47,16 @@ pub(crate) fn find_reusable_action<'a>(
 }
 
 /// The unescaped name in `#/components/actions/<name>`, per the
-/// schema's pattern `^#/components/actions/(?:[^~/]|~0|~1)+$`.
+/// schema's pattern `^#/components/actions/(?:[^~/]|~0|~1)+$`. `$ref`
+/// is a URI fragment, so it is percent-decoded before the JSON Pointer
+/// is read (RFC 6901 §6): `add%20errors` names `add errors`.
 fn action_name(reference: &str) -> Option<String> {
-    let escaped = reference.strip_prefix(ACTION_REFERENCE_PREFIX)?;
-    let valid = !escaped.is_empty() && !escaped.contains('/') && has_only_valid_escapes(escaped);
-    valid.then(|| unescape_pointer_segment(escaped))
+    let encoded = reference.strip_prefix(ACTION_REFERENCE_PREFIX)?;
+    let escaped = percent_encoding::percent_decode_str(encoded)
+        .decode_utf8()
+        .ok()?;
+    let valid = !escaped.is_empty() && !escaped.contains('/') && has_only_valid_escapes(&escaped);
+    valid.then(|| unescape_pointer_segment(&escaped))
 }
 
 /// Whether every `~` in `segment` starts `~0` or `~1` (RFC 6901).
@@ -80,8 +86,13 @@ pub struct ReusableAction {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
-    /// The action's fields.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The action's fields. Deserializing fails when they set `target`,
+    /// which the spec says MUST NOT be provided here.
+    #[serde(
+        default,
+        deserialize_with = "fields_without_target",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub fields: Option<ReusableActionFields>,
 
     /// `x-`-prefixed Specification Extensions.
@@ -89,6 +100,21 @@ pub struct ReusableAction {
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, Value>>,
+}
+
+/// `fields` as [`ReusableActionFields`], rejecting a `target` rather
+/// than dropping it: the reference supplies the target.
+fn fields_without_target<'de, D: Deserializer<'de>>(
+    de: D,
+) -> Result<Option<ReusableActionFields>, D::Error> {
+    let value = Value::deserialize(de)?;
+    if value.get("target").is_some() {
+        return Err(D::Error::custom(
+            "a Reusable Action Object's `fields` cannot set `target`; \
+             the Reusable Action Reference Object supplies it",
+        ));
+    }
+    Option::<ReusableActionFields>::deserialize(value).map_err(D::Error::custom)
 }
 
 impl ValidateWithContext for ReusableAction {
@@ -108,8 +134,12 @@ pub struct ReusableActionFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
-    /// As the Action Object's `update`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// As the Action Object's `update`, an explicit `null` included.
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub update: Option<Value>,
 
     /// As the Action Object's `copy`.
@@ -174,7 +204,17 @@ mod tests {
             action_name("#/components/actions/~1paths~0x").as_deref(),
             Some("/paths~x"),
         );
+        assert_eq!(
+            action_name("#/components/actions/add%20errors").as_deref(),
+            Some("add errors"),
+        );
+        assert_eq!(
+            action_name("#/components/actions/a%7E1b").as_deref(),
+            Some("a/b"),
+        );
         for bad in [
+            "#/components/actions/a%2Fb",
+            "#/components/actions/%FF",
             "#/components/actions/",
             "#/components/actions/a/b",
             "#/components/actions/~",
@@ -183,6 +223,27 @@ mod tests {
         ] {
             assert_eq!(action_name(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn deserialize_keeps_explicit_null_update_in_fields() {
+        let wire = json!({ "actions": { "clear": { "fields": { "update": null } } } });
+        let components: Components = serde_json::from_value(wire.clone()).unwrap();
+        let fields = components.actions["clear"].fields.as_ref().unwrap();
+        assert_eq!(fields.update, Some(Value::Null));
+        assert_eq!(serde_json::to_value(&components).unwrap(), wire);
+    }
+
+    #[test]
+    fn deserialize_rejects_target_in_fields() {
+        let err = serde_json::from_value::<Components>(json!({
+            "actions": { "a": { "fields": { "target": "$.b", "update": { "k": 1 } } } }
+        }))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("cannot set `target`"),
+            "got: {err}"
+        );
     }
 
     #[test]

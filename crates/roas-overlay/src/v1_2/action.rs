@@ -27,8 +27,13 @@ pub struct Action {
 
     /// Value merged into the selected nodes; a primitive value replaces
     /// selected primitive nodes. Mutually exclusive with `copy` and with
-    /// `remove: true`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// `remove: true`. An explicit `update: null` is kept as
+    /// `Some(Value::Null)`.
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub update: Option<Value>,
 
     /// RFC 9535 JSONPath selecting exactly one source node in the
@@ -63,6 +68,13 @@ impl Action {
     pub fn has_operation(&self) -> bool {
         self.is_remove() || self.update.is_some() || self.copy.is_some()
     }
+}
+
+/// Deserialize a field that is present as `Some`, `null` included, so
+/// an explicit `update: null` is told apart from a missing `update`;
+/// pair with `#[serde(default)]` for the missing case.
+pub(crate) fn present_value<'de, D: Deserializer<'de>>(de: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(de).map(Some)
 }
 
 /// Record the diagnostics `update`, `copy` and `remove` raise on their
@@ -117,6 +129,13 @@ impl ValidateWithContext for Action {
 /// extensions here; `update`, `copy` and `remove` belong in the
 /// reusable action's `fields`, and deserializing an [`ActionItem`]
 /// that sets them beside `$ref` fails.
+///
+/// The spec's prose says a reference "MAY provide action fields that
+/// override values from the referenced reusable action", but its fixed
+/// fields table and the schema list only `$ref`, `target` and
+/// `description`. This crate follows the table and the schema: the
+/// fields a reference overrides are `target` (which `fields` may not
+/// set) and `description`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ReusableActionReference {
     /// **Required** `#/components/actions/<name>`, the name escaped per
@@ -299,6 +318,18 @@ mod tests {
         };
         assert_eq!(action.update, Some(json!({ "x": 1 })));
         assert_eq!(item.target(), "$.info");
+    }
+
+    #[test]
+    fn deserialize_keeps_explicit_null_update() {
+        let wire = json!({ "target": "$.info.summary", "update": null });
+        let action: Action = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(action.update, Some(Value::Null));
+        assert!(action.has_operation());
+        assert_eq!(serde_json::to_value(&action).unwrap(), wire);
+
+        let action: Action = serde_json::from_value(json!({ "target": "$" })).unwrap();
+        assert_eq!(action.update, None);
     }
 
     #[test]

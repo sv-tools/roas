@@ -3165,6 +3165,7 @@ version = "0.3.0"
 dependencies = [
  "clap",
  "enumset",
+ "percent-encoding",
  "serde",
  "serde-saphyr",
  "serde_json",

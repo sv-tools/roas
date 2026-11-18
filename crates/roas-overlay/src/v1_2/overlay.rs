@@ -382,6 +382,26 @@ mod tests {
     }
 
     #[test]
+    fn apply_null_update_inline_and_referenced_replaces_primitive_targets() {
+        let o = overlay_with(
+            json!([
+                { "target": "$.info.summary", "update": null },
+                { "$ref": "#/components/actions/clear%20it", "target": "$.info.description" }
+            ]),
+            json!({ "actions": { "clear it": { "fields": { "update": null } } } }),
+        );
+        assert_eq!(validation_errors(&o), Vec::<String>::new());
+        let mut doc = json!({ "info": { "summary": "S", "description": "D" } });
+        let report = o.apply(&mut doc, EnumSet::empty()).unwrap();
+        assert_eq!(report.actions[0].matched, 1);
+        assert_eq!(report.actions[1].matched, 1);
+        assert_eq!(
+            doc,
+            json!({ "info": { "summary": null, "description": null } })
+        );
+    }
+
+    #[test]
     fn apply_copy_replaces_primitive_target() {
         let o = overlay_with(
             json!([{ "target": "$.info.title", "copy": "$.info['x-public-title']" }]),
