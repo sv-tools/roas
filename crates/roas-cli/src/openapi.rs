@@ -15,7 +15,7 @@
 //!   pipelines.
 //!
 //! - `openapi convert --to <VERSION> [FILE]` — chain the existing
-//!   `From<v_X::Spec> for v_Y::Spec` migrations to upconvert a spec.
+//!   `TryFrom<v_X::Spec> for v_Y::Spec` migrations to upconvert a spec.
 //!   Pass `--from` to force the input version. Pass `--merge <FILE>`
 //!   (repeatable) to layer additional specs on top: each is loaded,
 //!   upconverted to the target version, and merged in via

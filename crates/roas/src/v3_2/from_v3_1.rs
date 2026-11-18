@@ -286,7 +286,7 @@ mod tests {
         // The typed v3.1 `Tag` drops fields it doesn't declare
         // (`summary`, `parent`, `kind` are all v3.2 additions), so
         // this "preserve existing X" case can't reach the converter
-        // through the `From<V31Spec>` path. Exercise the migration
+        // through the `TryFrom<V31Spec>` path. Exercise the migration
         // directly on hand-built JSON to pin down the defensive
         // behaviour: `x-displayName` does NOT overwrite an existing
         // `summary`.

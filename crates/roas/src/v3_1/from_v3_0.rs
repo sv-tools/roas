@@ -664,7 +664,7 @@ mod tests {
         // drop `nullable` without synthesising a `type: ["null"]` —
         // that would change semantics from "any" to "null only".
         //
-        // The typed `From<v3_0::Spec>` path can't actually deliver a
+        // The typed `TryFrom<v3_0::Spec>` path can't actually deliver a
         // typeless schema to `normalize_nullable` (v3_0's
         // `ObjectSchema` re-serializes an explicit `type: object`),
         // so exercise the walker directly on hand-built JSON to pin
