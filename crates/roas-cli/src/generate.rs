@@ -592,18 +592,17 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
         }
         let files = roas_codegen::scaffold(&config)?;
         // A scaffold is for editing, so a file already there may be
-        // someone's work: refused before anything is written.
-        if let Some(taken) = files
-            .iter()
-            .map(|file| dir.join(&file.path))
-            .find(|path| std::fs::symlink_metadata(path).is_ok())
-        {
-            bail!(
-                "--dump-scaffold: {} already exists; dump into an empty directory",
-                taken.display()
-            );
+        // someone's work, and a link inside the directory could lead
+        // anywhere: every path is checked before anything is written.
+        for file in &files {
+            scaffold_slot(dir, &file.path)?;
         }
-        for file in files {
+        // The manifest last: a run that fails part way leaves no
+        // `roas-templates.toml` making the directory a template one.
+        let (manifest, templates): (Vec<_>, Vec<_>) = files
+            .into_iter()
+            .partition(|file| file.path == std::path::Path::new("roas-templates.toml"));
+        for file in templates.into_iter().chain(manifest) {
             let path = dir.join(&file.path);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
@@ -816,6 +815,39 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     }
     if failing > 0 {
         return Err(partial_failure());
+    }
+    Ok(())
+}
+
+/// Refuses a scaffold file at `relative` under `dir` unless the path is
+/// free: every directory on the way is a real one, not a link or a file,
+/// and nothing is at the end.
+fn scaffold_slot(dir: &std::path::Path, relative: &std::path::Path) -> anyhow::Result<()> {
+    let mut path = dir.to_path_buf();
+    let mut parts = relative.components().peekable();
+    while let Some(part) = parts.next() {
+        path.push(part);
+        let last = parts.peek().is_none();
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("--dump-scaffold: reading {}", path.display()));
+            }
+            Ok(_) if last => bail!(
+                "--dump-scaffold: {} already exists; dump into an empty directory",
+                path.display()
+            ),
+            Ok(meta) if meta.file_type().is_symlink() => bail!(
+                "--dump-scaffold: {} is a symbolic link; dump into a directory without one",
+                path.display()
+            ),
+            Ok(meta) if !meta.is_dir() => bail!(
+                "--dump-scaffold: {} is not a directory; dump somewhere else",
+                path.display()
+            ),
+            Ok(_) => {}
+        }
     }
     Ok(())
 }
@@ -1258,6 +1290,37 @@ mod tests {
         dump.dump_scaffold = Some(go.clone());
         run_generate(dump).unwrap();
         assert!(go.join("go/file.go.jinja").exists());
+    }
+
+    #[test]
+    fn dump_scaffold_refuses_a_file_or_link_on_the_way() {
+        let dir = TempDir::new("scaffold-way");
+        let spec = dir.0.join("api.json");
+        std::fs::write(&spec, PET).unwrap();
+        let out = dir.0.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        // A file where a directory goes: refused, nothing written.
+        let blocked = dir.0.join("blocked");
+        std::fs::create_dir_all(&blocked).unwrap();
+        std::fs::write(blocked.join("rust"), "").unwrap();
+        let mut dump = args(&spec, &out);
+        dump.dump_scaffold = Some(blocked.clone());
+        let error = run_generate(dump).unwrap_err().to_string();
+        assert!(error.contains("is not a directory"), "{error}");
+        assert!(!blocked.join("roas-templates.toml").exists());
+        // A link inside the directory, here into the output: refused.
+        #[cfg(unix)]
+        {
+            let linked = dir.0.join("linked");
+            std::fs::create_dir_all(&linked).unwrap();
+            std::os::unix::fs::symlink(&out, linked.join("rust")).unwrap();
+            let mut dump = args(&spec, &out);
+            dump.dump_scaffold = Some(linked.clone());
+            let error = run_generate(dump).unwrap_err().to_string();
+            assert!(error.contains("symbolic link"), "{error}");
+            assert!(!linked.join("roas-templates.toml").exists());
+            assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
+        }
     }
 
     #[test]
