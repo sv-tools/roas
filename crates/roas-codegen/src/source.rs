@@ -115,6 +115,14 @@ pub enum SourceError {
         #[source]
         source: serde_json::Error,
     },
+    /// The description parsed, but `roas` could not convert it to OpenAPI 3.2: a gap in the
+    /// conversion rather than in the description.
+    #[error("the {version} description could not be converted to OpenAPI 3.2")]
+    Convert {
+        version: SourceVersion,
+        #[source]
+        source: roas::conversion::ConversionError,
+    },
 }
 
 /// A description, parsed and normalized to OpenAPI 3.2, together with
@@ -163,23 +171,24 @@ impl SourceDocument {
         };
         let version = SourceVersion::detect(&raw)?;
         let parse = |source| SourceError::Parse { version, source };
+        let convert = |source| SourceError::Convert { version, source };
         let mut normalization = Vec::new();
         let spec = match version {
             SourceVersion::V2 => {
                 let spec: v2::spec::Spec = serde_json::from_value(raw.clone()).map_err(parse)?;
                 report::v2_losses(&raw, &uri, &mut normalization);
-                let v30 = v3_0::spec::Spec::from(spec);
-                let v31 = v3_1::spec::Spec::from(v30);
-                v3_2::spec::Spec::from(v31)
+                let v30 = v3_0::spec::Spec::try_from(spec).map_err(convert)?;
+                let v31 = v3_1::spec::Spec::try_from(v30).map_err(convert)?;
+                v3_2::spec::Spec::try_from(v31).map_err(convert)?
             }
             SourceVersion::V3_0 => {
                 let spec: v3_0::spec::Spec = serde_json::from_value(raw.clone()).map_err(parse)?;
-                let v31 = v3_1::spec::Spec::from(spec);
-                v3_2::spec::Spec::from(v31)
+                let v31 = v3_1::spec::Spec::try_from(spec).map_err(convert)?;
+                v3_2::spec::Spec::try_from(v31).map_err(convert)?
             }
             SourceVersion::V3_1 => {
                 let spec: v3_1::spec::Spec = serde_json::from_value(raw.clone()).map_err(parse)?;
-                v3_2::spec::Spec::from(spec)
+                v3_2::spec::Spec::try_from(spec).map_err(convert)?
             }
             SourceVersion::V3_2 => serde_json::from_value(raw.clone()).map_err(parse)?,
         };

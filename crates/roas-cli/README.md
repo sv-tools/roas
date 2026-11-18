@@ -108,7 +108,7 @@ Pass `--print` to echo the parsed spec on stdout (diagnostics stay on stderr), s
 
 ### `openapi convert`
 
-Upconverts a spec to a target version by chaining the existing `From<v_X::Spec> for v_Y::Spec` migrations. Downconversion is not supported.
+Upconverts a spec to a target version by chaining the existing `TryFrom<v_X::Spec> for v_Y::Spec` migrations. Downconversion is not supported.
 
 ```shell
 roas openapi convert --to v3_2 spec.json                          # JSON in → JSON out

@@ -78,7 +78,7 @@ impl DetectedSpec {
         }
     }
 
-    /// Chain the existing `From<v_X::Spec> for v_Y::Spec` migrations
+    /// Chain the existing `TryFrom<v_X::Spec> for v_Y::Spec` migrations
     /// to upconvert this spec to the requested target. Returns the
     /// converted spec at its new version, still as a typed
     /// [`DetectedSpec`] so the caller can run further version-specific
@@ -94,26 +94,26 @@ impl DetectedSpec {
             (DetectedSpec::V3_2(s), SpecVersion::V3_2) => Ok(DetectedSpec::V3_2(s)),
 
             (DetectedSpec::V2(s), SpecVersion::V3_0) => {
-                Ok(DetectedSpec::V3_0(v3_0::spec::Spec::from(s)))
+                Ok(DetectedSpec::V3_0(v3_0::spec::Spec::try_from(s)?))
             }
             (DetectedSpec::V2(s), SpecVersion::V3_1) => {
-                let v30 = v3_0::spec::Spec::from(s);
-                Ok(DetectedSpec::V3_1(v3_1::spec::Spec::from(v30)))
+                let v30 = v3_0::spec::Spec::try_from(s)?;
+                Ok(DetectedSpec::V3_1(v3_1::spec::Spec::try_from(v30)?))
             }
             (DetectedSpec::V2(s), SpecVersion::V3_2) => {
-                let v30 = v3_0::spec::Spec::from(s);
-                let v31 = v3_1::spec::Spec::from(v30);
-                Ok(DetectedSpec::V3_2(v3_2::spec::Spec::from(v31)))
+                let v30 = v3_0::spec::Spec::try_from(s)?;
+                let v31 = v3_1::spec::Spec::try_from(v30)?;
+                Ok(DetectedSpec::V3_2(v3_2::spec::Spec::try_from(v31)?))
             }
             (DetectedSpec::V3_0(s), SpecVersion::V3_1) => {
-                Ok(DetectedSpec::V3_1(v3_1::spec::Spec::from(s)))
+                Ok(DetectedSpec::V3_1(v3_1::spec::Spec::try_from(s)?))
             }
             (DetectedSpec::V3_0(s), SpecVersion::V3_2) => {
-                let v31 = v3_1::spec::Spec::from(s);
-                Ok(DetectedSpec::V3_2(v3_2::spec::Spec::from(v31)))
+                let v31 = v3_1::spec::Spec::try_from(s)?;
+                Ok(DetectedSpec::V3_2(v3_2::spec::Spec::try_from(v31)?))
             }
             (DetectedSpec::V3_1(s), SpecVersion::V3_2) => {
-                Ok(DetectedSpec::V3_2(v3_2::spec::Spec::from(s)))
+                Ok(DetectedSpec::V3_2(v3_2::spec::Spec::try_from(s)?))
             }
 
             // Downconversions: rejected here as a safety net; the CLI already

@@ -19,7 +19,7 @@ through the same model.
 | [3.2.x](https://spec.openapis.org/oas/v3.2.0.html) | `v3_2` *(default)* | ✅ supported |
 
 Each version lives behind its own feature, so you compile only what you need. With two adjacent versions enabled, a
-`From` impl upconverts a spec to the newer one.
+`TryFrom` impl upconverts a spec to the newer one and returns a `roas::conversion::ConversionError` when it cannot.
 
 ## Install
 

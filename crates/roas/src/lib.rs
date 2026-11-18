@@ -11,6 +11,7 @@
 )]
 
 pub mod common;
+pub mod conversion;
 pub mod loader;
 pub use loader::{
     AsyncResourceFetcher, DocumentFetchFuture, FetchFuture, JsonFileFetcher, LoadedDocument,
