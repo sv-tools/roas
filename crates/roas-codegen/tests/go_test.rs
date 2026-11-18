@@ -851,9 +851,12 @@ fn file_per_type_needs_a_name_for_an_import_whose_path_may_not_say_it() {
             .unwrap()
             .contents
     };
-    let account = file("account.go");
-    assert!(account.contains("\"example.com/acme/core\""), "{account}");
-    assert!(!account.contains("k8s.io"), "{account}");
+    let core_user = file("account.go");
+    assert!(
+        core_user.contains("\"example.com/acme/core\""),
+        "{core_user}"
+    );
+    assert!(!core_user.contains("k8s.io"), "{core_user}");
     let pod = file("pod.go");
     assert!(pod.contains("v1 \"k8s.io/api/core/v1\""), "{pod}");
     assert!(!pod.contains("acme"), "{pod}");
