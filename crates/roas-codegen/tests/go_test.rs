@@ -1158,3 +1158,34 @@ fn package_of(code: &str) -> &str {
         .expect("a package clause")
         .trim()
 }
+
+#[test]
+fn an_unqualified_substitution_after_an_ellipsis_is_aliased() {
+    let toml = "validation = true\n[substitutions.thing.go]\nname = \"func(...value) error\"\n";
+    let components = serde_json::json!({
+        "Bag": {"type": "object", "patternProperties": {"^a": {"type": "string", "format": "thing"}}, "additionalProperties": false}
+    });
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let code = squeezed(&result.expect("generates").files.remove(0).contents);
+    assert!(
+        code.contains("type pattern0OfBag = func(...value) error"),
+        "{code}"
+    );
+}
+
+#[test]
+fn a_substitution_spelled_like_a_member_alias_is_refused() {
+    let toml = "validation = true\n[substitutions.thing.go]\nname = \"pattern0OfBag\"\n";
+    let components = serde_json::json!({
+        "Bag": {"type": "object", "patternProperties": {"^a": {"type": "string", "format": "thing"}}, "additionalProperties": false}
+    });
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let GenerateError::Config(message) = result.unwrap_err() else {
+        panic!("not a config error");
+    };
+    assert!(message.contains("pattern0OfBag"), "{message}");
+}

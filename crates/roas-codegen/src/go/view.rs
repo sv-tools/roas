@@ -257,8 +257,9 @@ pub(crate) struct TypeView {
     #[serde(skip)]
     pub others_ty: Option<String>,
     /// Package-level aliases of the member types validation decodes into
-    /// that name a substitution's package: inside `validateInto` a local,
-    /// such as the report `r`, may shadow it.
+    /// that name a substitution's package or a lower-case type of the
+    /// package's own: inside `validateInto` a local, such as the report
+    /// `r`, may shadow either.
     pub validate_aliases: Vec<AliasView>,
     /// A member name no struct tag can carry: the struct writes itself.
     pub marshal: bool,
@@ -504,8 +505,25 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 used.insert(local, "a name the generated validation declares");
             }
         }
+        let aliases: BTreeSet<&str> = types
+            .iter()
+            .flat_map(|t| &t.validate_aliases)
+            .map(|alias| alias.name.as_str())
+            .collect();
+        // A substitution spelled like an alias would be declared as itself.
         for alias in types.iter().flat_map(|t| &t.validate_aliases) {
-            used.insert(&alias.name, "a name the generated validation declares");
+            if let Some(name) = unqualified_names(&alias.ty)
+                .into_iter()
+                .find(|name| aliases.contains(name))
+            {
+                return Err(GenerateError::Config(format!(
+                    "substitution spelling {:?} names `{name}`, which the generated validation declares",
+                    alias.ty
+                )));
+            }
+        }
+        for alias in &aliases {
+            used.insert(alias, "a name the generated validation declares");
         }
         // The `Decimal` methods' receiver, in the package file.
         if builder.support.decimal && config.layout == Layout::FilePerType {
@@ -626,6 +644,46 @@ fn assign_files(types: &mut [TypeView], config: &Config) {
     }
 }
 
+/// The names a Go type spelling uses unqualified: neither a package
+/// qualifier nor a selector after one.
+fn unqualified_names(ty: &str) -> Vec<&str> {
+    let bytes = ty.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut after_dot = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if ident(b) && !b.is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && ident(bytes[i]) {
+                i += 1;
+            }
+            let rest = ty[i..].trim_start();
+            let qualifier = rest.starts_with('.') && !rest.starts_with("...");
+            if !after_dot && !qualifier {
+                out.push(&ty[start..i]);
+            }
+            after_dot = false;
+        } else if b.is_ascii_digit() {
+            while i < bytes.len() && ident(bytes[i]) {
+                i += 1;
+            }
+            after_dot = false;
+        } else if bytes[i..].starts_with(b"...") {
+            // An ellipsis, not a selector.
+            i += 3;
+            after_dot = false;
+        } else {
+            if !b.is_ascii_whitespace() {
+                after_dot = b == b'.';
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Whether a Go type spelling names an unqualified, unexported type that
 /// Go does not predeclare: one a local may shadow.
 fn names_unexported_type(ty: &str) -> bool {
@@ -653,41 +711,11 @@ fn names_unexported_type(ty: &str) -> bool {
         "uint64",
         "uintptr",
     ];
-    let bytes = ty.as_bytes();
-    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
-    let mut i = 0;
-    let mut after_dot = false;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if ident(b) && !b.is_ascii_digit() {
-            let start = i;
-            while i < bytes.len() && ident(bytes[i]) {
-                i += 1;
-            }
-            let word = &ty[start..i];
-            let qualifier = ty[i..].trim_start().starts_with('.');
-            if !after_dot
-                && !qualifier
-                && !word.starts_with(|c: char| c.is_uppercase())
-                && !PREDECLARED.contains(&word)
-                && !super::naming::is_keyword(word)
-            {
-                return true;
-            }
-            after_dot = false;
-        } else if b.is_ascii_digit() {
-            while i < bytes.len() && ident(bytes[i]) {
-                i += 1;
-            }
-            after_dot = false;
-        } else {
-            if !b.is_ascii_whitespace() {
-                after_dot = b == b'.';
-            }
-            i += 1;
-        }
-    }
-    false
+    unqualified_names(ty).into_iter().any(|word| {
+        !word.starts_with(|c: char| c.is_uppercase())
+            && !PREDECLARED.contains(&word)
+            && !super::naming::is_keyword(word)
+    })
 }
 
 impl Builder<'_> {
