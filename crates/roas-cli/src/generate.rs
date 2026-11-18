@@ -648,20 +648,6 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
         ),
         other => other.into(),
     })?;
-    // Said here rather than as the description's own fidelity: it is the
-    // overlay that took the numbers through `f64`.
-    // Without the feature, or with a YAML description, the cause is
-    // another, which `roas_codegen` names.
-    if cfg!(feature = "exact-numbers")
-        && config.exact_numbers
-        && let Some(overlay) = &yaml_overlay
-    {
-        bail!(
-            "`exact_numbers` needs every `--apply` overlay to be JSON, its numbers as written; {} is not",
-            overlay.display()
-        );
-    }
-
     if let Some(dir) = &args.dump_scaffold {
         // Not where generated files and their manifests live either.
         if overlaps("--dump-scaffold", dir, &args.out)? {
@@ -698,6 +684,20 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
             eprintln!("scaffolded {}", path.display());
         }
         return Ok(());
+    }
+    // Said here rather than as the description's own fidelity: it is the
+    // overlay that took the numbers through `f64`. A scaffold reads no
+    // numbers, so it comes first.
+    // Without the feature, or with a YAML description, the cause is
+    // another, which `roas_codegen` names.
+    if cfg!(feature = "exact-numbers")
+        && config.exact_numbers
+        && let Some(overlay) = &yaml_overlay
+    {
+        bail!(
+            "`exact_numbers` needs every `--apply` overlay to be JSON, its numbers as written; {} is not",
+            overlay.display()
+        );
     }
     if args.print_context {
         let context = roas_codegen::template_context(&document, &config)?;
@@ -2007,6 +2007,15 @@ mod tests {
             error.contains("every `--apply` overlay to be JSON") && error.contains("b.yaml"),
             "{error}"
         );
+        // A scaffold reads no numbers: written all the same.
+        let scaffold = dir.0.join("scaffold");
+        std::fs::create_dir_all(&scaffold).unwrap();
+        let mut dump = args(&spec, &out);
+        dump.config = Some(dir.0.join("roas.toml"));
+        dump.apply = vec![dir.0.join("b.yaml")];
+        dump.dump_scaffold = Some(scaffold.clone());
+        run_generate(dump).unwrap();
+        assert!(scaffold.join("roas-templates.toml").exists());
         // A YAML description with an exact JSON number overlaid is still
         // generated, without exact numbers asked for.
         let yaml = dir.0.join("api.yaml");
