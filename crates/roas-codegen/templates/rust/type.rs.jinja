@@ -1,0 +1,6 @@
+{% block header %}{% if header %}{{ header }}
+{% endif %}{% endblock %}{% block imports %}{% for line in imports %}{{ line }}
+{% endfor %}{% endblock %}
+{% block body %}{% for t in types %}{% include "rust/type_body.rs.jinja" %}
+{% endfor %}{% endblock %}
+{% block footer %}{% endblock %}

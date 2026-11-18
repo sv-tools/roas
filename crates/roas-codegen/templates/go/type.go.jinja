@@ -1,0 +1,12 @@
+{% block header %}{% if header %}{{ header }}
+
+{% endif %}{% endblock %}package {{ package }}
+{% set import_specs %}{% block imports %}{% for line in imports %}	{{ line }}
+{% endfor %}{% for line in extra_imports %}	{{ line }}
+{% endfor %}{% endblock %}{% endset %}{% if import_specs | trim %}
+import (
+{{ import_specs }})
+{% endif %}
+{% block body %}{% for t in types %}{% include "go/type_body.go.jinja" %}
+{% endfor %}{% endblock %}
+{% block footer %}{% endblock %}
