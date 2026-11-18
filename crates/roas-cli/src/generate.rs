@@ -579,8 +579,14 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     // overlaid description.
     let (input, yaml_overlay) =
         overlay_description(&source, input, &args.apply, &args.apply_options)?;
+    // Overlaid, what fails may be what an overlay wrote.
+    let overlaid = if args.apply.is_empty() {
+        ""
+    } else {
+        " after applying the --apply overlays"
+    };
     let document = SourceDocument::parse(input, uri)
-        .with_context(|| format!("{}: cannot be read", source.display()))?;
+        .with_context(|| format!("{}: cannot be read{overlaid}", source.display()))?;
 
     // Lint-only checks say nothing about the generated types, so they never
     // block generation; `--ignore` relaxes further.
@@ -595,7 +601,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
                 eprintln!("- {e}");
             }
             bail!(
-                "{}: validation failed ({} error{}); nothing generated",
+                "{}: validation failed{overlaid} ({} error{}); nothing generated",
                 source.display(),
                 error.errors.len(),
                 if error.errors.len() == 1 { "" } else { "s" }
@@ -2036,5 +2042,27 @@ mod tests {
         let error = format!("{:#}", run_generate(run).unwrap_err());
         assert!(!error.contains("o.yaml"), "{error}");
         assert!(error.contains("exact-numbers"), "{error}");
+    }
+
+    #[test]
+    fn a_description_an_overlay_breaks_says_so() {
+        let dir = TempDir::new("apply-breaks");
+        let spec = dir.0.join("api.json");
+        std::fs::write(&spec, PET).unwrap();
+        let bad = dir.0.join("bad.json");
+        std::fs::write(
+            &bad,
+            r#"{"overlay": "1.0.0", "info": {"title": "b", "version": "1"}, "actions": [
+                {"target": "$.components.schemas.Pet", "update": {"type": "bogus"}}
+            ]}"#,
+        )
+        .unwrap();
+        let mut run = args(&spec, &dir.0.join("out"));
+        run.apply = vec![bad];
+        let error = run_generate(run).unwrap_err().to_string();
+        assert!(
+            error.contains("after applying the --apply overlays"),
+            "{error}"
+        );
     }
 }
