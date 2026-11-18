@@ -227,7 +227,12 @@ fn overlay_description(
         .context("not UTF-8")
         .and_then(|text| crate::versioned::parse_value(text, yaml))
         .with_context(|| format!("{}: cannot be read", source.display()))?;
-    let target = crate::overlay::TargetDocument::new(source, &value);
+    // A pipe (`<(curl …)`) is read as stdin: no path to match `extends`.
+    let target_source = match source {
+        InputSource::File(path) if !is_regular_file(path) => &InputSource::Stdin,
+        source => source,
+    };
+    let target = crate::overlay::TargetDocument::new(target_source, &value);
     let not_json = crate::overlay::apply_overlays(&mut value, &target, overlays, options, strict)?;
     // Exact only as JSON throughout: a YAML overlay's numbers went through
     // `f64`, and a YAML description is no more exact for being overlaid.
@@ -2119,5 +2124,27 @@ mod tests {
         strict.apply = vec![matching];
         strict.strict = true;
         run_generate(strict).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_piped_description_is_no_file_for_extends() {
+        let dir = TempDir::new("apply-pipe");
+        let overlay = dir.0.join("ext.yaml");
+        std::fs::write(
+            &overlay,
+            "overlay: 1.2.0\ninfo: {title: o, version: '1'}\nextends: api.json\nactions:\n  - target: $.info\n    update: {x-note: n}\n",
+        )
+        .unwrap();
+        // Read from a device, as from `<(…)`: like stdin, nothing to refuse.
+        let source = InputSource::File(PathBuf::from("/dev/null"));
+        overlay_description(
+            &source,
+            Input::Json(PET.as_bytes().to_vec()),
+            &[overlay],
+            &[],
+            true,
+        )
+        .unwrap();
     }
 }
