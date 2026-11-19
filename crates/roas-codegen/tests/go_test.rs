@@ -1114,7 +1114,7 @@ fn a_substitution_package_named_like_a_member_alias_is_refused() {
 fn an_unqualified_substitution_named_like_a_validation_local_compiles() {
     // A type of the package's own, spelled in lower case, is aliased like
     // a package's: a local of `validateInto` may shadow it too.
-    for local in ["value", "pointer", "matched", "m", "r"] {
+    for local in ["pointer", "matched", "m", "r"] {
         let toml = format!("validation = true\n[substitutions.thing.go]\nname = \"{local}\"\n");
         let thing = serde_json::json!({"type": "string", "format": "thing"});
         let components = serde_json::json!({
@@ -1127,7 +1127,7 @@ fn an_unqualified_substitution_named_like_a_validation_local_compiles() {
         };
         let mut generation = match generation {
             Ok(generation) => generation,
-            Err(GenerateError::Config(_)) if local != "value" => continue,
+            Err(GenerateError::Config(_)) if !["pointer", "matched"].contains(&local) => continue,
             Err(error) => panic!("{local}: {error:?}"),
         };
         let code = generation.files.remove(0).contents;
@@ -1161,7 +1161,7 @@ fn package_of(code: &str) -> &str {
 
 #[test]
 fn an_unqualified_substitution_after_an_ellipsis_is_aliased() {
-    let toml = "validation = true\n[substitutions.thing.go]\nname = \"func(...value) error\"\n";
+    let toml = "validation = true\n[substitutions.thing.go]\nname = \"func(...pointer) error\"\n";
     let components = serde_json::json!({
         "Bag": {"type": "object", "patternProperties": {"^a": {"type": "string", "format": "thing"}}, "additionalProperties": false}
     });
@@ -1170,7 +1170,7 @@ fn an_unqualified_substitution_after_an_ellipsis_is_aliased() {
     };
     let code = squeezed(&result.expect("generates").files.remove(0).contents);
     assert!(
-        code.contains("type pattern0OfBag = func(...value) error"),
+        code.contains("type pattern0OfBag = func(...pointer) error"),
         "{code}"
     );
 }
@@ -1180,7 +1180,7 @@ fn a_substitution_spelled_like_a_member_alias_is_refused() {
     // Aliased itself, or held by a field of another type.
     for toml in [
         "validation = true\n[substitutions.thing.go]\nname = \"pattern0OfBag\"\n",
-        "validation = true\n[substitutions.thing.go]\nname = \"value\"\n[substitutions.other.go]\nname = \"pattern0OfBag\"\n",
+        "validation = true\n[substitutions.thing.go]\nname = \"pointer\"\n[substitutions.other.go]\nname = \"pattern0OfBag\"\n",
         // A package whose path does not say its name.
         "validation = true\n[substitutions.thing.go]\nname = \"pattern0OfBag.Thing\"\nimport = \"example.com/x/foo\"\n",
     ] {
@@ -1195,5 +1195,33 @@ fn a_substitution_spelled_like_a_member_alias_is_refused() {
             panic!("not a config error");
         };
         assert!(message.contains("pattern0OfBag"), "{message}");
+    }
+}
+
+#[test]
+fn an_own_type_spelled_like_a_generated_name_is_refused() {
+    // A helper, a local the union accessors shadow it with, one typed
+    // members' validation does, and an import.
+    for (name, extra) in [
+        ("memberMatches", ""),
+        ("err", ""),
+        ("value", "validation = true\n"),
+        ("json", ""),
+        ("[]err", ""),
+        ("map[string]i0", "validation = true\n"),
+    ] {
+        let toml = format!("{extra}[substitutions.thing.go]\nname = \"{name}\"\n");
+        let components = serde_json::json!({
+            "Closed": {"type": "object", "patternProperties": {"^a": {"type": "string", "format": "thing"}}, "additionalProperties": false},
+            "Either": {"anyOf": [{"type": "string", "format": "thing"}, {"type": "integer"}]},
+            "Open": {"type": "object", "additionalProperties": {"type": "string", "format": "thing"}}
+        });
+        let Some(result) = go(components, &toml) else {
+            return;
+        };
+        let Err(GenerateError::Config(message)) = result else {
+            panic!("{name}: not refused");
+        };
+        assert!(message.contains("substitution spelling"), "{message}");
     }
 }

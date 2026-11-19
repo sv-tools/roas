@@ -585,6 +585,34 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             let names = BTreeSet::from([name.to_owned()]);
             import_names.push(names);
         }
+        // A type of the package's own spelled like a name the generated
+        // code declares or imports is shadowed by it, or clashes with it.
+        for spelling in config
+            .substitutions
+            .values()
+            .filter_map(|s| s.go.as_ref())
+            .map(|go| go.name.as_str())
+        {
+            let taken = unqualified_names(spelling).into_iter().find_map(|name| {
+                if config.validation && depth_local(name) {
+                    return Some((name, "validation's loop variables".to_owned()));
+                }
+                let what = used.get(name)?;
+                Some((
+                    name,
+                    if what.starts_with("a name ") {
+                        (*what).to_owned()
+                    } else {
+                        format!("the package the generated code imports as {what:?}")
+                    },
+                ))
+            });
+            if let Some((name, what)) = taken {
+                return Err(GenerateError::Config(format!(
+                    "substitution spelling {spelling:?} names `{name}`, which is {what}; rename the type, or spell it through a package"
+                )));
+            }
+        }
         // Under `file_per_type` an extra import goes to the files naming it,
         // and a name the generated code also declares, or imports, would
         // send it to files that only use that.
