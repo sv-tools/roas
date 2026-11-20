@@ -1224,6 +1224,9 @@ fn an_own_type_spelled_like_a_generated_name_is_refused() {
         ("func(v value) error", "value"),
         ("present", "present"),
         ("func(a, b, err)", "err"),
+        ("func(a value, b int)", "value"),
+        ("interface{ M(a err, b int) }", "err"),
+        ("func() (a value, err error)", "value"),
     ] {
         for layout in ["", "layout = \"file_per_type\"\n"] {
             let toml = format!("{layout}[substitutions.thing.go]\nname = \"{spelling}\"\n");
@@ -1252,6 +1255,7 @@ fn an_own_type_no_generated_name_shadows_compiles() {
         ("func(d, x int)", ""),
         ("struct{ value <-chan int }", ""),
         ("interface{ value() }", ""),
+        ("func(value (int))", ""),
         ("struct{ X int `json:\\\"x\\\"` }", ""),
     ] {
         for extra in ["", "validation = true\n", "exact_numbers = true\n"] {

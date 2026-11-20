@@ -725,7 +725,8 @@ fn type_names(ty: &str) -> Vec<&str> {
 
 /// Whether `rest`, after an identifier, makes it a name in a list of
 /// names followed by their type: `, y, z T`, `T`, `*T`, `[]T`, `...T`,
-/// `<-chan T`, after a blank. `List[T]` is spelled without the blank.
+/// `<-chan T`, `(T)`, after a blank. `List[T]` is spelled without the
+/// blank.
 fn names_a_type(rest: &str) -> bool {
     let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
     let mut rest = rest;
@@ -742,7 +743,7 @@ fn names_a_type(rest: &str) -> bool {
         }
         return trimmed.len() < rest.len()
             && trimmed.starts_with(|c: char| {
-                c.is_alphabetic() || c == '_' || c == '*' || c == '[' || c == '.' || c == '<'
+                c.is_alphabetic() || matches!(c, '_' | '*' | '[' | '.' | '<' | '(')
             });
     }
 }
@@ -762,8 +763,15 @@ fn scan_names(ty: &str, types_only: bool) -> Vec<&str> {
             }
             let rest = ty[i..].trim_start();
             let qualifier = rest.starts_with('.') && !rest.starts_with("...");
-            // A field, parameter or method name: `x T`, `x, y T`, `x()`.
+            // A field, parameter or method name: `x T`, `x, y T`, `x()`,
+            // which starts an entry of its list; `a T, b U` has `T` after a
+            // name, in type position.
+            let entry = matches!(
+                ty[..start].trim_end().bytes().last(),
+                Some(b'(' | b',' | b'{' | b';')
+            );
             let named = types_only
+                && entry
                 && !super::naming::is_keyword(&ty[start..i])
                 && (ty[i..].starts_with('(') || names_a_type(&ty[i..]));
             if !after_dot && !qualifier && !named {
