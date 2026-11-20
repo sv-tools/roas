@@ -1229,6 +1229,7 @@ fn an_own_type_spelled_like_a_generated_name_is_refused() {
         ("func() (a value, err error)", "value"),
         ("func(err, chan int)", "err"),
         ("interface{ M(d, func()) }", "d"),
+        ("struct{\\n\\tvalue\\n\\tX int\\n}", "value"),
     ] {
         for layout in ["", "layout = \"file_per_type\"\n"] {
             let toml = format!("{layout}[substitutions.thing.go]\nname = \"{spelling}\"\n");
@@ -1296,4 +1297,26 @@ fn an_unused_substitution_is_not_checked() {
         return;
     };
     result.expect("an unused spelling is no clash");
+}
+
+#[test]
+fn a_spelling_over_lines_ends_entries_at_line_breaks() {
+    // Go reads a `;` into each line break: `value` names a field here.
+    // Held where no doc comment spells it.
+    let thing = serde_json::json!({"type": "string", "format": "thing"});
+    let components = serde_json::json!({
+        "Open": {"type": "object", "required": ["z"], "properties": {"z": thing}, "additionalProperties": thing}
+    });
+    let toml = "[substitutions.thing.go]\nname = \"struct{\\n\\tX int\\n\\tvalue int\\n}\"\n";
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let code = result.expect("generates").files.remove(0).contents;
+    let own = format!("package {}\n\ntype value string\n", package_of(&code));
+    let Some(vetted) = vet_with(&code, "own-lines", &[("own.go", &own)]) else {
+        return;
+    };
+    if let Err(error) = vetted {
+        panic!("go vet failed\n{error}\n{code}");
+    }
 }

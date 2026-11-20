@@ -752,7 +752,9 @@ fn names_a_type(rest: &str) -> bool {
         {
             return true;
         }
-        return trimmed.len() < rest.len()
+        let blank = &rest[..rest.len() - trimmed.len()];
+        return !blank.is_empty()
+            && !blank.contains('\n')
             && trimmed.starts_with(|c: char| {
                 c.is_alphabetic() || matches!(c, '_' | '*' | '[' | '.' | '<' | '(')
             });
@@ -777,10 +779,11 @@ fn scan_names(ty: &str, types_only: bool) -> Vec<&str> {
             // A field, parameter or method name: `x T`, `x, y T`, `x()`,
             // which starts an entry of its list; `a T, b U` has `T` after a
             // name, in type position.
-            let entry = matches!(
-                ty[..start].trim_end().bytes().last(),
-                Some(b'(' | b',' | b'{' | b';')
-            );
+            // A line break ends an entry, as Go reads a `;` into it.
+            let before = &ty[..start];
+            let trimmed = before.trim_end();
+            let entry = matches!(trimmed.bytes().last(), Some(b'(' | b',' | b'{' | b';'))
+                || (!trimmed.is_empty() && before[trimmed.len()..].contains('\n'));
             let named = types_only
                 && entry
                 && !super::naming::is_keyword(&ty[start..i])
