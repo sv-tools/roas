@@ -52,7 +52,9 @@ const VALIDATION_NAMES: &[&str] = &[
 /// Locals, receivers and parameters of the decoders and accessors that
 /// spell a substituted type, which a type of the package's own spelled
 /// the same would be shadowed by.
-const SPELLING_LOCALS: &[&str] = &["d", "e", "u", "v", "err", "name", "token", "value"];
+const SPELLING_LOCALS: &[&str] = &[
+    "d", "e", "u", "v", "err", "name", "token", "value", "present",
+];
 
 /// The package-level names the generated code declares besides its types.
 const HELPER_NAMES: &[&str] = &[
@@ -721,6 +723,30 @@ fn type_names(ty: &str) -> Vec<&str> {
     scan_names(ty, true)
 }
 
+/// Whether `rest`, after an identifier, makes it a name in a list of
+/// names followed by their type: `, y, z T`, `T`, `*T`, `[]T`, `...T`,
+/// `<-chan T`, after a blank. `List[T]` is spelled without the blank.
+fn names_a_type(rest: &str) -> bool {
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
+    let mut rest = rest;
+    loop {
+        let trimmed = rest.trim_start();
+        if let Some(after) = trimmed.strip_prefix(',') {
+            let after = after.trim_start();
+            let len = after.bytes().take_while(|b| ident(*b)).count();
+            if len == 0 || after.starts_with(|c: char| c.is_ascii_digit()) {
+                return false;
+            }
+            rest = &after[len..];
+            continue;
+        }
+        return trimmed.len() < rest.len()
+            && trimmed.starts_with(|c: char| {
+                c.is_alphabetic() || c == '_' || c == '*' || c == '[' || c == '.' || c == '<'
+            });
+    }
+}
+
 fn scan_names(ty: &str, types_only: bool) -> Vec<&str> {
     let bytes = ty.as_bytes();
     let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
@@ -736,14 +762,10 @@ fn scan_names(ty: &str, types_only: bool) -> Vec<&str> {
             }
             let rest = ty[i..].trim_start();
             let qualifier = rest.starts_with('.') && !rest.starts_with("...");
-            // `x T`, `x *T`, `x []T`, `x ...T`, `x func()`; `List[T]` is
-            // spelled without the blank.
+            // A field, parameter or method name: `x T`, `x, y T`, `x()`.
             let named = types_only
-                && rest.len() < ty.len() - i
-                && rest.starts_with(|c: char| {
-                    c.is_alphabetic() || c == '_' || c == '*' || c == '[' || c == '.'
-                })
-                && !super::naming::is_keyword(&ty[start..i]);
+                && !super::naming::is_keyword(&ty[start..i])
+                && (ty[i..].starts_with('(') || names_a_type(&ty[i..]));
             if !after_dot && !qualifier && !named {
                 out.push(&ty[start..i]);
             }

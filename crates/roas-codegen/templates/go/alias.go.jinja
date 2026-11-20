@@ -3,7 +3,7 @@
 {% else %}type {{ t.name }} {{ t.inner }}
 
 func (v {{ t.name }}) MarshalJSONTo(e *jsontext.Encoder) error {
-	return json.MarshalEncode(e, {{ t.inner }}(v))
+	return json.MarshalEncode(e, {% if "func" in t.inner or t.inner is startingwith("<-") %}({{ t.inner }}){% else %}{{ t.inner }}{% endif %}(v))
 }
 
 func (v *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
