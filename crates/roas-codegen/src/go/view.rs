@@ -554,10 +554,11 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             // Unqualified, or a package qualifier: an import path need
             // not say the package's name.
             let qualifiers = super::imports::qualifiers(spelling);
-            if let Some(name) = unqualified_names(spelling)
-                .into_iter()
-                .chain(qualifiers.iter().map(String::as_str))
-                .find(|name| aliases.contains(name))
+            let unqualified = unqualified_names(spelling);
+            if let Some(name) = unqualified
+                .iter()
+                .chain(&qualifiers)
+                .find(|name| aliases.contains(name.as_str()))
             {
                 return Err(GenerateError::Config(format!(
                     "substitution spelling {spelling:?} names `{name}`, which the generated validation declares"
@@ -625,14 +626,16 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         // config keeps working as the description grows.
         for spelling in &builder.spellings {
             let taken = type_names(spelling).into_iter().find_map(|name| {
-                let what = if SPELLING_LOCALS.contains(&name) {
+                let what = if SPELLING_LOCALS.contains(&name.as_str()) {
                     "a local of the generated decoders, which would shadow it".to_owned()
-                } else if HELPER_NAMES.contains(&name) {
+                } else if HELPER_NAMES.contains(&name.as_str()) {
                     "a name the generated code may declare".to_owned()
-                } else if BUILTIN_NAMES.contains(&name) {
+                } else if BUILTIN_NAMES.contains(&name.as_str()) {
                     "the name the generated code may import a package under".to_owned()
                 } else {
-                    let path = used.get(name).filter(|what| !what.starts_with("a name "))?;
+                    let path = used
+                        .get(name.as_str())
+                        .filter(|what| !what.starts_with("a name "))?;
                     format!("the name the generated code imports {path:?} under")
                 };
                 Some((name, what))
@@ -713,14 +716,66 @@ fn assign_files(types: &mut [TypeView], config: &Config) {
 
 /// The names a Go type spelling uses unqualified: neither a package
 /// qualifier nor a selector after one, nor inside a string (a tag).
-fn unqualified_names(ty: &str) -> Vec<&str> {
-    scan_names(ty, false)
+fn unqualified_names(ty: &str) -> Vec<String> {
+    let ty = without_comments(ty);
+    scan_names(&ty, false)
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The unqualified names a Go type spelling uses as types: also not a
 /// field or parameter name, one followed by a type after a blank.
-fn type_names(ty: &str) -> Vec<&str> {
-    scan_names(ty, true)
+fn type_names(ty: &str) -> Vec<String> {
+    let ty = without_comments(ty);
+    scan_names(&ty, true)
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `ty` with each comment a blank: a line break where it held or ended
+/// in one, as Go reads it.
+fn without_comments(ty: &str) -> String {
+    let mut out = String::with_capacity(ty.len());
+    let mut chars = ty.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '`' => {
+                out.push(c);
+                while let Some(inner) = chars.next() {
+                    out.push(inner);
+                    if inner == c {
+                        break;
+                    }
+                    if c == '"' && inner == '\\' {
+                        out.extend(chars.next());
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                while chars.peek().is_some_and(|next| *next != '\n') {
+                    chars.next();
+                }
+                out.push(' ');
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut line_break = false;
+                let mut last = ' ';
+                for inner in chars.by_ref() {
+                    if last == '*' && inner == '/' {
+                        break;
+                    }
+                    line_break |= inner == '\n';
+                    last = inner;
+                }
+                out.push(if line_break { '\n' } else { ' ' });
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Whether `rest`, after an identifier, makes it a name in a list of
@@ -846,9 +901,9 @@ fn names_unexported_type(ty: &str) -> bool {
         "uint64",
         "uintptr",
     ];
-    unqualified_names(ty).into_iter().any(|word| {
+    unqualified_names(ty).iter().any(|word| {
         !word.starts_with(|c: char| c.is_uppercase())
-            && !PREDECLARED.contains(&word)
+            && !PREDECLARED.contains(&word.as_str())
             && !super::naming::is_keyword(word)
     })
 }
