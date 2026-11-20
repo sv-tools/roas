@@ -405,7 +405,8 @@ impl TargetDocument {
 }
 
 /// The `file:` URIs naming `path`: with its links resolved, and as given
-/// (made absolute, `.` and `..` dropped), when that differs.
+/// (made absolute, `.` and `..` dropped), when that differs and is the
+/// same file: `link/..` is where the link points, not beside it.
 fn file_urls(path: &std::path::Path) -> Vec<Url> {
     let mut urls: Vec<Url> = crate::file_url(path).into_iter().collect();
     let absolute = std::env::current_dir().unwrap_or_default().join(path);
@@ -419,7 +420,11 @@ fn file_urls(path: &std::path::Path) -> Vec<Url> {
             other => lexical.push(other),
         }
     }
-    if let Ok(url) = Url::from_file_path(&lexical) {
+    let same_file = lexical
+        .canonicalize()
+        .ok()
+        .is_some_and(|resolved| path.canonicalize().ok().as_deref() == Some(resolved.as_path()));
+    if same_file && let Ok(url) = Url::from_file_path(&lexical) {
         push_new(&mut urls, url);
     }
     urls
@@ -734,6 +739,20 @@ mod tests {
             let detected = detect_or_use_overlay(None, extending("other.json")).unwrap();
             assert!(target.mismatch(&detected, &dir.join("o.json")).is_some());
         }
+        // `L/../api.json` is `real/api.json`, not the `api.json` beside `L`.
+        std::fs::create_dir_all(dir.join("real/sub")).unwrap();
+        std::fs::write(dir.join("real/api.json"), "{}").unwrap();
+        std::fs::remove_file(dir.join("api.json")).unwrap();
+        std::fs::write(dir.join("api.json"), "{}").unwrap();
+        std::os::unix::fs::symlink("real/sub", dir.join("L")).unwrap();
+        let through = dir.join("L/../api.json");
+        let target = TargetDocument::new(&InputSource::File(through.clone()), &json!({}));
+        // An overlay that is no link, beside `L`.
+        std::fs::write(dir.join("plain.json"), "{}").unwrap();
+        let beside = detect_or_use_overlay(None, extending("api.json")).unwrap();
+        assert!(target.mismatch(&beside, &dir.join("plain.json")).is_some());
+        let detected = detect_or_use_overlay(None, extending("real/api.json")).unwrap();
+        assert_eq!(target.mismatch(&detected, &dir.join("plain.json")), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

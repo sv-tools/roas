@@ -1198,30 +1198,89 @@ fn a_substitution_spelled_like_a_member_alias_is_refused() {
     }
 }
 
+/// Types where a substituted type sits beside the generated code's
+/// locals: struct members, a typed catch-all, union branches, a closed
+/// pattern struct.
+fn spelled_everywhere() -> serde_json::Value {
+    let thing = serde_json::json!({"type": "string", "format": "thing"});
+    serde_json::json!({
+        "Closed": {"type": "object", "patternProperties": {"^a": thing}, "additionalProperties": false},
+        "Either": {"anyOf": [thing, {"type": "integer"}]},
+        "Open": {"type": "object", "properties": {"z": thing}, "additionalProperties": thing},
+        "Listed": {"type": "array", "items": thing}
+    })
+}
+
 #[test]
 fn an_own_type_spelled_like_a_generated_name_is_refused() {
-    // A helper, a local the union accessors shadow it with, one typed
-    // members' validation does, and an import.
-    for (name, extra) in [
-        ("memberMatches", ""),
-        ("err", ""),
-        ("value", "validation = true\n"),
-        ("json", ""),
-        ("[]err", ""),
-        ("map[string]i0", "validation = true\n"),
+    // A helper, the union accessors' error, the catch-all's local, an
+    // import, and those inside a spelling.
+    for (spelling, name) in [
+        ("memberMatches", "memberMatches"),
+        ("err", "err"),
+        ("value", "value"),
+        ("json", "json"),
+        ("[]err", "err"),
+        ("func(v value) error", "value"),
     ] {
-        let toml = format!("{extra}[substitutions.thing.go]\nname = \"{name}\"\n");
-        let components = serde_json::json!({
-            "Closed": {"type": "object", "patternProperties": {"^a": {"type": "string", "format": "thing"}}, "additionalProperties": false},
-            "Either": {"anyOf": [{"type": "string", "format": "thing"}, {"type": "integer"}]},
-            "Open": {"type": "object", "additionalProperties": {"type": "string", "format": "thing"}}
-        });
-        let Some(result) = go(components, &toml) else {
-            return;
-        };
-        let Err(GenerateError::Config(message)) = result else {
-            panic!("{name}: not refused");
-        };
-        assert!(message.contains("substitution spelling"), "{message}");
+        for layout in ["", "layout = \"file_per_type\"\n"] {
+            let toml = format!("{layout}[substitutions.thing.go]\nname = \"{spelling}\"\n");
+            let Some(result) = go(spelled_everywhere(), &toml) else {
+                return;
+            };
+            let Err(GenerateError::Config(message)) = result else {
+                panic!("{spelling}: not refused");
+            };
+            assert!(message.contains(&format!("names `{name}`")), "{message}");
+        }
     }
+}
+
+#[test]
+fn an_own_type_no_generated_name_shadows_compiles() {
+    // Locals of code that spells no substituted type, and field,
+    // parameter and tag words inside a spelling.
+    for (spelling, own) in [
+        ("text", "text"),
+        ("raw", "raw"),
+        ("item", "item"),
+        ("readable", "readable"),
+        ("struct{ err error; value int }", ""),
+        ("func(value int) error", ""),
+        ("struct{ X int `json:\\\"x\\\"` }", ""),
+    ] {
+        for extra in ["", "validation = true\n", "exact_numbers = true\n"] {
+            if !cfg!(feature = "exact-numbers") && extra.starts_with("exact") {
+                continue;
+            }
+            let toml = format!("{extra}[substitutions.thing.go]\nname = \"{spelling}\"\n");
+            let Some(result) = go(spelled_everywhere(), &toml) else {
+                return;
+            };
+            let code = match result {
+                Ok(mut generation) => generation.files.remove(0).contents,
+                Err(error) => panic!("{spelling} {extra:?}: {error:?}"),
+            };
+            let own = if own.is_empty() {
+                format!("package {}\n", package_of(&code))
+            } else {
+                format!("package {}\n\ntype {own} string\n", package_of(&code))
+            };
+            let Some(vetted) = vet_with(&code, "own-unshadowed", &[("own.go", &own)]) else {
+                return;
+            };
+            if let Err(error) = vetted {
+                panic!("{spelling} {extra:?}: go vet failed\n{error}\n{code}");
+            }
+        }
+    }
+}
+
+#[test]
+fn an_unused_substitution_is_not_checked() {
+    let toml = "[substitutions.unused.go]\nname = \"err\"\n";
+    let Some(result) = go(pet(), toml) else {
+        return;
+    };
+    result.expect("an unused spelling is no clash");
 }

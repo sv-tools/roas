@@ -49,6 +49,34 @@ const VALIDATION_NAMES: &[&str] = &[
     "zero",
 ];
 
+/// Locals, receivers and parameters of the decoders and accessors that
+/// spell a substituted type, which a type of the package's own spelled
+/// the same would be shadowed by.
+const SPELLING_LOCALS: &[&str] = &["d", "e", "u", "v", "err", "name", "token", "value"];
+
+/// The package-level names the generated code declares besides its types.
+const HELPER_NAMES: &[&str] = &[
+    "decodeOptions",
+    "noUnmarshalers",
+    "isolatedNone",
+    "refuseNull",
+    "readTag",
+    "integerToken",
+    "matchPattern",
+    "patterns",
+    "memberMatches",
+    "decimalToken",
+    "decimalDigits",
+    "childPointer",
+    "wideNumber",
+];
+
+/// The names the generated code may import a package under.
+const BUILTIN_NAMES: &[&str] = &[
+    "jsontext", "json", "errors", "fmt", "maps", "slices", "math", "big", "strconv", "utf8",
+    "regexp", "sync",
+];
+
 /// Validation's loop variables, one per nesting depth: `i0`, `item0`,
 /// `k0`. A file under `layout = "file_per_type"` reads `item0.` as a use
 /// of a package of that name.
@@ -331,6 +359,8 @@ struct Builder<'a> {
     refuse_null_isolated: BTreeSet<String>,
     isolated: BTreeSet<String>,
     externs: BTreeSet<String>,
+    /// The substitution spellings the schema uses.
+    spellings: BTreeSet<String>,
     /// For each substitution import, the qualifiers its spellings use.
     extern_names: BTreeMap<String, BTreeSet<String>>,
     diagnostics: Vec<Diagnostic>,
@@ -365,6 +395,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         refuse_null_isolated: BTreeSet::new(),
         isolated: BTreeSet::new(),
         externs: BTreeSet::new(),
+        spellings: BTreeSet::new(),
         extern_names: BTreeMap::new(),
         diagnostics: Vec::new(),
     };
@@ -585,31 +616,28 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             let names = BTreeSet::from([name.to_owned()]);
             import_names.push(names);
         }
-        // A type of the package's own spelled like a name the generated
-        // code declares or imports is shadowed by it, or clashes with it.
-        for spelling in config
-            .substitutions
-            .values()
-            .filter_map(|s| s.go.as_ref())
-            .map(|go| go.name.as_str())
-        {
-            let taken = unqualified_names(spelling).into_iter().find_map(|name| {
-                if config.validation && depth_local(name) {
-                    return Some((name, "validation's loop variables".to_owned()));
-                }
-                let what = used.get(name)?;
-                Some((
-                    name,
-                    if what.starts_with("a name ") {
-                        (*what).to_owned()
-                    } else {
-                        format!("the package the generated code imports as {what:?}")
-                    },
-                ))
+        // A type of the package's own spelled like a local of the code
+        // spelling it is shadowed by that local, and one spelled like a
+        // package-level name or an import clashes with it. Helpers and
+        // builtin imports are refused even where this run has none, so a
+        // config keeps working as the description grows.
+        for spelling in &builder.spellings {
+            let taken = type_names(spelling).into_iter().find_map(|name| {
+                let what = if SPELLING_LOCALS.contains(&name) {
+                    "a local of the generated decoders, which would shadow it".to_owned()
+                } else if HELPER_NAMES.contains(&name) {
+                    "a name the generated code may declare".to_owned()
+                } else if BUILTIN_NAMES.contains(&name) {
+                    "the name the generated code may import a package under".to_owned()
+                } else {
+                    let path = used.get(name).filter(|what| !what.starts_with("a name "))?;
+                    format!("the name the generated code imports {path:?} under")
+                };
+                Some((name, what))
             });
             if let Some((name, what)) = taken {
                 return Err(GenerateError::Config(format!(
-                    "substitution spelling {spelling:?} names `{name}`, which is {what}; rename the type, or spell it through a package"
+                    "substitution spelling {spelling:?} names `{name}`, {what}; rename the type, or spell it through a package"
                 )));
             }
         }
@@ -682,8 +710,18 @@ fn assign_files(types: &mut [TypeView], config: &Config) {
 }
 
 /// The names a Go type spelling uses unqualified: neither a package
-/// qualifier nor a selector after one.
+/// qualifier nor a selector after one, nor inside a string (a tag).
 fn unqualified_names(ty: &str) -> Vec<&str> {
+    scan_names(ty, false)
+}
+
+/// The unqualified names a Go type spelling uses as types: also not a
+/// field or parameter name, one followed by a type after a blank.
+fn type_names(ty: &str) -> Vec<&str> {
+    scan_names(ty, true)
+}
+
+fn scan_names(ty: &str, types_only: bool) -> Vec<&str> {
     let bytes = ty.as_bytes();
     let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
     let mut out = Vec::new();
@@ -698,7 +736,15 @@ fn unqualified_names(ty: &str) -> Vec<&str> {
             }
             let rest = ty[i..].trim_start();
             let qualifier = rest.starts_with('.') && !rest.starts_with("...");
-            if !after_dot && !qualifier {
+            // `x T`, `x *T`, `x []T`, `x ...T`, `x func()`; `List[T]` is
+            // spelled without the blank.
+            let named = types_only
+                && rest.len() < ty.len() - i
+                && rest.starts_with(|c: char| {
+                    c.is_alphabetic() || c == '_' || c == '*' || c == '[' || c == '.'
+                })
+                && !super::naming::is_keyword(&ty[start..i]);
+            if !after_dot && !qualifier && !named {
                 out.push(&ty[start..i]);
             }
             after_dot = false;
@@ -706,6 +752,14 @@ fn unqualified_names(ty: &str) -> Vec<&str> {
             while i < bytes.len() && ident(bytes[i]) {
                 i += 1;
             }
+            after_dot = false;
+        } else if b == b'"' || b == b'`' {
+            // A string: a struct tag.
+            i += 1;
+            while i < bytes.len() && bytes[i] != b {
+                i += if b == b'"' && bytes[i] == b'\\' { 2 } else { 1 };
+            }
+            i += 1;
             after_dot = false;
         } else if bytes[i..].starts_with(b"...") {
             // An ellipsis, not a selector.
@@ -935,6 +989,7 @@ impl Builder<'_> {
                 .or_default()
                 .extend(super::imports::qualifiers(&spelling.name));
         }
+        self.spellings.insert(spelling.name.clone());
         Ok(spelling.name.clone())
     }
 
