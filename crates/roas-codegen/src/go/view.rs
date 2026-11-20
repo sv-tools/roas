@@ -735,11 +735,22 @@ fn names_a_type(rest: &str) -> bool {
         if let Some(after) = trimmed.strip_prefix(',') {
             let after = after.trim_start();
             let len = after.bytes().take_while(|b| ident(*b)).count();
-            if len == 0 || after.starts_with(|c: char| c.is_ascii_digit()) {
+            // `chan`, `func`, `map` start a type: `a, chan int` lists types.
+            if len == 0
+                || after.starts_with(|c: char| c.is_ascii_digit())
+                || super::naming::is_keyword(&after[..len])
+            {
                 return false;
             }
             rest = &after[len..];
             continue;
+        }
+        // Unspaced only where no type could go on: `x*T`, `x[]T`, `x<-chan T`.
+        if ["*", "[]", "<-"]
+            .iter()
+            .any(|start| rest.starts_with(start))
+        {
+            return true;
         }
         return trimmed.len() < rest.len()
             && trimmed.starts_with(|c: char| {
