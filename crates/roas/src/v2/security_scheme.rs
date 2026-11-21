@@ -1,6 +1,8 @@
 //! Security Scheme Object
 
-use crate::common::helpers::{validate_required_string, validate_required_url};
+use crate::common::helpers::{
+    validate_required_string, validate_required_url, validate_unknown_fields,
+};
 use crate::v2::spec::Spec;
 use crate::validation::{Context, PushError, ValidateWithContext};
 use serde::de::{Error as DeError, MapAccess, Visitor};
@@ -72,6 +74,9 @@ pub struct BasicSecurityScheme {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,6 +99,9 @@ pub struct ApiKeySecurityScheme {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -146,6 +154,9 @@ pub struct OAuth2SecurityScheme {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -295,17 +306,21 @@ impl ValidateWithContext<Spec> for SecurityScheme {
 }
 
 impl ValidateWithContext<Spec> for BasicSecurityScheme {
-    fn validate_with_context(&self, _ctx: &mut Context<Spec>, _path: String) {}
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
+    }
 }
 
 impl ValidateWithContext<Spec> for ApiKeySecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }
 
 impl ValidateWithContext<Spec> for OAuth2SecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         if self.scopes.is_empty() {
             ctx.error(path.clone(), ".scopes: must not be empty");
         }

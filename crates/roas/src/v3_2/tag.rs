@@ -1,6 +1,6 @@
 //! Tag Object
 
-use crate::common::helpers::validate_required_string;
+use crate::common::helpers::{validate_required_string, validate_unknown_fields};
 use crate::v3_2::external_documentation::ExternalDocumentation;
 use crate::v3_2::spec::Spec;
 use crate::validation::{Context, PushError, ValidateWithContext};
@@ -49,6 +49,9 @@ pub struct Tag {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -57,6 +60,7 @@ pub struct Tag {
 
 impl ValidateWithContext<Spec> for Tag {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         if let Some(doc) = &self.external_docs {
             doc.validate_with_context(ctx, format!("{path}.externalDocs"));

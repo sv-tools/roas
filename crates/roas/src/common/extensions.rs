@@ -9,7 +9,10 @@
 //! See the list of some [Vendor Extensions](https://github.com/swagger-api/swagger-codegen/wiki/Vendor-Extensions) for further details.
 //!
 //! The module provides a `serde` helper to deserialize and serialize extensions.
-//! Only the entries with key starts with `x-` will be deserialized and/or serialized.
+//! It keeps every key the typed fields do not claim, not only the `x-` extensions, so a document
+//! round-trips without loss. A key that is not an `x-` extension is one the object does not
+//! define, which the specification does not allow; validation reports it (see
+//! [`crate::validation::Options::IgnoreUnknownFields`]).
 //!
 //! Example:
 //!
@@ -29,8 +32,55 @@
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserializer, Serialize, Serializer};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fmt;
+
+thread_local! {
+    /// Set while [`with_extensions_only`] runs: serializing then writes only the `x-` keys.
+    static EXTENSIONS_ONLY: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether `key` is a Specification Extension (`x-` prefix).
+pub(crate) fn is_extension(key: &str) -> bool {
+    key.starts_with("x-")
+}
+
+/// The keys `extensions` holds that are not `x-` extensions: keys the object does not define.
+pub(crate) fn unknown_fields(
+    extensions: &Option<BTreeMap<String, serde_json::Value>>,
+) -> impl Iterator<Item = &str> {
+    extensions
+        .iter()
+        .flat_map(BTreeMap::keys)
+        .map(String::as_str)
+        .filter(|key| !is_extension(key))
+}
+
+/// Runs `serialize` with the objects that use this module writing only their `x-` extensions,
+/// leaving out the keys they do not define.
+///
+/// The version conversions serialize the source document through it: a key the source version
+/// does not define on an object has no meaning to carry to the next version, and the next
+/// version may define a field of that name with another shape, which would fail the whole
+/// conversion. Validating the source reports such keys.
+#[cfg(any(
+    all(feature = "v2", feature = "v3_0"),
+    all(feature = "v3_0", feature = "v3_1"),
+    all(feature = "v3_1", feature = "v3_2"),
+))]
+pub(crate) fn with_extensions_only<T>(serialize: impl FnOnce() -> T) -> T {
+    /// Restores the previous mode, also when `serialize` panics.
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            EXTENSIONS_ONLY.set(self.0);
+        }
+    }
+
+    let _restore = Restore(EXTENSIONS_ONLY.replace(true));
+    serialize()
+}
 
 pub fn deserialize<'de, D>(
     deserializer: D,
@@ -43,7 +93,7 @@ where
         type Value = BTreeMap<String, serde_json::Value>;
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("extensions: Option<BTreeMap<String, serde_json::Value>>")
+            formatter.write_str("a map of extensions and unclaimed keys")
         }
 
         fn visit_map<V>(self, mut map: V) -> Result<BTreeMap<String, serde_json::Value>, V::Error>
@@ -52,13 +102,11 @@ where
         {
             let mut ext: BTreeMap<String, serde_json::Value> = BTreeMap::new();
             while let Some(key) = map.next_key::<String>()? {
-                if key.starts_with("x-") {
-                    if ext.contains_key(key.as_str()) {
-                        return Err(Error::custom(format_args!("duplicate field `{key}`")));
-                    }
-                    let value: serde_json::Value = map.next_value()?;
-                    ext.insert(key, value);
+                if ext.contains_key(key.as_str()) {
+                    return Err(Error::custom(format_args!("duplicate field `{key}`")));
                 }
+                let value: serde_json::Value = map.next_value()?;
+                ext.insert(key, value);
             }
             Ok(ext)
         }
@@ -75,17 +123,19 @@ pub fn serialize<S>(
 where
     S: Serializer,
 {
-    if let Some(ext) = ext {
-        let mut map = serializer.serialize_map(Some(ext.len()))?;
-        for (k, v) in ext {
-            if k.starts_with("x-") {
-                map.serialize_entry(k, v)?;
-            }
+    let Some(ext) = ext else {
+        return None::<BTreeMap<String, serde_json::Value>>.serialize(serializer);
+    };
+    let extensions_only = EXTENSIONS_ONLY.get();
+    let written = |key: &str| !extensions_only || is_extension(key);
+    let count = ext.keys().filter(|key| written(key)).count();
+    let mut map = serializer.serialize_map(Some(count))?;
+    for (k, v) in ext {
+        if written(k) {
+            map.serialize_entry(k, v)?;
         }
-        map.end()
-    } else {
-        None::<BTreeMap<String, serde_json::Value>>.serialize(serializer)
     }
+    map.end()
 }
 
 #[cfg(test)]
@@ -118,7 +168,7 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<TestExtensions>(serde_json::json!({
                 "foo": "bar",
-                "skipped":1,
+                "unclaimed":1,
                 "x-added":2,
             }))
             .unwrap(),
@@ -126,18 +176,19 @@ mod tests {
                 foo: String::from("bar"),
                 extensions: Some({
                     let mut ext: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+                    ext.insert("unclaimed".to_owned(), 1.into());
                     ext.insert("x-added".to_owned(), 2.into());
                     ext
                 }),
             },
-            "one ext with x- prefix another without",
+            "an x- extension and an unclaimed key",
         );
         assert_eq!(
             serde_json::from_str::<TestExtensions>(r#"{"foo":"bar","x-added":1,"x-added":2}"#)
                 .unwrap_err()
                 .to_string(),
             "duplicate field `x-added` at line 1 column 37",
-            "one ext with x- prefix another without",
+            "an x- extension and an unclaimed key",
         );
     }
 
@@ -185,16 +236,67 @@ mod tests {
                 extensions: Some({
                     let mut ext: BTreeMap<String, serde_json::Value> = BTreeMap::new();
                     ext.insert("x-added".to_owned(), 1.into());
-                    ext.insert("skipped".to_owned(), 2.into());
+                    ext.insert("unclaimed".to_owned(), 2.into());
                     ext
                 }),
             })
             .unwrap(),
             serde_json::json!({
                 "foo": "bar",
+                "unclaimed": 2,
                 "x-added": 1
             }),
-            "one ext with x- prefix another without",
+            "an x- extension and an unclaimed key",
         );
+    }
+
+    fn with_an_unclaimed_key() -> TestExtensions {
+        TestExtensions {
+            foo: String::from("bar"),
+            extensions: Some(BTreeMap::from([
+                ("unclaimed".to_owned(), 1.into()),
+                ("x-added".to_owned(), 2.into()),
+            ])),
+        }
+    }
+
+    #[test]
+    fn unknown_fields_are_the_keys_without_the_x_prefix() {
+        let value = with_an_unclaimed_key();
+        let unknown: Vec<&str> = unknown_fields(&value.extensions).collect();
+        assert_eq!(unknown, ["unclaimed"]);
+        assert_eq!(unknown_fields(&None).count(), 0);
+    }
+
+    #[cfg(any(
+        all(feature = "v2", feature = "v3_0"),
+        all(feature = "v3_0", feature = "v3_1"),
+        all(feature = "v3_1", feature = "v3_2"),
+    ))]
+    #[test]
+    fn extensions_only_leaves_out_the_unclaimed_keys() {
+        let value = with_an_unclaimed_key();
+        let only = with_extensions_only(|| serde_json::to_value(&value).unwrap());
+        assert_eq!(only, serde_json::json!({"foo": "bar", "x-added": 2}));
+        let all = serde_json::to_value(&value).unwrap();
+        assert_eq!(
+            all,
+            serde_json::json!({"foo": "bar", "unclaimed": 1, "x-added": 2}),
+            "the mode ends with the closure",
+        );
+    }
+
+    #[cfg(any(
+        all(feature = "v2", feature = "v3_0"),
+        all(feature = "v3_0", feature = "v3_1"),
+        all(feature = "v3_1", feature = "v3_2"),
+    ))]
+    #[test]
+    fn extensions_only_ends_when_the_closure_panics() {
+        let outcome =
+            std::panic::catch_unwind(|| with_extensions_only(|| panic!("in the closure")));
+        assert!(outcome.is_err());
+        let all = serde_json::to_value(with_an_unclaimed_key()).unwrap();
+        assert_eq!(all["unclaimed"], 1);
     }
 }

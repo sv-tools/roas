@@ -1,6 +1,6 @@
 //! Response Object
 
-use crate::common::helpers::validate_required_string;
+use crate::common::helpers::{validate_required_string, validate_unknown_fields};
 use crate::common::reference::RefOr;
 use crate::v3_0::header::Header;
 use crate::v3_0::link::Link;
@@ -107,6 +107,9 @@ pub struct Response {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -210,6 +213,7 @@ impl<'de> Deserialize<'de> for Responses {
 
 impl ValidateWithContext<Spec> for Response {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         if !ctx.is_option(Options::IgnoreEmptyResponseDescription) {
             validate_required_string(&self.description, ctx, format!("{path}.description"));
         }

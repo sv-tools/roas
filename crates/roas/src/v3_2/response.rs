@@ -1,5 +1,6 @@
 //! Response Object
 
+use crate::common::helpers::validate_unknown_fields;
 use crate::common::reference::RefOr;
 use crate::v3_2::header::Header;
 use crate::v3_2::link::Link;
@@ -114,6 +115,9 @@ pub struct Response {
     pub links: Option<BTreeMap<String, RefOr<Link>>>,
 
     /// `^x-` Specification Extensions.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -217,6 +221,7 @@ impl<'de> Deserialize<'de> for Responses {
 
 impl ValidateWithContext<Spec> for Response {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         // OAS 3.2: `description` is optional per the JSON Schema. When set,
         // the legacy `IgnoreEmptyResponseDescription` toggle is moot — but
         // we still flag a present-but-empty value (the field was set so it
