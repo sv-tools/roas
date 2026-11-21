@@ -1,7 +1,7 @@
 //! Security Scheme Object
 
 use crate::common::helpers::{
-    validate_optional_uri, validate_required_string, validate_required_uri,
+    validate_optional_uri, validate_required_string, validate_required_uri, validate_unknown_fields,
 };
 use crate::v3_1::spec::Spec;
 use crate::validation::{Context, PushError, ValidateWithContext};
@@ -93,6 +93,9 @@ pub struct MutualTLSSecurityScheme {
     pub description: Option<String>,
 
     /// `^x-` Specification Extensions.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,6 +128,9 @@ pub struct HttpSecurityScheme {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,6 +173,9 @@ pub struct ApiKeySecurityScheme {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -213,6 +222,9 @@ pub struct OAuth2SecurityScheme {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -245,6 +257,9 @@ pub struct OAuth2Flows {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -273,6 +288,9 @@ pub struct ImplicitOAuth2Flow {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -301,6 +319,9 @@ pub struct PasswordOAuth2Flow {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -329,6 +350,9 @@ pub struct ClientCredentialsOAuth2Flow {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -362,6 +386,9 @@ pub struct AuthorizationCodeOAuth2Flow {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -383,6 +410,9 @@ pub struct OpenIdConnectSecurityScheme {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -404,7 +434,8 @@ impl ValidateWithContext<Spec> for SecurityScheme {
 }
 
 impl ValidateWithContext<Spec> for MutualTLSSecurityScheme {
-    fn validate_with_context(&self, _ctx: &mut Context<Spec>, _path: String) {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         // No scheme-specific fields beyond description / extensions; nothing
         // to validate here.
     }
@@ -412,6 +443,7 @@ impl ValidateWithContext<Spec> for MutualTLSSecurityScheme {
 
 impl ValidateWithContext<Spec> for HttpSecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         // Spec: `scheme` is REQUIRED for `type: http`. The struct holds it
         // as `String` (default = ""), so check non-empty here.
         validate_required_string(&self.scheme, ctx, format!("{path}.scheme"));
@@ -430,12 +462,14 @@ impl ValidateWithContext<Spec> for HttpSecurityScheme {
 
 impl ValidateWithContext<Spec> for ApiKeySecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }
 
 impl ValidateWithContext<Spec> for OAuth2SecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         self.flows
             .validate_with_context(ctx, format!("{path}.flow"));
     }
@@ -443,6 +477,7 @@ impl ValidateWithContext<Spec> for OAuth2SecurityScheme {
 
 impl ValidateWithContext<Spec> for OAuth2Flows {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         // Per the OAS 3.1 JSON Schema, `flows` does not require any of
         // implicit / password / clientCredentials / authorizationCode to
         // be set — an empty `flows: {}` is valid.
@@ -463,6 +498,7 @@ impl ValidateWithContext<Spec> for OAuth2Flows {
 
 impl ValidateWithContext<Spec> for ImplicitOAuth2Flow {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_uri(
             &self.authorization_url,
             ctx,
@@ -474,6 +510,7 @@ impl ValidateWithContext<Spec> for ImplicitOAuth2Flow {
 
 impl ValidateWithContext<Spec> for PasswordOAuth2Flow {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_uri(&self.token_url, ctx, format!("{path}.tokenUrl"));
         validate_optional_uri(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
     }
@@ -481,6 +518,7 @@ impl ValidateWithContext<Spec> for PasswordOAuth2Flow {
 
 impl ValidateWithContext<Spec> for ClientCredentialsOAuth2Flow {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_uri(&self.token_url, ctx, format!("{path}.tokenUrl"));
         validate_optional_uri(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
     }
@@ -488,6 +526,7 @@ impl ValidateWithContext<Spec> for ClientCredentialsOAuth2Flow {
 
 impl ValidateWithContext<Spec> for AuthorizationCodeOAuth2Flow {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_uri(
             &self.authorization_url,
             ctx,
@@ -500,6 +539,7 @@ impl ValidateWithContext<Spec> for AuthorizationCodeOAuth2Flow {
 
 impl ValidateWithContext<Spec> for OpenIdConnectSecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_uri(
             &self.open_id_connect_url,
             ctx,

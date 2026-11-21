@@ -1,7 +1,7 @@
 //! Parameter Object
 
 use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{validate_pattern, validate_required_string};
+use crate::common::helpers::{validate_pattern, validate_required_string, validate_unknown_fields};
 use crate::common::reference::RefOr;
 use crate::v2::items::Items;
 use crate::v2::schema::Schema;
@@ -63,6 +63,9 @@ pub struct InBody {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -208,6 +211,9 @@ pub struct StringParameter {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -283,6 +289,9 @@ pub struct IntegerParameter {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -358,6 +367,9 @@ pub struct NumberParameter {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -401,6 +413,9 @@ pub struct BooleanParameter {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -465,6 +480,9 @@ pub struct ArrayParameter {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -501,6 +519,9 @@ pub struct FileParameter {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -521,6 +542,7 @@ impl ValidateWithContext<Spec> for Parameter {
 
 impl ValidateWithContext<Spec> for InBody {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}name"));
         self.schema
             .validate_with_context(ctx, format!("{path}.schema"));
@@ -640,12 +662,14 @@ impl ValidateWithContext<Spec> for InFormData {
 
 impl ValidateWithContext<Spec> for StringParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }
 
 impl ValidateWithContext<Spec> for IntegerParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path);
     }
@@ -653,6 +677,7 @@ impl ValidateWithContext<Spec> for IntegerParameter {
 
 impl ValidateWithContext<Spec> for NumberParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path);
     }
@@ -660,12 +685,14 @@ impl ValidateWithContext<Spec> for NumberParameter {
 
 impl ValidateWithContext<Spec> for BooleanParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }
 
 impl ValidateWithContext<Spec> for ArrayParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         self.items
             .validate_with_context(ctx, format!("{path}.items"));
@@ -674,6 +701,7 @@ impl ValidateWithContext<Spec> for ArrayParameter {
 
 impl ValidateWithContext<Spec> for FileParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }

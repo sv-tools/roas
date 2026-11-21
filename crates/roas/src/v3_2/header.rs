@@ -1,5 +1,6 @@
 //! Header Object
 
+use crate::common::helpers::validate_unknown_fields;
 use crate::common::reference::RefOr;
 use crate::v3_2::example::Example;
 use crate::v3_2::media_type::MediaType;
@@ -73,6 +74,9 @@ pub struct Header {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,6 +85,7 @@ pub struct Header {
 
 impl ValidateWithContext<Spec> for Header {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         if self.example.is_some() && self.examples.is_some() {
             ctx.error(path.clone(), "example and examples are mutually exclusive");
         }
