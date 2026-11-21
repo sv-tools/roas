@@ -1235,6 +1235,7 @@ fn an_own_type_spelled_like_a_generated_name_is_refused() {
         ("func(a chan\\nvalue, b int)", "value"),
         ("['\\\"']value", "value"),
         ("func(a, List[value])", "value"),
+        ("[0x1E+value]int", "value"),
     ] {
         for layout in ["", "layout = \"file_per_type\"\n"] {
             let toml = format!("{layout}[substitutions.thing.go]\nname = \"{spelling}\"\n");
@@ -1255,7 +1256,7 @@ fn an_own_type_no_generated_name_shadows_compiles() {
     // parameter and tag words inside a spelling.
     for (spelling, own) in [
         ("text", "text"),
-        ("raw", "raw"),
+        ("zero", "zero"),
         ("item", "item"),
         ("readable", "readable"),
         ("struct{ err error; value int }", ""),
@@ -1328,4 +1329,44 @@ fn a_spelling_over_lines_ends_entries_at_line_breaks() {
     if let Err(error) = vetted {
         panic!("go vet failed\n{error}\n{code}");
     }
+}
+
+#[test]
+fn an_own_variant_spelled_like_a_tagged_decoder_local_is_refused() {
+    let components = serde_json::json!({
+        "Pet": {"type": "object", "required": ["kind"], "properties": {"kind": {"type": "string"}}, "discriminator": {"propertyName": "kind"}},
+        "Cat": {"allOf": [{"$ref": "#/components/schemas/Pet"}, {"properties": {"meow": {"type": "string"}}}]},
+        "Box": {"type": "object", "properties": {"p": {"$ref": "#/components/schemas/Pet"}}}
+    });
+    for name in ["raw", "tag", "members", "member", "ok"] {
+        let toml = format!("[substitutions.Cat.go]\nname = \"{name}\"\n");
+        let Some(result) = go(components.clone(), &toml) else {
+            return;
+        };
+        let Err(GenerateError::Config(message)) = result else {
+            panic!("{name}: not refused");
+        };
+        assert!(message.contains(&format!("names `{name}`")), "{message}");
+    }
+}
+
+#[test]
+fn an_own_type_spelled_like_a_substitution_import_is_refused() {
+    let toml = "[substitutions.thing.go]\nname = \"foo.T\"\nimport = \"example.com/foo\"\n[substitutions.other.go]\nname = \"[]foo\"\n";
+    let components = serde_json::json!({
+        "Both": {"type": "object", "properties": {
+            "a": {"type": "string", "format": "thing"},
+            "b": {"type": "string", "format": "other"}
+        }}
+    });
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let Err(GenerateError::Config(message)) = result else {
+        panic!("not refused");
+    };
+    assert!(
+        message.contains("names `foo`") && message.contains("example.com/foo"),
+        "{message}"
+    );
 }

@@ -54,6 +54,8 @@ const VALIDATION_NAMES: &[&str] = &[
 /// the same would be shadowed by.
 const SPELLING_LOCALS: &[&str] = &[
     "d", "e", "u", "v", "err", "name", "token", "value", "present",
+    // A tagged union's decoder, which spells a substituted variant.
+    "raw", "tag", "members", "member", "ok",
 ];
 
 /// The package-level names the generated code declares besides its types.
@@ -777,10 +779,17 @@ fn tokens(ty: &str) -> Vec<Token<'_>> {
         } else if c.is_ascii_digit()
             || (c == '.' && rest[1..].starts_with(|c: char| c.is_ascii_digit()))
         {
+            // `e` is a hex digit: only `p` gives a hex literal's exponent.
+            let hex = rest.starts_with("0x") || rest.starts_with("0X");
             let mut len = 0;
             let mut prev = ' ';
             for c in rest.chars() {
-                let exponent_sign = matches!(c, '+' | '-') && matches!(prev, 'e' | 'E' | 'p' | 'P');
+                let exponent = if hex {
+                    matches!(prev, 'p' | 'P')
+                } else {
+                    matches!(prev, 'e' | 'E')
+                };
+                let exponent_sign = matches!(c, '+' | '-') && exponent;
                 if !(ident(c) || c == '.' || exponent_sign) {
                     break;
                 }
