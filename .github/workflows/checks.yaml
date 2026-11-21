@@ -52,7 +52,7 @@ jobs:
       # On a `<crate>/v<x.y.z>` tag push (`release-stage.yaml` calls this
       # workflow) the action also parses the tag and fails when the crate
       # is unknown or its Cargo.toml version differs from the tag.
-      - uses: sv-tools/rust-metadata-action@911f68d27616d2824bcaadfac48ffa32d48055e5 # v1.3.0
+      - uses: sv-tools/rust-metadata-action@4020eda3b8b92b4cc9835dfe8d792ec2ace4690e # v1.3.1
         id: rustmeta
         with:
           matrix-exclude-features: roas:default
