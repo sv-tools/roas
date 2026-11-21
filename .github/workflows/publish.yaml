@@ -26,40 +26,27 @@ permissions: read-all
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────
-  # Parse the triggering tag into `<package>` + `<version>` so downstream
-  # jobs don't have to re-derive them. Tags are `<crate>/v<x.y.z>`; both
-  # event triggers (`release` and manual dispatch) feed into the same
-  # parse step.
+  # Parse the triggering tag (`<crate>/v<x.y.z>`) into package + version
+  # so downstream jobs don't have to re-derive them. rust-metadata-action
+  # also fails here when the crate is unknown or its Cargo.toml version
+  # at the tag differs from the tag. Both event triggers (`release` and
+  # manual dispatch) feed into the same steps.
   # ────────────────────────────────────────────────────────────────────────
   Resolve:
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.parse.outputs.tag }}
-      package: ${{ steps.parse.outputs.package }}
-      version: ${{ steps.parse.outputs.version }}
-      is_roas_cli: ${{ steps.parse.outputs.is_roas_cli }}
+      tag: ${{ github.event.release.tag_name || inputs.tag }}
+      package: ${{ steps.meta.outputs.tag-package }}
+      version: ${{ steps.meta.outputs.tag-version }}
+      is_roas_cli: ${{ steps.meta.outputs.tag-package == 'roas-cli' }}
     steps:
-      - id: parse
-        env:
-          TAG: ${{ github.event.release.tag_name || inputs.tag }}
-        run: |
-          set -euo pipefail
-          if [[ "$TAG" != */v* ]]; then
-            echo "::error::tag '$TAG' must be in the form <package>/v<version>"
-            exit 1
-          fi
-          PACKAGE="${TAG%/v*}"
-          VERSION="${TAG##*/v}"
-          {
-            echo "tag=$TAG"
-            echo "package=$PACKAGE"
-            echo "version=$VERSION"
-            if [[ "$PACKAGE" = "roas-cli" ]]; then
-              echo "is_roas_cli=true"
-            else
-              echo "is_roas_cli=false"
-            fi
-          } >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - uses: sv-tools/rust-metadata-action@911f68d27616d2824bcaadfac48ffa32d48055e5 # v1.3.0
+        id: meta
+        with:
+          tag: ${{ github.event.release.tag_name || inputs.tag }}
 
   Publish:
     needs: Resolve
