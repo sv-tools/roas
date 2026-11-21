@@ -715,161 +715,175 @@ fn assign_files(types: &mut [TypeView], config: &Config) {
 }
 
 /// The names a Go type spelling uses unqualified: neither a package
-/// qualifier nor a selector after one, nor inside a string (a tag).
+/// qualifier nor a selector after one, nor inside a literal (a tag).
 fn unqualified_names(ty: &str) -> Vec<String> {
-    let ty = without_comments(ty);
-    scan_names(&ty, false)
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
+    scan_names(ty, false)
 }
 
 /// The unqualified names a Go type spelling uses as types: also not a
-/// field or parameter name, one followed by a type after a blank.
+/// field, parameter or method name.
 fn type_names(ty: &str) -> Vec<String> {
-    let ty = without_comments(ty);
-    scan_names(&ty, true)
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
+    scan_names(ty, true)
 }
 
-/// `ty` with each comment a blank: a line break where it held or ended
-/// in one, as Go reads it.
-fn without_comments(ty: &str) -> String {
-    let mut out = String::with_capacity(ty.len());
-    let mut chars = ty.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '"' | '`' => {
-                out.push(c);
-                while let Some(inner) = chars.next() {
-                    out.push(inner);
-                    if inner == c {
-                        break;
-                    }
-                    if c == '"' && inner == '\\' {
-                        out.extend(chars.next());
-                    }
-                }
+/// A token of a Go type spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Token<'a> {
+    Ident(&'a str),
+    /// A string, rune or number.
+    Literal,
+    /// An explicit `;`, or one Go reads into a line break.
+    Semicolon,
+    Punct(&'a str),
+}
+
+/// The tokens of a Go type spelling, with the semicolons Go inserts at
+/// line breaks; comments are blanks, or line breaks when they hold one.
+fn tokens(ty: &str) -> Vec<Token<'_>> {
+    fn ends_line(last: Option<&Token<'_>>) -> bool {
+        match last {
+            Some(Token::Ident(word)) => {
+                !super::naming::is_keyword(word)
+                    || matches!(*word, "break" | "continue" | "fallthrough" | "return")
             }
-            '/' if chars.peek() == Some(&'/') => {
-                while chars.peek().is_some_and(|next| *next != '\n') {
-                    chars.next();
-                }
-                out.push(' ');
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                let mut line_break = false;
-                let mut last = ' ';
-                for inner in chars.by_ref() {
-                    if last == '*' && inner == '/' {
-                        break;
-                    }
-                    line_break |= inner == '\n';
-                    last = inner;
-                }
-                out.push(if line_break { '\n' } else { ' ' });
-            }
-            c => out.push(c),
+            Some(Token::Literal) => true,
+            Some(Token::Punct(p)) => matches!(*p, ")" | "]" | "}"),
+            _ => false,
         }
+    }
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = Vec::new();
+    let mut rest = ty;
+    while let Some(c) = rest.chars().next() {
+        let len = if c == '\n' {
+            if ends_line(out.last()) {
+                out.push(Token::Semicolon);
+            }
+            1
+        } else if c.is_whitespace() {
+            c.len_utf8()
+        } else if rest.starts_with("//") {
+            rest.find('\n').unwrap_or(rest.len())
+        } else if let Some(body) = rest.strip_prefix("/*") {
+            let len = body.find("*/").map_or(rest.len(), |end| end + 4);
+            if rest[..len].contains('\n') && ends_line(out.last()) {
+                out.push(Token::Semicolon);
+            }
+            len
+        } else if c.is_alphabetic() || c == '_' {
+            let len = rest.find(|c: char| !ident(c)).unwrap_or(rest.len());
+            out.push(Token::Ident(&rest[..len]));
+            len
+        } else if c.is_ascii_digit()
+            || (c == '.' && rest[1..].starts_with(|c: char| c.is_ascii_digit()))
+        {
+            let mut len = 0;
+            let mut prev = ' ';
+            for c in rest.chars() {
+                let exponent_sign = matches!(c, '+' | '-') && matches!(prev, 'e' | 'E' | 'p' | 'P');
+                if !(ident(c) || c == '.' || exponent_sign) {
+                    break;
+                }
+                len += c.len_utf8();
+                prev = c;
+            }
+            out.push(Token::Literal);
+            len
+        } else if matches!(c, '"' | '\'' | '`') {
+            let mut escaped = false;
+            let close = rest[1..].char_indices().find(|&(_, inner)| {
+                let closes = inner == c && !escaped;
+                escaped = c != '`' && inner == '\\' && !escaped;
+                closes
+            });
+            out.push(Token::Literal);
+            close.map_or(rest.len(), |(at, _)| at + 2)
+        } else if rest.starts_with("...") || rest.starts_with("<-") {
+            let len = if rest.starts_with("...") { 3 } else { 2 };
+            out.push(Token::Punct(&rest[..len]));
+            len
+        } else if c == ';' {
+            out.push(Token::Semicolon);
+            1
+        } else {
+            out.push(Token::Punct(&rest[..c.len_utf8()]));
+            c.len_utf8()
+        };
+        rest = &rest[len..];
     }
     out
 }
 
-/// Whether `rest`, after an identifier, makes it a name in a list of
-/// names followed by their type: `, y, z T`, `T`, `*T`, `[]T`, `...T`,
-/// `<-chan T`, `(T)`, after a blank. `List[T]` is spelled without the
-/// blank.
-fn names_a_type(rest: &str) -> bool {
-    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
-    let mut rest = rest;
-    loop {
-        let trimmed = rest.trim_start();
-        if let Some(after) = trimmed.strip_prefix(',') {
-            let after = after.trim_start();
-            let len = after.bytes().take_while(|b| ident(*b)).count();
-            // `chan`, `func`, `map` start a type: `a, chan int` lists types.
-            if len == 0
-                || after.starts_with(|c: char| c.is_ascii_digit())
-                || super::naming::is_keyword(&after[..len])
-            {
-                return false;
+fn scan_names(ty: &str, types_only: bool) -> Vec<String> {
+    let tokens = tokens(ty);
+    let at = |k: usize| tokens.get(k).copied();
+    // Where a type can begin, after a name: `x T`, `x *T`, `x []T`,
+    // `x ...T`, `x <-chan T`, `x (T)`.
+    let type_starts = |k: usize| {
+        matches!(
+            at(k),
+            Some(Token::Ident(_) | Token::Punct("*" | "[" | "(" | "..." | "<-"))
+        )
+    };
+    // The token after a bracketed `[…]` opening at `k`.
+    let after_brackets = |k: usize| {
+        let mut depth = 0usize;
+        for (j, token) in tokens.iter().enumerate().skip(k) {
+            match token {
+                Token::Punct("[") => depth += 1,
+                Token::Punct("]") => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return j + 1;
+                    }
+                }
+                _ => {}
             }
-            rest = &after[len..];
-            continue;
         }
-        // Unspaced only where no type could go on: `x*T`, `x[]T`, `x<-chan T`.
-        if ["*", "[]", "<-"]
-            .iter()
-            .any(|start| rest.starts_with(start))
-        {
+        tokens.len()
+    };
+    // A type follows at `k`; `List[T]` instantiates, `x [N]T` declares.
+    let type_follows = |k: usize| match at(k) {
+        Some(Token::Punct("[")) => type_starts(after_brackets(k)),
+        _ => type_starts(k),
+    };
+    // A field, parameter or method name at `k`: `x T`, `x, y T`, `x()`.
+    let named = |k: usize| {
+        let entry = k > 0
+            && matches!(
+                at(k - 1),
+                Some(Token::Punct("(" | "," | "{") | Token::Semicolon)
+            );
+        if !entry {
+            return false;
+        }
+        let mut j = k + 1;
+        if at(j) == Some(Token::Punct("(")) {
             return true;
         }
-        let blank = &rest[..rest.len() - trimmed.len()];
-        return !blank.is_empty()
-            && !blank.contains('\n')
-            && trimmed.starts_with(|c: char| {
-                c.is_alphabetic() || matches!(c, '_' | '*' | '[' | '.' | '<' | '(')
-            });
-    }
-}
-
-fn scan_names(ty: &str, types_only: bool) -> Vec<&str> {
-    let bytes = ty.as_bytes();
-    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
-    let mut out = Vec::new();
-    let mut i = 0;
-    let mut after_dot = false;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if ident(b) && !b.is_ascii_digit() {
-            let start = i;
-            while i < bytes.len() && ident(bytes[i]) {
-                i += 1;
+        // `a, b, c T`; `a, chan T` lists types, `chan` being no name.
+        while at(j) == Some(Token::Punct(",")) {
+            match at(j + 1) {
+                Some(Token::Ident(word)) if !super::naming::is_keyword(word) => j += 2,
+                _ => return false,
             }
-            let rest = ty[i..].trim_start();
-            let qualifier = rest.starts_with('.') && !rest.starts_with("...");
-            // A field, parameter or method name: `x T`, `x, y T`, `x()`,
-            // which starts an entry of its list; `a T, b U` has `T` after a
-            // name, in type position.
-            // A line break ends an entry, as Go reads a `;` into it.
-            let before = &ty[..start];
-            let trimmed = before.trim_end();
-            let entry = matches!(trimmed.bytes().last(), Some(b'(' | b',' | b'{' | b';'))
-                || (!trimmed.is_empty() && before[trimmed.len()..].contains('\n'));
-            let named = types_only
-                && entry
-                && !super::naming::is_keyword(&ty[start..i])
-                && (ty[i..].starts_with('(') || names_a_type(&ty[i..]));
-            if !after_dot && !qualifier && !named {
-                out.push(&ty[start..i]);
-            }
-            after_dot = false;
-        } else if b.is_ascii_digit() {
-            while i < bytes.len() && ident(bytes[i]) {
-                i += 1;
-            }
-            after_dot = false;
-        } else if b == b'"' || b == b'`' {
-            // A string: a struct tag.
-            i += 1;
-            while i < bytes.len() && bytes[i] != b {
-                i += if b == b'"' && bytes[i] == b'\\' { 2 } else { 1 };
-            }
-            i += 1;
-            after_dot = false;
-        } else if bytes[i..].starts_with(b"...") {
-            // An ellipsis, not a selector.
-            i += 3;
-            after_dot = false;
-        } else {
-            if !b.is_ascii_whitespace() {
-                after_dot = b == b'.';
-            }
-            i += 1;
         }
+        type_follows(j)
+    };
+    let mut out = Vec::new();
+    for (k, token) in tokens.iter().enumerate() {
+        let Token::Ident(word) = *token else {
+            continue;
+        };
+        let selector = k > 0 && at(k - 1) == Some(Token::Punct("."));
+        let qualifier = at(k + 1) == Some(Token::Punct("."));
+        if selector || qualifier {
+            continue;
+        }
+        if types_only && !super::naming::is_keyword(word) && named(k) {
+            continue;
+        }
+        out.push(word.to_owned());
     }
     out
 }
