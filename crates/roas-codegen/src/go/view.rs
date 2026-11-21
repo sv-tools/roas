@@ -49,6 +49,38 @@ const VALIDATION_NAMES: &[&str] = &[
     "zero",
 ];
 
+/// Locals, receivers and parameters of the decoders and accessors that
+/// spell a substituted type, which a type of the package's own spelled
+/// the same would be shadowed by.
+const SPELLING_LOCALS: &[&str] = &[
+    "d", "e", "u", "v", "err", "name", "token", "value", "present",
+    // A tagged union's decoder, which spells a substituted variant.
+    "raw", "tag", "members", "member", "ok",
+];
+
+/// The package-level names the generated code declares besides its types.
+const HELPER_NAMES: &[&str] = &[
+    "decodeOptions",
+    "noUnmarshalers",
+    "isolatedNone",
+    "refuseNull",
+    "readTag",
+    "integerToken",
+    "matchPattern",
+    "patterns",
+    "memberMatches",
+    "decimalToken",
+    "decimalDigits",
+    "childPointer",
+    "wideNumber",
+];
+
+/// The names the generated code may import a package under.
+const BUILTIN_NAMES: &[&str] = &[
+    "jsontext", "json", "errors", "fmt", "maps", "slices", "math", "big", "strconv", "utf8",
+    "regexp", "sync",
+];
+
 /// Validation's loop variables, one per nesting depth: `i0`, `item0`,
 /// `k0`. A file under `layout = "file_per_type"` reads `item0.` as a use
 /// of a package of that name.
@@ -331,6 +363,8 @@ struct Builder<'a> {
     refuse_null_isolated: BTreeSet<String>,
     isolated: BTreeSet<String>,
     externs: BTreeSet<String>,
+    /// The substitution spellings the schema uses.
+    spellings: BTreeSet<String>,
     /// For each substitution import, the qualifiers its spellings use.
     extern_names: BTreeMap<String, BTreeSet<String>>,
     diagnostics: Vec<Diagnostic>,
@@ -365,6 +399,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         refuse_null_isolated: BTreeSet::new(),
         isolated: BTreeSet::new(),
         externs: BTreeSet::new(),
+        spellings: BTreeSet::new(),
         extern_names: BTreeMap::new(),
         diagnostics: Vec::new(),
     };
@@ -521,10 +556,11 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             // Unqualified, or a package qualifier: an import path need
             // not say the package's name.
             let qualifiers = super::imports::qualifiers(spelling);
-            if let Some(name) = unqualified_names(spelling)
-                .into_iter()
-                .chain(qualifiers.iter().map(String::as_str))
-                .find(|name| aliases.contains(name))
+            let unqualified = unqualified_names(spelling);
+            if let Some(name) = unqualified
+                .iter()
+                .chain(&qualifiers)
+                .find(|name| aliases.contains(name.as_str()))
             {
                 return Err(GenerateError::Config(format!(
                     "substitution spelling {spelling:?} names `{name}`, which the generated validation declares"
@@ -584,6 +620,33 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             imports.push(quote(import));
             let names = BTreeSet::from([name.to_owned()]);
             import_names.push(names);
+        }
+        // A type of the package's own spelled like a local of the code
+        // spelling it is shadowed by that local, and one spelled like a
+        // package-level name or an import clashes with it. Helpers and
+        // builtin imports are refused even where this run has none, so a
+        // config keeps working as the description grows.
+        for spelling in &builder.spellings {
+            let taken = type_names(spelling).into_iter().find_map(|name| {
+                let what = if SPELLING_LOCALS.contains(&name.as_str()) {
+                    "a local of the generated decoders, which would shadow it".to_owned()
+                } else if HELPER_NAMES.contains(&name.as_str()) {
+                    "a name the generated code may declare".to_owned()
+                } else if BUILTIN_NAMES.contains(&name.as_str()) {
+                    "the name the generated code may import a package under".to_owned()
+                } else {
+                    let path = used
+                        .get(name.as_str())
+                        .filter(|what| !what.starts_with("a name "))?;
+                    format!("the name the generated code imports {path:?} under")
+                };
+                Some((name, what))
+            });
+            if let Some((name, what)) = taken {
+                return Err(GenerateError::Config(format!(
+                    "substitution spelling {spelling:?} names `{name}`, {what}; rename the type, or spell it through a package"
+                )));
+            }
         }
         // Under `file_per_type` an extra import goes to the files naming it,
         // and a name the generated code also declares, or imports, would
@@ -654,41 +717,182 @@ fn assign_files(types: &mut [TypeView], config: &Config) {
 }
 
 /// The names a Go type spelling uses unqualified: neither a package
-/// qualifier nor a selector after one.
-fn unqualified_names(ty: &str) -> Vec<&str> {
-    let bytes = ty.as_bytes();
-    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
-    let mut out = Vec::new();
-    let mut i = 0;
-    let mut after_dot = false;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if ident(b) && !b.is_ascii_digit() {
-            let start = i;
-            while i < bytes.len() && ident(bytes[i]) {
-                i += 1;
+/// qualifier nor a selector after one, nor inside a literal (a tag).
+fn unqualified_names(ty: &str) -> Vec<String> {
+    scan_names(ty, false)
+}
+
+/// The unqualified names a Go type spelling uses as types: also not a
+/// field, parameter or method name.
+fn type_names(ty: &str) -> Vec<String> {
+    scan_names(ty, true)
+}
+
+/// A token of a Go type spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Token<'a> {
+    Ident(&'a str),
+    /// A string, rune or number.
+    Literal,
+    /// An explicit `;`, or one Go reads into a line break.
+    Semicolon,
+    Punct(&'a str),
+}
+
+/// The tokens of a Go type spelling, with the semicolons Go inserts at
+/// line breaks; comments are blanks, or line breaks when they hold one.
+fn tokens(ty: &str) -> Vec<Token<'_>> {
+    fn ends_line(last: Option<&Token<'_>>) -> bool {
+        match last {
+            Some(Token::Ident(word)) => {
+                !super::naming::is_keyword(word)
+                    || matches!(*word, "break" | "continue" | "fallthrough" | "return")
             }
-            let rest = ty[i..].trim_start();
-            let qualifier = rest.starts_with('.') && !rest.starts_with("...");
-            if !after_dot && !qualifier {
-                out.push(&ty[start..i]);
-            }
-            after_dot = false;
-        } else if b.is_ascii_digit() {
-            while i < bytes.len() && ident(bytes[i]) {
-                i += 1;
-            }
-            after_dot = false;
-        } else if bytes[i..].starts_with(b"...") {
-            // An ellipsis, not a selector.
-            i += 3;
-            after_dot = false;
-        } else {
-            if !b.is_ascii_whitespace() {
-                after_dot = b == b'.';
-            }
-            i += 1;
+            Some(Token::Literal) => true,
+            Some(Token::Punct(p)) => matches!(*p, ")" | "]" | "}"),
+            _ => false,
         }
+    }
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = Vec::new();
+    let mut rest = ty;
+    while let Some(c) = rest.chars().next() {
+        let len = if c == '\n' {
+            if ends_line(out.last()) {
+                out.push(Token::Semicolon);
+            }
+            1
+        } else if c.is_whitespace() {
+            c.len_utf8()
+        } else if rest.starts_with("//") {
+            rest.find('\n').unwrap_or(rest.len())
+        } else if let Some(body) = rest.strip_prefix("/*") {
+            let len = body.find("*/").map_or(rest.len(), |end| end + 4);
+            if rest[..len].contains('\n') && ends_line(out.last()) {
+                out.push(Token::Semicolon);
+            }
+            len
+        } else if c.is_alphabetic() || c == '_' {
+            let len = rest.find(|c: char| !ident(c)).unwrap_or(rest.len());
+            out.push(Token::Ident(&rest[..len]));
+            len
+        } else if c.is_ascii_digit()
+            || (c == '.' && rest[1..].starts_with(|c: char| c.is_ascii_digit()))
+        {
+            // `e` is a hex digit: only `p` gives a hex literal's exponent.
+            let hex = rest.starts_with("0x") || rest.starts_with("0X");
+            let mut len = 0;
+            let mut prev = ' ';
+            for c in rest.chars() {
+                let exponent = if hex {
+                    matches!(prev, 'p' | 'P')
+                } else {
+                    matches!(prev, 'e' | 'E')
+                };
+                let exponent_sign = matches!(c, '+' | '-') && exponent;
+                if !(ident(c) || c == '.' || exponent_sign) {
+                    break;
+                }
+                len += c.len_utf8();
+                prev = c;
+            }
+            out.push(Token::Literal);
+            len
+        } else if matches!(c, '"' | '\'' | '`') {
+            let mut escaped = false;
+            let close = rest[1..].char_indices().find(|&(_, inner)| {
+                let closes = inner == c && !escaped;
+                escaped = c != '`' && inner == '\\' && !escaped;
+                closes
+            });
+            out.push(Token::Literal);
+            close.map_or(rest.len(), |(at, _)| at + 2)
+        } else if rest.starts_with("...") || rest.starts_with("<-") {
+            let len = if rest.starts_with("...") { 3 } else { 2 };
+            out.push(Token::Punct(&rest[..len]));
+            len
+        } else if c == ';' {
+            out.push(Token::Semicolon);
+            1
+        } else {
+            out.push(Token::Punct(&rest[..c.len_utf8()]));
+            c.len_utf8()
+        };
+        rest = &rest[len..];
+    }
+    out
+}
+
+fn scan_names(ty: &str, types_only: bool) -> Vec<String> {
+    let tokens = tokens(ty);
+    let at = |k: usize| tokens.get(k).copied();
+    // Where a type can begin, after a name: `x T`, `x *T`, `x []T`,
+    // `x ...T`, `x <-chan T`, `x (T)`.
+    let type_starts = |k: usize| {
+        matches!(
+            at(k),
+            Some(Token::Ident(_) | Token::Punct("*" | "[" | "(" | "..." | "<-"))
+        )
+    };
+    // The token after a bracketed `[…]` opening at `k`.
+    let after_brackets = |k: usize| {
+        let mut depth = 0usize;
+        for (j, token) in tokens.iter().enumerate().skip(k) {
+            match token {
+                Token::Punct("[") => depth += 1,
+                Token::Punct("]") => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return j + 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        tokens.len()
+    };
+    // A type follows at `k`; `List[T]` instantiates, `x [N]T` declares.
+    let type_follows = |k: usize| match at(k) {
+        Some(Token::Punct("[")) => type_starts(after_brackets(k)),
+        _ => type_starts(k),
+    };
+    // A field, parameter or method name at `k`: `x T`, `x, y T`, `x()`.
+    let named = |k: usize| {
+        let entry = k > 0
+            && matches!(
+                at(k - 1),
+                Some(Token::Punct("(" | "," | "{") | Token::Semicolon)
+            );
+        if !entry {
+            return false;
+        }
+        let mut j = k + 1;
+        if at(j) == Some(Token::Punct("(")) {
+            return true;
+        }
+        // `a, b, c T`; `a, chan T` lists types, `chan` being no name.
+        while at(j) == Some(Token::Punct(",")) {
+            match at(j + 1) {
+                Some(Token::Ident(word)) if !super::naming::is_keyword(word) => j += 2,
+                _ => return false,
+            }
+        }
+        type_follows(j)
+    };
+    let mut out = Vec::new();
+    for (k, token) in tokens.iter().enumerate() {
+        let Token::Ident(word) = *token else {
+            continue;
+        };
+        let selector = k > 0 && at(k - 1) == Some(Token::Punct("."));
+        let qualifier = at(k + 1) == Some(Token::Punct("."));
+        if selector || qualifier {
+            continue;
+        }
+        if types_only && !super::naming::is_keyword(word) && named(k) {
+            continue;
+        }
+        out.push(word.to_owned());
     }
     out
 }
@@ -720,9 +924,9 @@ fn names_unexported_type(ty: &str) -> bool {
         "uint64",
         "uintptr",
     ];
-    unqualified_names(ty).into_iter().any(|word| {
+    unqualified_names(ty).iter().any(|word| {
         !word.starts_with(|c: char| c.is_uppercase())
-            && !PREDECLARED.contains(&word)
+            && !PREDECLARED.contains(&word.as_str())
             && !super::naming::is_keyword(word)
     })
 }
@@ -907,6 +1111,7 @@ impl Builder<'_> {
                 .or_default()
                 .extend(super::imports::qualifiers(&spelling.name));
         }
+        self.spellings.insert(spelling.name.clone());
         Ok(spelling.name.clone())
     }
 

@@ -336,7 +336,9 @@ fn run_overlay_apply(args: OverlayApplyArgs) -> Result<()> {
 /// The URIs that identify the spec an overlay is applied to, for
 /// matching an Overlay 1.2 `extends`: its own `$self`, resolved against
 /// where it was read from, and that retrieval URI. A spec piped on stdin
-/// has no retrieval URI, so only an absolute `$self` identifies it.
+/// has no retrieval URI, so only an absolute `$self` identifies it. A
+/// file is named both as given and with its links resolved, so an
+/// `extends` naming a link to it matches as well as one naming its target.
 pub(crate) struct TargetDocument {
     uris: Vec<Url>,
 }
@@ -344,22 +346,21 @@ pub(crate) struct TargetDocument {
 impl TargetDocument {
     pub(crate) fn new(source: &InputSource, spec: &Value) -> Self {
         let self_uri = spec.get("$self").and_then(Value::as_str);
-        let retrieval = match source {
-            InputSource::File(path) => crate::file_url(path).ok(),
-            InputSource::Stdin => None,
+        let retrievals = match source {
+            InputSource::File(path) => file_urls(path),
+            InputSource::Stdin => Vec::new(),
         };
         let mut uris = Vec::new();
-        match (retrieval, self_uri) {
-            (Some(retrieval), self_uri) => {
-                if let Some(self_uri) = self_uri
-                    && let Ok(uri) = v1_2::document_uri(Some(self_uri), &retrieval)
-                {
-                    uris.push(uri);
-                }
-                uris.push(retrieval);
+        if retrievals.is_empty() {
+            uris.extend(self_uri.and_then(|self_uri| Url::parse(self_uri).ok()));
+        }
+        for retrieval in retrievals {
+            if let Some(self_uri) = self_uri
+                && let Ok(uri) = v1_2::document_uri(Some(self_uri), &retrieval)
+            {
+                push_new(&mut uris, uri);
             }
-            (None, Some(self_uri)) => uris.extend(Url::parse(self_uri).ok()),
-            (None, None) => {}
+            push_new(&mut uris, retrieval);
         }
         Self { uris }
     }
@@ -371,13 +372,26 @@ impl TargetDocument {
         if self.uris.is_empty() {
             return None;
         }
-        let retrieval = match crate::file_url(path) {
-            Ok(retrieval) => retrieval,
-            Err(err) => return Some(format!("{err:#}")),
+        let retrievals = file_urls(path);
+        let Some(first) = retrievals.first() else {
+            return crate::file_url(path).err().map(|err| format!("{err:#}"));
         };
-        match overlay.extends_uri(&retrieval)? {
+        // Resolved against the overlay as given and with its links
+        // resolved, and naming the spec or a link to it.
+        let matches = retrievals.iter().any(|retrieval| {
+            overlay
+                .extends_uri(retrieval)
+                .and_then(Result::ok)
+                .is_some_and(|extends| {
+                    self.uris.contains(&extends)
+                        || resolved_link(&extends).is_some_and(|uri| self.uris.contains(&uri))
+                })
+        });
+        if matches {
+            return None;
+        }
+        match overlay.extends_uri(first)? {
             Err(err) => Some(format!("cannot resolve `extends`: {err}")),
-            Ok(extends) if self.uris.contains(&extends) => None,
             Ok(extends) => Some(format!(
                 "`extends` is {extends}, but the spec is {}",
                 self.uris
@@ -387,6 +401,45 @@ impl TargetDocument {
                     .join(" or "),
             )),
         }
+    }
+}
+
+/// The `file:` URIs naming `path`: with its links resolved, and as given
+/// (made absolute, `.` and `..` dropped), when that differs and is the
+/// same file: `link/..` is where the link points, not beside it.
+fn file_urls(path: &std::path::Path) -> Vec<Url> {
+    let mut urls: Vec<Url> = crate::file_url(path).into_iter().collect();
+    let absolute = std::env::current_dir().unwrap_or_default().join(path);
+    let mut lexical = std::path::PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                lexical.pop();
+            }
+            other => lexical.push(other),
+        }
+    }
+    let same_file = lexical
+        .canonicalize()
+        .ok()
+        .is_some_and(|resolved| path.canonicalize().ok().as_deref() == Some(resolved.as_path()));
+    if same_file && let Ok(url) = Url::from_file_path(&lexical) {
+        push_new(&mut urls, url);
+    }
+    urls
+}
+
+/// The `file:` URI of the file `uri` names with its links resolved, when
+/// it names one that exists.
+fn resolved_link(uri: &Url) -> Option<Url> {
+    let path = uri.to_file_path().ok()?.canonicalize().ok()?;
+    Url::from_file_path(path).ok()
+}
+
+fn push_new(urls: &mut Vec<Url>, url: Url) {
+    if !urls.contains(&url) {
+        urls.push(url);
     }
 }
 
@@ -654,6 +707,53 @@ mod tests {
         )
         .unwrap();
         assert_eq!(spec["info"]["x-applied"], json!(true));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn extends_naming_a_link_to_the_spec_or_its_target_matches() {
+        let dir = std::env::temp_dir().join(format!("roas-extends-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::fs::write(dir.join("real/spec.json"), "{}").unwrap();
+        std::os::unix::fs::symlink("real/spec.json", dir.join("api.json")).unwrap();
+        // An overlay linked in from elsewhere resolves `extends` from where
+        // it is named too.
+        std::fs::write(dir.join("real/o.json"), "{}").unwrap();
+        std::os::unix::fs::symlink("real/o.json", dir.join("o.json")).unwrap();
+        for spec in ["api.json", "real/spec.json"] {
+            let target = TargetDocument::new(&InputSource::File(dir.join(spec)), &json!({}));
+            for (extends, overlay) in [
+                ("api.json", "o.json"),
+                ("real/spec.json", "o.json"),
+                ("spec.json", "real/o.json"),
+                ("../api.json", "real/o.json"),
+            ] {
+                let detected = detect_or_use_overlay(None, extending(extends)).unwrap();
+                assert_eq!(
+                    target.mismatch(&detected, &dir.join(overlay)),
+                    None,
+                    "{spec} {extends} {overlay}"
+                );
+            }
+            let detected = detect_or_use_overlay(None, extending("other.json")).unwrap();
+            assert!(target.mismatch(&detected, &dir.join("o.json")).is_some());
+        }
+        // `L/../api.json` is `real/api.json`, not the `api.json` beside `L`.
+        std::fs::create_dir_all(dir.join("real/sub")).unwrap();
+        std::fs::write(dir.join("real/api.json"), "{}").unwrap();
+        std::fs::remove_file(dir.join("api.json")).unwrap();
+        std::fs::write(dir.join("api.json"), "{}").unwrap();
+        std::os::unix::fs::symlink("real/sub", dir.join("L")).unwrap();
+        let through = dir.join("L/../api.json");
+        let target = TargetDocument::new(&InputSource::File(through.clone()), &json!({}));
+        // An overlay that is no link, beside `L`.
+        std::fs::write(dir.join("plain.json"), "{}").unwrap();
+        let beside = detect_or_use_overlay(None, extending("api.json")).unwrap();
+        assert!(target.mismatch(&beside, &dir.join("plain.json")).is_some());
+        let detected = detect_or_use_overlay(None, extending("real/api.json")).unwrap();
+        assert_eq!(target.mismatch(&detected, &dir.join("plain.json")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

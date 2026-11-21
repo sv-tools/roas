@@ -1114,7 +1114,7 @@ fn a_substitution_package_named_like_a_member_alias_is_refused() {
 fn an_unqualified_substitution_named_like_a_validation_local_compiles() {
     // A type of the package's own, spelled in lower case, is aliased like
     // a package's: a local of `validateInto` may shadow it too.
-    for local in ["value", "pointer", "matched", "m", "r"] {
+    for local in ["pointer", "matched", "m", "r"] {
         let toml = format!("validation = true\n[substitutions.thing.go]\nname = \"{local}\"\n");
         let thing = serde_json::json!({"type": "string", "format": "thing"});
         let components = serde_json::json!({
@@ -1127,7 +1127,7 @@ fn an_unqualified_substitution_named_like_a_validation_local_compiles() {
         };
         let mut generation = match generation {
             Ok(generation) => generation,
-            Err(GenerateError::Config(_)) if local != "value" => continue,
+            Err(GenerateError::Config(_)) if !["pointer", "matched"].contains(&local) => continue,
             Err(error) => panic!("{local}: {error:?}"),
         };
         let code = generation.files.remove(0).contents;
@@ -1161,7 +1161,7 @@ fn package_of(code: &str) -> &str {
 
 #[test]
 fn an_unqualified_substitution_after_an_ellipsis_is_aliased() {
-    let toml = "validation = true\n[substitutions.thing.go]\nname = \"func(...value) error\"\n";
+    let toml = "validation = true\n[substitutions.thing.go]\nname = \"func(...pointer) error\"\n";
     let components = serde_json::json!({
         "Bag": {"type": "object", "patternProperties": {"^a": {"type": "string", "format": "thing"}}, "additionalProperties": false}
     });
@@ -1170,7 +1170,7 @@ fn an_unqualified_substitution_after_an_ellipsis_is_aliased() {
     };
     let code = squeezed(&result.expect("generates").files.remove(0).contents);
     assert!(
-        code.contains("type pattern0OfBag = func(...value) error"),
+        code.contains("type pattern0OfBag = func(...pointer) error"),
         "{code}"
     );
 }
@@ -1180,7 +1180,7 @@ fn a_substitution_spelled_like_a_member_alias_is_refused() {
     // Aliased itself, or held by a field of another type.
     for toml in [
         "validation = true\n[substitutions.thing.go]\nname = \"pattern0OfBag\"\n",
-        "validation = true\n[substitutions.thing.go]\nname = \"value\"\n[substitutions.other.go]\nname = \"pattern0OfBag\"\n",
+        "validation = true\n[substitutions.thing.go]\nname = \"pointer\"\n[substitutions.other.go]\nname = \"pattern0OfBag\"\n",
         // A package whose path does not say its name.
         "validation = true\n[substitutions.thing.go]\nname = \"pattern0OfBag.Thing\"\nimport = \"example.com/x/foo\"\n",
     ] {
@@ -1196,4 +1196,177 @@ fn a_substitution_spelled_like_a_member_alias_is_refused() {
         };
         assert!(message.contains("pattern0OfBag"), "{message}");
     }
+}
+
+/// Types where a substituted type sits beside the generated code's
+/// locals: struct members, a typed catch-all, union branches, a closed
+/// pattern struct.
+fn spelled_everywhere() -> serde_json::Value {
+    let thing = serde_json::json!({"type": "string", "format": "thing"});
+    serde_json::json!({
+        "Closed": {"type": "object", "patternProperties": {"^a": thing}, "additionalProperties": false},
+        "Either": {"anyOf": [thing, {"type": "integer"}]},
+        "Open": {"type": "object", "required": ["z"], "properties": {"z": thing}, "additionalProperties": thing},
+        "Listed": {"type": "array", "items": thing}
+    })
+}
+
+#[test]
+fn an_own_type_spelled_like_a_generated_name_is_refused() {
+    // A helper, the union accessors' error, the catch-all's local, an
+    // import, and those inside a spelling.
+    for (spelling, name) in [
+        ("memberMatches", "memberMatches"),
+        ("err", "err"),
+        ("value", "value"),
+        ("json", "json"),
+        ("[]err", "err"),
+        ("func(v value) error", "value"),
+        ("present", "present"),
+        ("func(a, b, err)", "err"),
+        ("func(a value, b int)", "value"),
+        ("interface{ M(a err, b int) }", "err"),
+        ("func() (a value, err error)", "value"),
+        ("func(err, chan int)", "err"),
+        ("interface{ M(d, func()) }", "d"),
+        ("struct{\\n\\tvalue\\n\\tX int\\n}", "value"),
+        ("struct{ X /* \\\" */ value; Y /* \\\" */ int }", "value"),
+        ("func(a *\\nvalue, b int)", "value"),
+        ("func(a chan\\nvalue, b int)", "value"),
+        ("['\\\"']value", "value"),
+        ("func(a, List[value])", "value"),
+        ("[0x1E+value]int", "value"),
+    ] {
+        for layout in ["", "layout = \"file_per_type\"\n"] {
+            let toml = format!("{layout}[substitutions.thing.go]\nname = \"{spelling}\"\n");
+            let Some(result) = go(spelled_everywhere(), &toml) else {
+                return;
+            };
+            let Err(GenerateError::Config(message)) = result else {
+                panic!("{spelling}: not refused");
+            };
+            assert!(message.contains(&format!("names `{name}`")), "{message}");
+        }
+    }
+}
+
+#[test]
+fn an_own_type_no_generated_name_shadows_compiles() {
+    // Locals of code that spells no substituted type, and field,
+    // parameter and tag words inside a spelling.
+    for (spelling, own) in [
+        ("text", "text"),
+        ("zero", "zero"),
+        ("item", "item"),
+        ("readable", "readable"),
+        ("struct{ err error; value int }", ""),
+        ("func(value int) error", ""),
+        ("func(d, x int)", ""),
+        ("struct{ value <-chan int }", ""),
+        ("interface{ value() }", ""),
+        ("func(value (int))", ""),
+        ("func(value[]int, err*int)", ""),
+        ("struct{ value<-chan int }", ""),
+        ("struct{ X int /* value */ }", ""),
+        ("func(value[2]int, err...int)", ""),
+        ("struct{ value[2]int }", ""),
+        ("['d']int", ""),
+        ("struct{ X int `json:\\\"x\\\"` }", ""),
+    ] {
+        for extra in ["", "validation = true\n", "exact_numbers = true\n"] {
+            if !cfg!(feature = "exact-numbers") && extra.starts_with("exact") {
+                continue;
+            }
+            let toml = format!("{extra}[substitutions.thing.go]\nname = \"{spelling}\"\n");
+            let Some(result) = go(spelled_everywhere(), &toml) else {
+                return;
+            };
+            let code = match result {
+                Ok(mut generation) => generation.files.remove(0).contents,
+                Err(error) => panic!("{spelling} {extra:?}: {error:?}"),
+            };
+            let own = if own.is_empty() {
+                format!("package {}\n", package_of(&code))
+            } else {
+                format!("package {}\n\ntype {own} string\n", package_of(&code))
+            };
+            let Some(vetted) = vet_with(&code, "own-unshadowed", &[("own.go", &own)]) else {
+                return;
+            };
+            if let Err(error) = vetted {
+                panic!("{spelling} {extra:?}: go vet failed\n{error}\n{code}");
+            }
+        }
+    }
+}
+
+#[test]
+fn an_unused_substitution_is_not_checked() {
+    let toml = "[substitutions.unused.go]\nname = \"err\"\n";
+    let Some(result) = go(pet(), toml) else {
+        return;
+    };
+    result.expect("an unused spelling is no clash");
+}
+
+#[test]
+fn a_spelling_over_lines_ends_entries_at_line_breaks() {
+    // Go reads a `;` into each line break: `value` names a field here.
+    // Held where no doc comment spells it.
+    let thing = serde_json::json!({"type": "string", "format": "thing"});
+    let components = serde_json::json!({
+        "Open": {"type": "object", "required": ["z"], "properties": {"z": thing}, "additionalProperties": thing}
+    });
+    let toml = "[substitutions.thing.go]\nname = \"struct{\\n\\tX int\\n\\tvalue int\\n}\"\n";
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let code = result.expect("generates").files.remove(0).contents;
+    let own = format!("package {}\n\ntype value string\n", package_of(&code));
+    let Some(vetted) = vet_with(&code, "own-lines", &[("own.go", &own)]) else {
+        return;
+    };
+    if let Err(error) = vetted {
+        panic!("go vet failed\n{error}\n{code}");
+    }
+}
+
+#[test]
+fn an_own_variant_spelled_like_a_tagged_decoder_local_is_refused() {
+    let components = serde_json::json!({
+        "Pet": {"type": "object", "required": ["kind"], "properties": {"kind": {"type": "string"}}, "discriminator": {"propertyName": "kind"}},
+        "Cat": {"allOf": [{"$ref": "#/components/schemas/Pet"}, {"properties": {"meow": {"type": "string"}}}]},
+        "Box": {"type": "object", "properties": {"p": {"$ref": "#/components/schemas/Pet"}}}
+    });
+    for name in ["raw", "tag", "members", "member", "ok"] {
+        let toml = format!("[substitutions.Cat.go]\nname = \"{name}\"\n");
+        let Some(result) = go(components.clone(), &toml) else {
+            return;
+        };
+        let Err(GenerateError::Config(message)) = result else {
+            panic!("{name}: not refused");
+        };
+        assert!(message.contains(&format!("names `{name}`")), "{message}");
+    }
+}
+
+#[test]
+fn an_own_type_spelled_like_a_substitution_import_is_refused() {
+    let toml = "[substitutions.thing.go]\nname = \"foo.T\"\nimport = \"example.com/foo\"\n[substitutions.other.go]\nname = \"[]foo\"\n";
+    let components = serde_json::json!({
+        "Both": {"type": "object", "properties": {
+            "a": {"type": "string", "format": "thing"},
+            "b": {"type": "string", "format": "other"}
+        }}
+    });
+    let Some(result) = go(components, toml) else {
+        return;
+    };
+    let Err(GenerateError::Config(message)) = result else {
+        panic!("not refused");
+    };
+    assert!(
+        message.contains("names `foo`") && message.contains("example.com/foo"),
+        "{message}"
+    );
 }
