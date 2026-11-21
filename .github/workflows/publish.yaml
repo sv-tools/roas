@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
-      - uses: sv-tools/rust-metadata-action@911f68d27616d2824bcaadfac48ffa32d48055e5 # v1.3.0
+      - uses: sv-tools/rust-metadata-action@4020eda3b8b92b4cc9835dfe8d792ec2ace4690e # v1.3.1
         id: meta
         with:
           tag: ${{ github.event.release.tag_name || inputs.tag }}
