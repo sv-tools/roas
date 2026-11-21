@@ -60,21 +60,16 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────
   # roas-cli pre-build matrix. Fires only when the tag is `roas-cli/v…`.
   #
-  # The `startsWith(github.ref, …)` half of the gate is not redundant with
-  # the `publish` check: `Checks.outputs.publish` lists every crate whose
-  # version differs from crates.io, not the crate being tagged. When a
-  # single PR bumps several crates at once, `roas-cli` is in that list for
-  # *all* of the resulting tags, so the publish check alone lets these jobs
-  # run on e.g. `roas/v0.17.3`. There `${GITHUB_REF#refs/tags/roas-cli/v}`
-  # strips nothing, the tarball name inherits the ref's slashes, and `tar`
-  # fails on the nonexistent directory prefix.
+  # `Checks.outputs.tag-package` / `tag-version` are parsed from the tag
+  # and checked against Cargo.toml by rust-metadata-action. The `publish`
+  # check on top skips a roas-cli version that is already on crates.io.
   #
   # Per-target native runners keep `cargo build` off QEMU, which would
   # otherwise rebuild the whole rust dep tree per architecture.
   # ────────────────────────────────────────────────────────────────────────
   RoasCliBuild:
     needs: Checks
-    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') && startsWith(github.ref, 'refs/tags/roas-cli/v') }}
+    if: ${{ needs.Checks.outputs.tag-package == 'roas-cli' && contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
     strategy:
       fail-fast: false
       matrix:
@@ -97,17 +92,13 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
         with:
           target: ${{ matrix.target }}
-      - name: Extract roas-cli version from tag
-        id: v
-        run: echo "version=${GITHUB_REF#refs/tags/roas-cli/v}" >> "$GITHUB_OUTPUT"
-        shell: bash
       - name: Build release binary
         run: cargo build --release --package roas-cli --target ${{ matrix.target }} --locked
       - name: Pack tarball
         id: pack
         run: |
           set -euo pipefail
-          archive="roas-${{ steps.v.outputs.version }}-${{ matrix.target }}.tar.gz"
+          archive="roas-${{ needs.Checks.outputs.tag-version }}-${{ matrix.target }}.tar.gz"
           # `tar -C` so the archive contains just `roas`, not a path
           # prefix — Homebrew's `bin.install "roas"` expects the binary
           # at archive root.
@@ -136,7 +127,7 @@ jobs:
     needs:
       - Checks
       - RoasCliBuild
-    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') && startsWith(github.ref, 'refs/tags/roas-cli/v') }}
+    if: ${{ needs.Checks.outputs.tag-package == 'roas-cli' && contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
     strategy:
       fail-fast: false
       matrix:
@@ -150,16 +141,13 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Extract roas-cli version from tag
-        id: v
-        run: echo "version=${GITHUB_REF#refs/tags/roas-cli/v}" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: roas-cli-${{ matrix.target }}
           path: artifacts
       - name: Stage linux binary for docker build
         env:
-          V: ${{ steps.v.outputs.version }}
+          V: ${{ needs.Checks.outputs.tag-version }}
           ARCH: ${{ matrix.arch }}
           TARGET: ${{ matrix.target }}
         run: |
@@ -191,14 +179,11 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────
   RoasCliExtras:
     needs: Checks
-    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') && startsWith(github.ref, 'refs/tags/roas-cli/v') }}
+    if: ${{ needs.Checks.outputs.tag-package == 'roas-cli' && contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
-      - name: Extract roas-cli version from tag
-        id: v
-        run: echo "version=${GITHUB_REF#refs/tags/roas-cli/v}" >> "$GITHUB_OUTPUT"
       - name: Build roas-cli
         run: cargo build --release --package roas-cli --locked
       - name: Generate completions and manpages
@@ -220,7 +205,7 @@ jobs:
           "$ROAS" manpages --out manpages
       - name: Pack tarballs
         env:
-          V: ${{ steps.v.outputs.version }}
+          V: ${{ needs.Checks.outputs.tag-version }}
         run: |
           set -euo pipefail
           completions_archive="roas-${V}-completions.tar.gz"
@@ -238,10 +223,10 @@ jobs:
           # `AttachRoasCliBinaries` already uses to download artifacts.
           name: roas-cli-extras
           path: |
-            roas-${{ steps.v.outputs.version }}-completions.tar.gz
-            roas-${{ steps.v.outputs.version }}-completions.tar.gz.sha256
-            roas-${{ steps.v.outputs.version }}-manpages.tar.gz
-            roas-${{ steps.v.outputs.version }}-manpages.tar.gz.sha256
+            roas-${{ needs.Checks.outputs.tag-version }}-completions.tar.gz
+            roas-${{ needs.Checks.outputs.tag-version }}-completions.tar.gz.sha256
+            roas-${{ needs.Checks.outputs.tag-version }}-manpages.tar.gz
+            roas-${{ needs.Checks.outputs.tag-version }}-manpages.tar.gz.sha256
 
   AttachRoasCliBinaries:
     needs:
@@ -250,17 +235,13 @@ jobs:
       - RoasCliBuild
       - RoasCliExtras
       - DockerImageSmokeTest
-    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') && startsWith(github.ref, 'refs/tags/roas-cli/v') }}
+    if: ${{ needs.Checks.outputs.tag-package == 'roas-cli' && contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write       # upload assets to the draft GitHub Release
       id-token: write       # OIDC token for keyless cosign signing + SLSA attestation
       attestations: write   # actions/attest-build-provenance writes to GitHub's attestation store
     steps:
-      - name: Extract roas-cli version from tag
-        id: v
-        run: echo "version=${GITHUB_REF#refs/tags/roas-cli/v}" >> "$GITHUB_OUTPUT"
-
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
@@ -291,7 +272,7 @@ jobs:
       - name: Sign release tarballs with cosign (keyless)
         env:
           COSIGN_YES: "true"
-          V: ${{ steps.v.outputs.version }}
+          V: ${{ needs.Checks.outputs.tag-version }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -318,7 +299,7 @@ jobs:
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
-            artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz
+            artifacts/roas-${{ needs.Checks.outputs.tag-version }}-*.tar.gz
 
       - name: Attach prebuilt binaries to draft Release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
@@ -328,9 +309,9 @@ jobs:
           # provenance lives in GitHub's attestation store, not on the
           # release.
           files: |
-            artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz
-            artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz.sha256
-            artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz.bundle
+            artifacts/roas-${{ needs.Checks.outputs.tag-version }}-*.tar.gz
+            artifacts/roas-${{ needs.Checks.outputs.tag-version }}-*.tar.gz.sha256
+            artifacts/roas-${{ needs.Checks.outputs.tag-version }}-*.tar.gz.bundle
           # Look up the existing draft minted by `DraftRelease` and
           # append rather than create a second release.
           draft: true

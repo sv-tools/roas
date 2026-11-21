@@ -13,6 +13,10 @@ on:
     outputs:
       publish:
         value: ${{ jobs.RustMeta.outputs.publish }}
+      tag-package:
+        value: ${{ jobs.RustMeta.outputs.tag-package }}
+      tag-version:
+        value: ${{ jobs.RustMeta.outputs.tag-version }}
   schedule:
     - cron: "0 4 * * 1" # Mondays 04:00 UTC
 
@@ -34,15 +38,38 @@ jobs:
     name: Collect crate metadata
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.rustmeta.outputs.matrix }}
+      matrix: ${{ steps.split.outputs.combined }}
+      isolated: ${{ steps.split.outputs.isolated }}
       packages: ${{ steps.rustmeta.outputs.packages }}
+      bin-packages: ${{ steps.rustmeta.outputs.bin-packages }}
       publish: ${{ steps.rustmeta.outputs.publish }}
+      release-order: ${{ steps.rustmeta.outputs.release-order }}
+      new-crates: ${{ steps.rustmeta.outputs.new-crates }}
+      tag-package: ${{ steps.rustmeta.outputs.tag-package }}
+      tag-version: ${{ steps.rustmeta.outputs.tag-version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: sv-tools/rust-metadata-action@56f5f4f6a41e50d5f5f440bd81c0ed041f9b8dfb # v1.2.3
+      # On a `<crate>/v<x.y.z>` tag push (`release-stage.yaml` calls this
+      # workflow) the action also parses the tag and fails when the crate
+      # is unknown or its Cargo.toml version differs from the tag.
+      - uses: sv-tools/rust-metadata-action@911f68d27616d2824bcaadfac48ffa32d48055e5 # v1.3.0
         id: rustmeta
         with:
           matrix-exclude-features: roas:default
+          matrix-mode: both
+      # `both` emits the default-features rows and the
+      # `--no-default-features` rows in one list; the build and test
+      # matrices take the former, `IsolatedBuildJob` the latter.
+      - name: Split the matrix by mode
+        id: split
+        env:
+          ROWS: ${{ steps.rustmeta.outputs.matrix-include }}
+        run: |
+          set -euo pipefail
+          {
+            echo "combined=$(jq -c '[.[] | select(.mode == "combined") | .args]' <<<"$ROWS")"
+            echo "isolated=$(jq -c '[.[] | select(.mode == "isolated")]' <<<"$ROWS")"
+          } >> "$GITHUB_OUTPUT"
   BuildJob:
     name: Build per Package and Feature
     needs: RustMeta
@@ -67,6 +94,9 @@ jobs:
       matrix:
         package: ${{ fromJSON(needs.RustMeta.outputs.packages) }}
     runs-on: "ubuntu-latest"
+    # The rows come from the action's isolated matrix, but run one job
+    # per package so the dependency tree is built once per crate rather
+    # than once per row.
     env:
       RUSTFLAGS: "-D warnings"
     steps:
@@ -74,22 +104,16 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       - name: Build with no features, then with each one alone
         shell: bash
+        env:
+          PACKAGE: ${{ matrix.package }}
+          ROWS: ${{ needs.RustMeta.outputs.isolated }}
         run: |
           set -euo pipefail
-          package='${{ matrix.package }}'
-          echo "::group::${package} (no features)"
-          cargo build --package "$package" --no-default-features --all-targets --verbose
-          echo "::endgroup::"
-          # `default` is what the matrix above already builds.
-          features=$(cargo metadata --format-version 1 --no-deps \
-            | jq -r --arg p "$package" '.packages[]
-                | select(.name == $p)
-                | .features
-                | keys[]
-                | select(. != "default")')
-          for feature in $features; do
-            echo "::group::${package} --features=${feature}"
-            cargo build --package "$package" --no-default-features --features "$feature" --all-targets --verbose
+          mapfile -t rows < <(jq -r --arg p "$PACKAGE" '.[] | select(.package == $p) | .args' <<<"$ROWS")
+          for args in "${rows[@]}"; do
+            echo "::group::${args}"
+            # shellcheck disable=SC2086 # args is a list of flags
+            cargo build $args --all-targets --verbose
             echo "::endgroup::"
           done
   Build:
@@ -117,6 +141,7 @@ jobs:
         if: failure()
   Docs:
     name: Check rustdoc
+    needs: RustMeta
     runs-on: ubuntu-latest
     env:
       # Broken intra-doc links, bare URLs and malformed HTML in doc
@@ -130,7 +155,15 @@ jobs:
       # so documenting it alongside the `roas` library in one pass makes
       # both write `target/doc/roas/index.html` (rust-lang/cargo#6313).
       - run: cargo doc --workspace --all-features --no-deps --lib --verbose
-      - run: cargo doc --package roas-cli --all-features --no-deps --bins --verbose
+      - name: Document the binaries
+        env:
+          BIN_PACKAGES: ${{ needs.RustMeta.outputs.bin-packages }}
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(jq -r '.[]' <<<"$BIN_PACKAGES")
+          for package in "${packages[@]}"; do
+            cargo doc --package "$package" --all-features --no-deps --bins --verbose
+          done
   TestJob:
     name: Test per Package and Feature
     needs: RustMeta
@@ -360,17 +393,15 @@ jobs:
           echo "flags=$flags" >> "$GITHUB_OUTPUT"
           echo "batch: $flags"
       - name: Dry run publish
-        run: |
-          set -euo pipefail
-          cargo publish --all-features ${{ steps.packages.outputs.flags }} \
-            --dry-run --verbose 2>&1 | tee "$RUNNER_TEMP/publish-dry-run.log"
-      # Cargo ordered the batch by dependency to verify it, and prints
-      # one `Uploading <crate> v<version>` line per crate in that order.
+        run: cargo publish --all-features ${{ steps.packages.outputs.flags }} --dry-run --verbose
       # `publish.yaml` ships one crate per tag and resolves siblings from
-      # crates.io, so this is exactly the order the tags have to be
-      # pushed in — state it here rather than leaving it to be worked out
-      # by hand at release time.
+      # crates.io, so the tags have to be pushed in dependency order, and
+      # a crate's first version has to be published by hand: trusted
+      # publishing cannot create a crate.
       - name: Report the release order
+        env:
+          RELEASE_ORDER: ${{ needs.RustMeta.outputs.release-order }}
+          NEW_CRATES: ${{ needs.RustMeta.outputs.new-crates }}
         run: |
           set -euo pipefail
           {
@@ -379,9 +410,14 @@ jobs:
             echo "One crate per tag, resolved from crates.io — push in this order:"
             echo
             echo '```sh'
-            sed -n 's|^ *Uploading \([^ ]*\) v\([^ ]*\) .*|git push origin \1/v\2|p' \
-              "$RUNNER_TEMP/publish-dry-run.log"
+            jq -r '.[] | "git push origin \(.)"' <<<"$RELEASE_ORDER"
             echo '```'
+            if [[ "$NEW_CRATES" != "[]" ]]; then
+              echo
+              echo "Not on crates.io yet; run \`cargo publish\` by hand before pushing their tags:"
+              echo
+              jq -r '.[] | "- `\(.)`"' <<<"$NEW_CRATES"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Create packages
         run: cargo package --all-features ${{ steps.packages.outputs.flags }} --verbose
