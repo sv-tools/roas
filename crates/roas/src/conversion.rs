@@ -5,6 +5,11 @@
 //! version and deserializes the result as the target's model. A rewritten document the target's
 //! model cannot hold — a gap in the conversion, not in the input — fails with a
 //! [`ConversionError`] instead of panicking.
+//!
+//! An object other than a schema carries only its `x-` extensions to the next version: a key it
+//! does not define is left out, as it has no meaning the target can take on, and validating the
+//! input reports it ([`crate::validation::Options::IgnoreUnknownFields`]). A schema of v3.0 or later
+//! carries every keyword, since JSON Schema allows keywords a model does not know.
 
 use thiserror::Error;
 
@@ -39,12 +44,14 @@ pub(crate) struct Conversion {
     all(feature = "v3_1", feature = "v3_2"),
 ))]
 impl Conversion {
-    /// `spec` as JSON, to be rewritten for the target version.
+    /// `spec` as JSON, to be rewritten for the target version. Objects other than schemas
+    /// keep only their `x-` extensions (see the module documentation).
     pub(crate) fn to_json<S: serde::Serialize>(
         self,
         spec: S,
     ) -> Result<serde_json::Value, ConversionError> {
-        serde_json::to_value(spec).map_err(|source| self.error(source))
+        crate::common::extensions::with_extensions_only(|| serde_json::to_value(spec))
+            .map_err(|source| self.error(source))
     }
 
     /// The rewritten JSON as the target version's model.

@@ -1,6 +1,8 @@
 //! Operation Object
 
-use crate::common::helpers::{validate_required_string, validate_unique_by};
+use crate::common::helpers::{
+    validate_required_string, validate_unique_by, validate_unknown_fields,
+};
 use crate::common::reference::RefOr;
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::parameter::Parameter;
@@ -96,6 +98,9 @@ pub struct Operation {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -116,6 +121,9 @@ pub struct CodeSample {
     pub source: String,
 
     /// Allows extensions on the code sample extension object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -124,6 +132,7 @@ pub struct CodeSample {
 
 impl ValidateWithContext<Spec> for Operation {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         if let Some(operation_id) = &self.operation_id
             && !ctx
                 .visited
@@ -199,6 +208,7 @@ impl ValidateWithContext<Spec> for Operation {
 
 impl ValidateWithContext<Spec> for CodeSample {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_string(&self.lang, ctx, format!("{path}.lang"));
         validate_required_string(&self.source, ctx, format!("{path}.source"));
     }

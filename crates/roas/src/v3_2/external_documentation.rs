@@ -1,6 +1,6 @@
 //! References an external resource for extended documentation.
 
-use crate::common::helpers::validate_required_uri;
+use crate::common::helpers::{validate_required_uri, validate_unknown_fields};
 use crate::v3_2::spec::Spec;
 use crate::validation::Options;
 use crate::validation::{Context, PushError, ValidateWithContext};
@@ -29,6 +29,9 @@ pub struct ExternalDocumentation {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -37,6 +40,7 @@ pub struct ExternalDocumentation {
 
 impl ValidateWithContext<Spec> for ExternalDocumentation {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         // The OAS spec lists `url` as required. When
         // `IgnoreEmptyExternalDocumentationUrl` is set we silence the
         // required-string check, but still URI-validate any non-empty

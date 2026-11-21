@@ -2,7 +2,9 @@
 //!
 //! <https://spec.openapis.org/oas/v3.1.2>
 
-use crate::common::helpers::{validate_not_visited, validate_required_string};
+use crate::common::helpers::{
+    validate_not_visited, validate_required_string, validate_unknown_fields,
+};
 use crate::common::reference::{RefOr, ResolveReference, resolve_in_map, resolved_in_map};
 use crate::common::schema_pointer::{Hop, follow_schema};
 use crate::loader::Loader;
@@ -288,6 +290,9 @@ pub struct Spec {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -304,6 +309,9 @@ pub struct TagGroup {
     pub tags: Vec<String>,
 
     /// Allows extensions on the tag group extension object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -940,6 +948,7 @@ impl Spec {
             Some(l) => Context::new(self, options).with_loader(l),
             None => Context::new(self, options),
         };
+        validate_unknown_fields(&self.extensions, &mut ctx, "#");
 
         self.openapi
             .validate_with_context(&mut ctx, "#.openapi".to_owned());
@@ -1111,6 +1120,7 @@ impl Validate for Spec {
 
 impl ValidateWithContext<Spec> for TagGroup {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         if self.tags.is_empty() {
             ctx.error(format!("{path}.tags"), "must contain at least one tag");

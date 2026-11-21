@@ -1,6 +1,6 @@
 //! Representing a Server.
 
-use crate::common::helpers::validate_required_string;
+use crate::common::helpers::{validate_required_string, validate_unknown_fields};
 use crate::v3_2::spec::Spec;
 use crate::validation::Options;
 use crate::validation::{Context, PushError, ValidateWithContext};
@@ -57,6 +57,9 @@ pub struct Server {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,6 +99,9 @@ pub struct ServerVariable {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,6 +110,7 @@ pub struct ServerVariable {
 
 impl ValidateWithContext<Spec> for Server {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_string(&self.url, ctx, format!("{path}.url"));
         let mut defined = HashSet::<String>::new();
         if let Some(variables) = &self.variables {
@@ -141,6 +148,7 @@ impl ValidateWithContext<Spec> for Server {
 
 impl ValidateWithContext<Spec> for ServerVariable {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_string(&self.default, ctx, format!("{path}.default"));
         if let Some(enum_values) = &self.enum_values
             && !enum_values.contains(&self.default)

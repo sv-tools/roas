@@ -307,6 +307,12 @@ pub enum Options {
     /// Ignore empty ExternalDocumentation.URL field.
     /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreEmptyExternalDocumentationUrl,
+
+    /// Ignore keys an object does not define: neither one of its fields nor an `x-`
+    /// Specification Extension. Schemas of v3.0 and later are exempt, as JSON Schema allows
+    /// keywords a model does not know.
+    /// Applies for v2.0, v3.0, v3.1, v3.2
+    IgnoreUnknownFields,
 }
 
 /// `clap::ValueEnum` impl for [`Options`], available behind the `clap` Cargo
@@ -339,6 +345,7 @@ impl clap::ValueEnum for Options {
             Options::IgnoreEmptyInfoVersion,
             Options::IgnoreEmptyResponseDescription,
             Options::IgnoreEmptyExternalDocumentationUrl,
+            Options::IgnoreUnknownFields,
         ]
     }
 
@@ -427,6 +434,10 @@ impl clap::ValueEnum for Options {
             Options::IgnoreEmptyExternalDocumentationUrl => (
                 "empty-external-documentation-url",
                 "Allow empty `externalDocs.url` (v2.0, v3.0, v3.1, v3.2)",
+            ),
+            Options::IgnoreUnknownFields => (
+                "unknown-fields",
+                "Allow keys an object does not define, other than `x-` extensions (v2.0, v3.0, v3.1, v3.2)",
             ),
         };
         Some(clap::builder::PossibleValue::new(name).help(help))

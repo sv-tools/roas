@@ -1,6 +1,8 @@
 //! XML Object
 
-use crate::common::helpers::{has_uri_unsafe_bytes, validate_optional_uri};
+use crate::common::helpers::{
+    has_uri_unsafe_bytes, validate_optional_uri, validate_unknown_fields,
+};
 use crate::v3_2::spec::Spec;
 use crate::validation::Options;
 use crate::validation::{Context, PushError, ValidateWithContext};
@@ -117,6 +119,9 @@ pub struct XML {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,6 +130,7 @@ pub struct XML {
 
 impl ValidateWithContext<Spec> for XML {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_optional_uri(&self.namespace, ctx, format!("{path}.namespace"));
         // The OAS XML Object spec requires `namespace` to be an *absolute*
         // URI: a relative reference like `#/foo` or `bar/baz` is not
