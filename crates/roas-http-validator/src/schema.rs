@@ -13,18 +13,17 @@
 //! than the first.
 
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use roas::common::bool_or::BoolOr;
 use roas::common::formats::SchemaType;
 use roas::common::reference::{RefOr, ReferenceObject, ResolveError};
 use roas::v3_2::schema::{
-    ArraySchema, IntegerSchema, NumberSchema, ObjectSchema, Schema, SchemaRef, SingleSchema,
-    StringSchema,
+    AllOfSchema, AnyOfSchema, ArraySchema, IntegerSchema, NotSchema, NumberSchema, ObjectSchema,
+    OneOfSchema, Schema, SchemaRef, SingleSchema, StringSchema,
 };
 use roas::v3_2::spec::Spec;
 use serde_json::Value;
-use std::collections::HashSet;
 
 use crate::decimal::Decimal;
 
@@ -229,6 +228,7 @@ impl<'s> Checker<'s> {
                 for subschema in &all_of.all_of {
                     self.schema(value, subschema);
                 }
+                self.check_extensions(value, all_of.extensions.as_ref(), true);
             }
             Schema::AnyOf(any_of) => {
                 let total = any_of.any_of.len();
@@ -248,6 +248,7 @@ impl<'s> Checker<'s> {
                         "does not match any of the {total} schemas in `anyOf`"
                     ));
                 }
+                self.check_extensions(value, any_of.extensions.as_ref(), true);
             }
             Schema::OneOf(one_of) => {
                 let total = one_of.one_of.len();
@@ -274,16 +275,20 @@ impl<'s> Checker<'s> {
                         "matches {matched} of the {total} schemas in `oneOf`; exactly one is required",
                     ));
                 }
+                self.check_extensions(value, one_of.extensions.as_ref(), true);
             }
-            Schema::Not(not) => match self.judge(value, &not.not) {
-                Verdict::Passed => self.fail("matches the schema in `not`, which it must not"),
-                Verdict::Failed => {}
-                // The value is accepted only when the inner schema
-                // really rejected it.
-                Verdict::Unchecked => {
-                    self.unchecked("the schema in `not` could not be applied");
+            Schema::Not(not) => {
+                match self.judge(value, &not.not) {
+                    Verdict::Passed => self.fail("matches the schema in `not`, which it must not"),
+                    Verdict::Failed => {}
+                    // The value is accepted only when the inner schema
+                    // really rejected it.
+                    Verdict::Unchecked => {
+                        self.unchecked("the schema in `not` could not be applied");
+                    }
                 }
-            },
+                self.check_extensions(value, not.extensions.as_ref(), true);
+            }
             Schema::Multi(multi) => {
                 let verdicts: Vec<Accepts> = multi
                     .schema_types
@@ -291,7 +296,10 @@ impl<'s> Checker<'s> {
                     .map(|schema_type| accepts_type(schema_type, value))
                     .collect();
                 if verdicts.contains(&Accepts::Yes) {
-                    // One of the listed types really does accept it.
+                    // One of the listed types really does accept it;
+                    // enforce any constraints `roas` stored in `extensions`
+                    // (including OAS 3.0 `nullable: true` schemas).
+                    self.check_extensions(value, multi.extensions.as_ref(), false);
                 } else if verdicts.contains(&Accepts::Undecidable) {
                     // Nothing else matched, and the type that might have
                     // is the one that cannot be told — the same answer a
@@ -319,14 +327,20 @@ impl<'s> Checker<'s> {
     fn single(&mut self, value: &Value, schema: &SingleSchema) {
         match schema {
             SingleSchema::String(string) => match value.as_str() {
-                Some(text) => self.string(text, string),
+                Some(text) => {
+                    self.string(text, string);
+                    self.check_extensions(value, string.extensions.as_ref(), false);
+                }
                 None => self.wrong_type("string", value),
             },
             SingleSchema::Integer(integer) => match read(value) {
                 // Exact, so `1.0` is an integer and
                 // `1.0000000000000001` is not — a distinction the
                 // literal carries and a double does not.
-                Reading::Exact(number) if number.is_integer() => self.integer(number, integer),
+                Reading::Exact(number) if number.is_integer() => {
+                    self.integer(number, integer);
+                    self.check_extensions(value, integer.extensions.as_ref(), false);
+                }
                 Reading::Exact(_) => self.wrong_type("integer", value),
                 Reading::TooLarge => self.unchecked(
                     "has more digits than this crate can hold, so it could NOT be checked",
@@ -334,30 +348,246 @@ impl<'s> Checker<'s> {
                 Reading::NotANumber => self.wrong_type("integer", value),
             },
             SingleSchema::Number(number_schema) => match read(value) {
-                Reading::Exact(number) => self.number(number, number_schema),
+                Reading::Exact(number) => {
+                    self.number(number, number_schema);
+                    self.check_extensions(value, number_schema.extensions.as_ref(), false);
+                }
                 Reading::TooLarge => self.unchecked(
                     "has more digits than this crate can hold, so it could NOT be checked",
                 ),
                 Reading::NotANumber => self.wrong_type("number", value),
             },
-            SingleSchema::Boolean(_) => {
+            SingleSchema::Boolean(boolean) => {
                 if !value.is_boolean() {
                     self.wrong_type("boolean", value);
+                } else {
+                    self.check_extensions(value, boolean.extensions.as_ref(), false);
                 }
             }
-            SingleSchema::Null(_) => {
+            SingleSchema::Null(null) => {
                 if !value.is_null() {
                     self.wrong_type("null", value);
+                } else {
+                    self.check_extensions(value, null.extensions.as_ref(), false);
                 }
             }
             SingleSchema::Array(array) => match value.as_array() {
-                Some(items) => self.array(items, array),
+                Some(items) => {
+                    self.array(items, array);
+                    self.check_extensions(value, array.extensions.as_ref(), false);
+                }
                 None => self.wrong_type("array", value),
             },
             SingleSchema::Object(object) => match value.as_object() {
-                Some(members) => self.object(members, object),
+                Some(members) => {
+                    self.object(members, object);
+                    self.check_extensions(value, object.extensions.as_ref(), false);
+                }
                 None => self.wrong_type("object", value),
             },
+        }
+    }
+
+    /// Enforce JSON Schema keywords that `roas` keeps in `.extensions` on
+    /// `MultiSchema` (including upconverted OAS 3.0 `nullable: true`
+    /// schemas), compositions (`allOf`/`anyOf`/`oneOf`/`not`), and
+    /// `SingleSchema` variants. Unsupported constraint keywords are
+    /// reported as `Unchecked` rather than silently ignored.
+    fn check_extensions(
+        &mut self,
+        value: &Value,
+        extensions: Option<&BTreeMap<String, Value>>,
+        in_composition: bool,
+    ) {
+        let Some(extensions) = extensions else {
+            return;
+        };
+        if extensions.is_empty() {
+            return;
+        }
+
+        let mut string_map = serde_json::Map::new();
+        let mut number_map = serde_json::Map::new();
+        let mut array_map = serde_json::Map::new();
+        let mut object_map = serde_json::Map::new();
+
+        for (key, kw_value) in extensions {
+            let name = key.as_str();
+            if name.starts_with("x-")
+                || ANNOTATION_KEYWORDS.contains(&name)
+                || EXTRA_METADATA_KEYWORDS.contains(&name)
+            {
+                continue;
+            }
+            if name == "type" {
+                let types: Result<Vec<SchemaType>, _> = match kw_value {
+                    Value::String(_) => serde_json::from_value::<SchemaType>(kw_value.clone())
+                        .map(|single| vec![single]),
+                    Value::Array(_) => serde_json::from_value::<Vec<SchemaType>>(kw_value.clone()),
+                    _ => {
+                        self.unchecked(
+                            "schema keyword `type` is neither a string nor an array and could NOT \
+                             be checked",
+                        );
+                        continue;
+                    }
+                };
+                match types {
+                    Ok(types) => {
+                        let verdicts: Vec<Accepts> = types
+                            .iter()
+                            .map(|schema_type| accepts_type(schema_type, value))
+                            .collect();
+                        if verdicts.contains(&Accepts::Yes) {
+                            // Accepted by at least one declared type.
+                        } else if verdicts.contains(&Accepts::Undecidable) {
+                            self.unchecked(
+                                "has more digits than this crate can hold, so it could NOT be \
+                                 checked",
+                            );
+                        } else if types.len() == 1 {
+                            self.wrong_type(&types[0].to_string(), value);
+                        } else {
+                            let names: Vec<String> =
+                                types.iter().map(std::string::ToString::to_string).collect();
+                            self.fail(format!(
+                                "expected one of [{}], got {}",
+                                names.join(", "),
+                                type_name(value),
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        self.unchecked(format!("schema keyword `type` could not be read: {error}"))
+                    }
+                }
+                continue;
+            }
+            if COMPOSITION_KEYWORDS.contains(&name) {
+                if self.depth >= MAX_DEPTH {
+                    self.unchecked(format!(
+                        "the schema nests more than {MAX_DEPTH} levels deep"
+                    ));
+                    continue;
+                }
+                match parse_composition_keyword(name, kw_value) {
+                    Ok(sub) => {
+                        self.depth += 1;
+                        self.resolved(value, &sub);
+                        self.depth -= 1;
+                    }
+                    Err(error) => self.unchecked(format!(
+                        "schema keyword `{name}` could not be read: {error}"
+                    )),
+                }
+                continue;
+            }
+            if name == "const" {
+                match same_value(value, kw_value) {
+                    Some(true) => {}
+                    Some(false) => self.fail(format!("does not equal const {kw_value}")),
+                    None => self.unchecked(
+                        "could NOT be compared against `const`: a number has more digits than \
+                         this crate can hold",
+                    ),
+                }
+                continue;
+            }
+            if name == "enum" {
+                let Some(allowed) = kw_value.as_array() else {
+                    self.unchecked(
+                        "schema keyword `enum` is not an array and could NOT be checked",
+                    );
+                    continue;
+                };
+                let mut undetermined = false;
+                let mut matched = false;
+                for item in allowed {
+                    match same_value(value, item) {
+                        Some(true) => {
+                            matched = true;
+                            break;
+                        }
+                        None => undetermined = true,
+                        Some(false) => {}
+                    }
+                }
+                if matched {
+                    // Accepted.
+                } else if undetermined {
+                    self.unchecked(
+                        "could NOT be compared against `enum`: a number has more digits than \
+                         this crate can hold",
+                    );
+                } else {
+                    let list: Vec<String> = allowed.iter().map(ToString::to_string).collect();
+                    self.fail(format!("{value} is not one of: {}", list.join(", ")));
+                }
+                continue;
+            }
+            if name == "unevaluatedProperties" && in_composition {
+                if value.is_object() && kw_value != &Value::Bool(true) {
+                    self.unchecked(
+                        "schema keyword `unevaluatedProperties` on a composition could NOT be \
+                         checked",
+                    );
+                }
+                continue;
+            }
+            if STRING_KEYWORDS.contains(&name) {
+                string_map.insert(key.clone(), kw_value.clone());
+            } else if NUMBER_KEYWORDS.contains(&name) {
+                number_map.insert(key.clone(), kw_value.clone());
+            } else if ARRAY_KEYWORDS.contains(&name) {
+                array_map.insert(key.clone(), kw_value.clone());
+            } else if OBJECT_KEYWORDS.contains(&name) {
+                object_map.insert(key.clone(), kw_value.clone());
+            } else {
+                self.unchecked(format!(
+                    "schema keyword `{name}` is not supported, so the value could NOT be checked \
+                     against it"
+                ));
+            }
+        }
+
+        if let Some(text) = value.as_str()
+            && !string_map.is_empty()
+        {
+            string_map.insert("type".to_owned(), Value::String("string".to_owned()));
+            match serde_json::from_value::<StringSchema>(Value::Object(string_map)) {
+                Ok(parsed) => self.string(text, &parsed),
+                Err(error) => self.unchecked(format!(
+                    "string schema constraints could not be read: {error}"
+                )),
+            }
+        } else if value.is_number() && !number_map.is_empty() {
+            number_map.insert("type".to_owned(), Value::String("number".to_owned()));
+            match serde_json::from_value::<NumberSchema>(Value::Object(number_map)) {
+                Ok(parsed) => self.single(value, &SingleSchema::Number(parsed)),
+                Err(error) => self.unchecked(format!(
+                    "numeric schema constraints could not be read: {error}"
+                )),
+            }
+        } else if let Some(items) = value.as_array()
+            && !array_map.is_empty()
+        {
+            array_map.insert("type".to_owned(), Value::String("array".to_owned()));
+            match serde_json::from_value::<ArraySchema>(Value::Object(array_map)) {
+                Ok(parsed) => self.array(items, &parsed),
+                Err(error) => self.unchecked(format!(
+                    "array schema constraints could not be read: {error}"
+                )),
+            }
+        } else if let Some(members) = value.as_object()
+            && !object_map.is_empty()
+        {
+            object_map.insert("type".to_owned(), Value::String("object".to_owned()));
+            match serde_json::from_value::<ObjectSchema>(Value::Object(object_map)) {
+                Ok(parsed) => self.object(members, &parsed),
+                Err(error) => self.unchecked(format!(
+                    "object schema constraints could not be read: {error}"
+                )),
+            }
         }
     }
 
@@ -448,7 +678,7 @@ impl<'s> Checker<'s> {
                 continue;
             };
             names.push(candidate.to_string());
-            if candidate.compare(value) == Some(Ordering::Equal) {
+            if candidate.compare(value) == Ordering::Equal {
                 return;
             }
         }
@@ -492,13 +722,7 @@ impl<'s> Checker<'s> {
                 ));
                 continue;
             };
-            let Some(relation) = value.compare(limit) else {
-                self.unchecked(format!(
-                    "whether {value} satisfies {name} {limit} could NOT be established: the \
-                     comparison does not fit",
-                ));
-                continue;
-            };
+            let relation = value.compare(limit);
             let breached = relation == ordering || (!inclusive && relation == Ordering::Equal);
             if breached {
                 let verb = match (ordering, inclusive) {
@@ -741,7 +965,7 @@ fn same_value(left: &Value, right: &Value) -> Option<bool> {
     match (left, right) {
         (Value::Number(_), Value::Number(_)) => match (read(left), read(right)) {
             (Reading::Exact(left), Reading::Exact(right)) => {
-                Some(left.compare(right) == Some(Ordering::Equal))
+                Some(left.compare(right) == Ordering::Equal)
             }
             // Two literals nothing can read are the same number when
             // they are the same literal. When they are not, whether
@@ -889,6 +1113,44 @@ const ANNOTATION_KEYWORDS: &[&str] = &[
 /// Composition keywords, each of which stands on its own as a schema.
 const COMPOSITION_KEYWORDS: &[&str] = &["allOf", "anyOf", "oneOf", "not"];
 
+/// Non-assertion JSON Schema / OpenAPI metadata keywords that may land in
+/// `extensions` on `MultiSchema`, compositions, or single-type schemas.
+const EXTRA_METADATA_KEYWORDS: &[&str] = &[
+    "$comment",
+    "$defs",
+    "definitions",
+    "$anchor",
+    "$dynamicAnchor",
+    "$id",
+    "$schema",
+    "$vocabulary",
+    "discriminator",
+    "format",
+    "contentEncoding",
+    "contentMediaType",
+    "contentSchema",
+];
+
+const STRING_KEYWORDS: &[&str] = &["minLength", "maxLength", "pattern"];
+const NUMBER_KEYWORDS: &[&str] = &[
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+];
+const ARRAY_KEYWORDS: &[&str] = &["items", "minItems", "maxItems", "uniqueItems"];
+const OBJECT_KEYWORDS: &[&str] = &[
+    "properties",
+    "patternProperties",
+    "additionalProperties",
+    "propertyNames",
+    "required",
+    "minProperties",
+    "maxProperties",
+    "unevaluatedProperties",
+];
+
 /// One hop along a chain of local schema references: the component the
 /// reference names, which may itself be a reference.
 pub(crate) fn next_hop<'s>(
@@ -897,6 +1159,31 @@ pub(crate) fn next_hop<'s>(
 ) -> Option<&'s RefOr<Schema, SchemaRef>> {
     let name = reference.strip_prefix("#/components/schemas/")?;
     spec.components.as_ref()?.schemas.as_ref()?.get(name)
+}
+
+/// Deserialize a single composition keyword (`allOf`/`anyOf`/`oneOf`/`not`)
+/// directly into its concrete typed variant rather than untagged `Schema`, so
+/// a malformed value fails cleanly instead of falling back to `ObjectSchema`
+/// with the malformed keyword still in `extensions`.
+fn parse_composition_keyword(name: &str, value: &Value) -> Result<Schema, serde_json::Error> {
+    let mut map = serde_json::Map::new();
+    map.insert(name.to_owned(), value.clone());
+    let obj = Value::Object(map);
+    match name {
+        "allOf" => Ok(Schema::AllOf(Box::new(serde_json::from_value::<
+            AllOfSchema,
+        >(obj)?))),
+        "anyOf" => Ok(Schema::AnyOf(Box::new(serde_json::from_value::<
+            AnyOfSchema,
+        >(obj)?))),
+        "oneOf" => Ok(Schema::OneOf(Box::new(serde_json::from_value::<
+            OneOfSchema,
+        >(obj)?))),
+        "not" => Ok(Schema::Not(Box::new(serde_json::from_value::<NotSchema>(
+            obj,
+        )?))),
+        _ => unreachable!("only COMPOSITION_KEYWORDS are passed here"),
+    }
 }
 
 /// The sibling keywords of a `$ref` as the schemas to check the value
@@ -925,9 +1212,9 @@ fn sibling_schemas(reference: &SchemaRef, target: Option<&Schema>) -> Result<Vec
             continue;
         }
         if COMPOSITION_KEYWORDS.contains(&key.as_str()) {
-            let mut map = serde_json::Map::new();
-            map.insert(key.clone(), value.clone());
-            schemas.push(parse(map)?);
+            schemas.push(parse_composition_keyword(key, value).map_err(|error| {
+                format!("sibling keywords of `$ref` could not be read as a schema: {error}")
+            })?);
         } else {
             leaf.insert(key.clone(), value.clone());
         }
@@ -1545,5 +1832,141 @@ mod exactness_tests {
             "unevaluatedProperties": false,
         });
         assert!(passes(&json!({ "id": 1, "extra": true }), schema));
+    }
+
+    #[test]
+    fn large_scale_gap_bounds_are_violated_not_unchecked() {
+        let max = json!({ "type": "number", "maximum": 100 });
+        let found = super::check(
+            &serde_json::from_str("1e41").unwrap(),
+            &serde_json::from_value(max).unwrap(),
+            &super::Spec::default(),
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].kind, super::FailureKind::Violated);
+
+        let min = json!({ "type": "number", "minimum": 1 });
+        let found = super::check(
+            &serde_json::from_str("1e-39").unwrap(),
+            &serde_json::from_value(min).unwrap(),
+            &super::Spec::default(),
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].kind, super::FailureKind::Violated);
+    }
+
+    #[test]
+    fn multi_typed_schema_enforces_constraints_in_extensions() {
+        // Matches OAS 3.0 `type: string, nullable: true, minLength: 3` after upconversion.
+        let nullable_str = json!({ "type": ["string", "null"], "minLength": 3 });
+        assert!(passes(&json!(null), nullable_str.clone()));
+        assert!(passes(&json!("abc"), nullable_str.clone()));
+        assert_eq!(
+            failures(&json!("ab"), nullable_str.clone()),
+            ["is shorter than minLength 3 (2 characters)"],
+        );
+        assert_eq!(
+            failures(&json!(42), nullable_str),
+            ["expected one of [string, null], got integer"],
+        );
+
+        let nullable_int = json!({ "type": ["integer", "null"], "minimum": 1, "maximum": 10 });
+        assert!(passes(&json!(null), nullable_int.clone()));
+        assert!(passes(&json!(5), nullable_int.clone()));
+        assert_eq!(
+            failures(&json!(0), nullable_int.clone()),
+            ["0 is below minimum 1"]
+        );
+        assert_eq!(
+            failures(&json!(11), nullable_int),
+            ["11 is above maximum 10"]
+        );
+
+        let nullable_enum = json!({ "type": ["string", "null"], "enum": ["a", "b", null] });
+        assert!(passes(&json!("a"), nullable_enum.clone()));
+        assert!(passes(&json!(null), nullable_enum.clone()));
+        assert!(!passes(&json!("c"), nullable_enum));
+    }
+
+    #[test]
+    fn composition_enforces_sibling_constraints_and_flags_unevaluated() {
+        let schema = json!({
+            "allOf": [{ "type": "object", "properties": { "a": { "type": "string" } } }],
+            "required": ["a"],
+        });
+        assert!(passes(&json!({ "a": "ok" }), schema.clone()));
+        assert_eq!(
+            failures(&json!({}), schema),
+            ["/a: is required and was not sent"],
+        );
+
+        let uneval = json!({
+            "allOf": [{ "type": "object", "properties": { "a": { "type": "string" } } }],
+            "unevaluatedProperties": false,
+        });
+        let found = super::check(
+            &json!({ "a": "ok" }),
+            &serde_json::from_value(uneval).unwrap(),
+            &super::Spec::default(),
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].kind, super::FailureKind::Unchecked);
+    }
+
+    #[test]
+    fn const_and_unsupported_keywords_in_extensions_are_not_silently_ignored() {
+        let const_schema = json!({ "type": "string", "const": "fixed" });
+        assert!(passes(&json!("fixed"), const_schema.clone()));
+        assert!(!passes(&json!("other"), const_schema));
+
+        let unsupported = json!({ "type": "array", "contains": { "type": "string" } });
+        let found = super::check(
+            &json!([1, 2, 3]),
+            &serde_json::from_value(unsupported).unwrap(),
+            &super::Spec::default(),
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].kind, super::FailureKind::Unchecked);
+        assert!(found[0].message.contains("`contains`"), "{found:?}");
+    }
+
+    #[test]
+    fn malformed_composition_or_type_in_extensions_is_unchecked_not_recursive() {
+        // Malformed `anyOf` beside `allOf` must report Unchecked without
+        // looping back into ObjectSchema (both for `{}` and non-object values).
+        let bad_comp = json!({
+            "allOf": [{}],
+            "anyOf": "not-an-array",
+        });
+        for val in [json!({}), json!("hi")] {
+            let found = super::check(
+                &val,
+                &serde_json::from_value(bad_comp.clone()).unwrap(),
+                &super::Spec::default(),
+            );
+            assert_eq!(found.len(), 1, "{val}: {found:?}");
+            assert_eq!(found[0].kind, super::FailureKind::Unchecked);
+        }
+
+        // Malformed `type` in composition extensions reports Unchecked.
+        let bad_type = json!({ "allOf": [{}], "type": 123 });
+        let found = super::check(
+            &json!("hi"),
+            &serde_json::from_value(bad_type).unwrap(),
+            &super::Spec::default(),
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].kind, super::FailureKind::Unchecked);
+
+        // `unevaluatedProperties: false` on a composition does not apply to
+        // non-object values (and `true` never rejects).
+        let mixed_comp = json!({
+            "anyOf": [
+                { "type": "string" },
+                { "type": "object", "properties": { "a": { "type": "string" } } }
+            ],
+            "unevaluatedProperties": false,
+        });
+        assert!(passes(&json!("hello"), mixed_comp));
     }
 }
