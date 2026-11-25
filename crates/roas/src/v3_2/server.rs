@@ -90,6 +90,7 @@ pub struct ServerVariable {
 
     /// An optional description for the server variable.
     /// [CommonMark](https://spec.commonmark.org) syntax MAY be used for rich text representation.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
     /// This object MAY be extended with Specification Extensions.
@@ -651,5 +652,16 @@ mod tests {
         let s: Server = serde_json::from_value(v.clone()).unwrap();
         assert_eq!(s.name.as_deref(), Some("Production"));
         assert_eq!(serde_json::to_value(&s).unwrap(), v);
+    }
+
+    #[test]
+    fn server_variable_omits_none_description_on_serialize() {
+        let var = ServerVariable {
+            default: String::from("8443"),
+            description: None,
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&var).unwrap();
+        assert_eq!(value, serde_json::json!({ "default": "8443" }));
     }
 }

@@ -33,7 +33,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::common::reference::{Ref, RefOr, ReferenceObject};
-use crate::loader::{Loader, LoaderError};
+use crate::loader::{Loader, LoaderError, canonical_reference};
 
 /// Error returned by `Spec::collapse` for any OAS version.
 ///
@@ -78,6 +78,14 @@ pub struct Bag<T, R = Ref> {
     /// structurally identical inline values still collapse to the
     /// same component without ever trusting the digest alone.
     seen: HashMap<u64, Vec<String>>,
+    /// Canonical external `$ref` → local component name for external
+    /// references that have already been lifted or are currently being
+    /// walked on the recursion stack. Prevents infinite recursion on
+    /// cyclic external references and avoids re-walking the same target.
+    external_refs: HashMap<String, String>,
+    /// External `$ref`s currently on the active walk stack → whether a
+    /// back-edge referenced their reserved local name during the walk.
+    active_external_refs: HashMap<String, bool>,
 }
 
 /// 64-bit digest of a component's canonical JSON, used as the dedup
@@ -93,6 +101,8 @@ impl<T, R> Default for Bag<T, R> {
         Self {
             entries: BTreeMap::new(),
             seen: HashMap::new(),
+            external_refs: HashMap::new(),
+            active_external_refs: HashMap::new(),
         }
     }
 }
@@ -202,6 +212,44 @@ impl<T: Serialize, R: ReferenceObject> Bag<T, R> {
     fn reserve(&mut self, name: &str) {
         self.entries
             .insert(name.to_owned(), RefOr::new_ref(String::new()));
+    }
+
+    fn unreserve(&mut self, name: &str) {
+        self.entries.remove(name);
+    }
+
+    fn lookup_external_ref(&mut self, canonical_ref: &str) -> Option<String> {
+        let name = self.external_refs.get(canonical_ref)?.clone();
+        if let Some(hit) = self.active_external_refs.get_mut(canonical_ref) {
+            *hit = true;
+        }
+        Some(name)
+    }
+
+    fn begin_external_ref(&mut self, canonical_ref: &str, base: &str) -> String {
+        let name = unique_name(&self.entries, base);
+        self.reserve(&name);
+        self.external_refs
+            .insert(canonical_ref.to_owned(), name.clone());
+        self.active_external_refs
+            .insert(canonical_ref.to_owned(), false);
+        name
+    }
+
+    fn end_external_ref(&mut self, canonical_ref: &str) -> bool {
+        self.active_external_refs
+            .remove(canonical_ref)
+            .unwrap_or(false)
+    }
+
+    fn cancel_external_ref(&mut self, canonical_ref: &str, reserved_name: &str) {
+        self.active_external_refs.remove(canonical_ref);
+        self.external_refs.remove(canonical_ref);
+        self.unreserve(reserved_name);
+    }
+
+    fn record_external_ref(&mut self, canonical_ref: String, name: String) {
+        self.external_refs.insert(canonical_ref, name);
     }
 
     /// Put an entry back under its original name and refresh the
@@ -650,9 +698,15 @@ where
                 return Ok(());
             }
             let reference = r.reference().to_owned();
-            let Some(loader) = c.loader_mut() else {
+            if c.loader_mut().is_none() {
                 return Ok(());
-            };
+            }
+            let canonical_ref = canonical_reference(&reference);
+            if let Some(name) = T::bag(c).lookup_external_ref(&canonical_ref) {
+                r.set_reference(format!("{}{name}", T::PREFIX));
+                return Ok(());
+            }
+            let loader = c.loader_mut().expect("loader presence checked above");
             let mut fetched: T = loader.resolve_reference_as(&reference).map_err(|source| {
                 CollapseError::External {
                     reference: reference.clone(),
@@ -660,14 +714,36 @@ where
                 }
             })?;
             let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
+            let base = base_name::<T, R, C>(&fetched, &derived_ctx);
+            let reserved_name = T::bag(c).begin_external_ref(&canonical_ref, &base);
             if T::IS_SCHEMA {
                 // An external schema always lifts, but note its shape
                 // so an identical inline one collapses onto it rather
                 // than staying inline beside it.
-                note_schema_shape(&fetched, c)?;
+                if let Err(error) = note_schema_shape(&fetched, c) {
+                    T::bag(c).cancel_external_ref(&canonical_ref, &reserved_name);
+                    return Err(error);
+                }
             }
-            T::walk(&mut fetched, &derived_ctx, c)?;
-            let name = intern(c, fetched, &derived_ctx)?;
+            if let Err(error) = T::walk(&mut fetched, &derived_ctx, c) {
+                T::bag(c).cancel_external_ref(&canonical_ref, &reserved_name);
+                return Err(error);
+            }
+            let cyclic = T::bag(c).end_external_ref(&canonical_ref);
+            let name = if cyclic {
+                // At least one nested `$ref` already points at `reserved_name`,
+                // so commit the component under that reserved name.
+                T::bag(c).put_inline(reserved_name.clone(), fetched)?;
+                reserved_name
+            } else {
+                // No cycle hit the provisional slot: release it so `intern`
+                // can still deduplicate against any pre-existing identical
+                // local component.
+                T::bag(c).unreserve(&reserved_name);
+                let name = intern(c, fetched, &derived_ctx)?;
+                T::bag(c).record_external_ref(canonical_ref, name.clone());
+                name
+            };
             // Rewrite the target in place rather than replacing the
             // slot: a schema `$ref` may carry sibling keywords, and
             // they belong to this use site, not to the fetched
@@ -882,15 +958,23 @@ fn shape_digest(value: &serde_json::Value) -> u64 {
     digest(&value.to_string())
 }
 
+fn base_name<T, R, C>(item: &T, ctx: &NameContext) -> String
+where
+    T: LiftableBag<C, R>,
+    R: ReferenceObject,
+{
+    match T::name_hint(item) {
+        Some(h) if !h.is_empty() => sanitize_component_name(h),
+        _ => ctx.derive_name(),
+    }
+}
+
 fn intern<T, R, C>(c: &mut C, item: T, ctx: &NameContext) -> Result<String, CollapseError>
 where
     T: LiftableBag<C, R>,
     R: ReferenceObject,
 {
-    let base = match T::name_hint(&item) {
-        Some(h) if !h.is_empty() => sanitize_component_name(h),
-        _ => ctx.derive_name(),
-    };
+    let base = base_name::<T, R, C>(&item, ctx);
     T::bag(c).intern(item, &base)
 }
 

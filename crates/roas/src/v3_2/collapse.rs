@@ -4288,4 +4288,156 @@ mod tests {
         let names = lifted_schema_names(&spec);
         assert_eq!(names.len(), 2, "no second uuid component: {names:?}");
     }
+
+    #[test]
+    fn collapse_handles_self_recursive_external_ref_without_stack_overflow() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "file:///nodes.json",
+                serde_json::json!({
+                    "components": {
+                        "schemas": {
+                            "Node": {
+                                "type": "object",
+                                "properties": {
+                                    "value": {"type": "string"},
+                                    "next": {"$ref": "#/components/schemas/Node"}
+                                }
+                            }
+                        }
+                    }
+                }),
+            )
+            .expect("preload");
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/nodes": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {"$ref": "file:///nodes.json#/components/schemas/Node"}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(Some(&mut loader)).expect("collapse ok");
+        let node = schema_at(&spec, "Node");
+        assert_eq!(
+            node["properties"]["next"]["$ref"], "#/components/schemas/Node",
+            "self-recursive external ref must point at the lifted local Node"
+        );
+        assert_eq!(lifted_schema_names(&spec), vec!["Node"]);
+    }
+
+    #[test]
+    fn collapse_handles_mutually_recursive_external_refs_without_stack_overflow() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "file:///a.json",
+                serde_json::json!({
+                    "A": {
+                        "type": "object",
+                        "properties": {
+                            "b": {"$ref": "file:///b.json#/B"}
+                        }
+                    }
+                }),
+            )
+            .expect("preload a");
+        loader
+            .preload_resource(
+                "file:///b.json",
+                serde_json::json!({
+                    "B": {
+                        "type": "object",
+                        "properties": {
+                            "a": {"$ref": "file:///a.json#/A"}
+                        }
+                    }
+                }),
+            )
+            .expect("preload b");
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/ab": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {"$ref": "file:///a.json#/A"}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(Some(&mut loader)).expect("collapse ok");
+        let a = schema_at(&spec, "A");
+        let b = schema_at(&spec, "B");
+        assert_eq!(a["properties"]["b"]["$ref"], "#/components/schemas/B");
+        assert_eq!(b["properties"]["a"]["$ref"], "#/components/schemas/A");
+        assert_eq!(lifted_schema_names(&spec), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn collapse_sanitizes_title_on_cyclic_external_ref() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "file:///titled.json",
+                serde_json::json!({
+                    "Node": {
+                        "title": "My Node / v1",
+                        "type": "object",
+                        "properties": {
+                            "next": {"$ref": "#/Node"}
+                        }
+                    }
+                }),
+            )
+            .expect("preload");
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/nodes": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {"$ref": "file:///titled.json#/Node"}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(Some(&mut loader)).expect("collapse ok");
+        assert_eq!(lifted_schema_names(&spec), vec!["My_Node_v1"]);
+        assert_eq!(
+            schema_at(&spec, "My_Node_v1")["properties"]["next"]["$ref"],
+            "#/components/schemas/My_Node_v1"
+        );
+    }
 }
