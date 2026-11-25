@@ -813,20 +813,16 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     let value = value.expect("kept for `run`");
     // Against the model of the version it declares, before upconversion.
     let unknown = detected.unknown_members(&value)?;
-    // One interpreter: a v1.0 description is upconverted first.
-    let description = match detected {
-        DetectedArazzo::V1_1(description) => description,
-        DetectedArazzo::V1_0(description) => v1_1::Description::from(description),
-    };
 
     // Before a single request: a description with two workflows of the
     // same id, or a step that names nothing, has no business reaching
-    // an API.
+    // an API. Validate against the declared version before upconverting
+    // so v1.0-only errors are caught and paths match `SourceMap`.
     let mut checks = EnumSet::<ValidationOptions>::empty();
     for ignore in &args.ignore {
         checks |= *ignore;
     }
-    if let Err(errors) = description.validate(checks) {
+    if let Err(errors) = detected.validate(checks) {
         for error in &errors.errors {
             eprintln!("- {}", located(map.as_ref(), error));
         }
@@ -837,6 +833,12 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
             if errors.errors.len() == 1 { "" } else { "s" }
         ));
     }
+
+    // One interpreter: a v1.0 description is upconverted after validation.
+    let description = match detected {
+        DetectedArazzo::V1_1(description) => description,
+        DetectedArazzo::V1_0(description) => v1_1::Description::from(description),
+    };
 
     let mut options =
         Options::new()
@@ -4418,5 +4420,60 @@ workflows:
             output_format: Some(InputFormat::Yaml), // exercise output-format override
         };
         run_arazzo(ArazzoCommand::Convert(args)).expect("upconvert must succeed");
+    }
+
+    #[test]
+    fn run_arazzo_run_rejects_v1_0_only_criterion_version_error() {
+        // In Arazzo 1.0, `version` is invalid on a `simple` criterion;
+        // `From<v1_0::Criterion> for v1_1::Criterion` drops `version`, so
+        // validating after upconversion would miss this error.
+        let doc = json!({
+            "arazzo": "1.0.1",
+            "info": { "title": "T", "version": "1.0.0" },
+            "sourceDescriptions": [ { "name": "src", "url": "o.yaml" } ],
+            "workflows": [{
+                "workflowId": "wf",
+                "steps": [{
+                    "stepId": "s",
+                    "operationId": "op",
+                    "successCriteria": [{
+                        "condition": "$statusCode == 200",
+                        "type": "simple",
+                        "version": "1.0"
+                    }]
+                }]
+            }]
+        });
+        let f = TempFile::write("bad-v1_0-criterion.json", &doc);
+        let args = ArazzoRunArgs {
+            file: Some(f.0.clone()),
+            workflow: None,
+            input: vec![],
+            inputs: None,
+            skip_input_validation: false,
+            schema: vec![],
+            source: vec![],
+            source_document: vec![],
+            load_all_sources: false,
+            source_max_documents: 256,
+            source_max_depth: 32,
+            allow_source_retrieval_aliases: false,
+            base_url: vec![],
+            header: vec![],
+            load: vec![],
+            max_steps: None,
+            timeout: None,
+            parallel: None,
+            quiet: true,
+            ignore: vec![],
+            format: None,
+            output_format: None,
+        };
+        let err = run_arazzo(ArazzoCommand::Run(Box::new(args)))
+            .expect_err("invalid v1.0 criterion version must be rejected before upconversion");
+        assert!(
+            err.to_string().contains("does not validate"),
+            "expected validation error, got: {err}"
+        );
     }
 }

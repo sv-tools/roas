@@ -737,7 +737,14 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
                 args.out.display()
             );
         }
-        for file in roas_codegen::render(&document, &config)? {
+        let files = roas_codegen::render(&document, &config)?;
+        // Every intermediate directory along a rendered path must be a real
+        // directory, never a symbolic link that could lead into `--out` or
+        // elsewhere. Check every file before touching disk.
+        for file in &files {
+            rendered_slot(dir, &file.path)?;
+        }
+        for file in files {
             let path = dir.join(&file.path);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
@@ -917,6 +924,60 @@ fn spelled_exactly(path: &std::path::Path) -> bool {
             .filter_map(Result::ok)
             .any(|entry| entry.file_name() == name)
     })
+}
+
+/// Refuses a rendered-dump target at `relative` under `dir` if `relative`
+/// is empty or tries to traverse outside `dir`, if any intermediate
+/// directory component is a symbolic link or non-directory, or if the
+/// final target path is already a real directory. The final leaf file may
+/// already exist (or be a symlink), because `--dump-rendered` unlinks and
+/// recreates it in place.
+fn rendered_slot(dir: &std::path::Path, relative: &std::path::Path) -> anyhow::Result<()> {
+    let mut normal_count = 0usize;
+    for part in relative.components() {
+        let std::path::Component::Normal(_) = part else {
+            bail!(
+                "--dump-rendered: {} escapes the dump directory",
+                relative.display()
+            );
+        };
+        normal_count += 1;
+    }
+    if normal_count == 0 {
+        bail!("--dump-rendered: rendered path must not be empty");
+    }
+
+    let mut path = dir.to_path_buf();
+    let mut parts = relative.components().peekable();
+    while let Some(part) = parts.next() {
+        let last = parts.peek().is_none();
+        path.push(part);
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("--dump-rendered: reading {}", path.display()));
+            }
+            // A real directory at the leaf cannot be unlinked with `remove_file`;
+            // a symlink at the leaf (`is_dir()` is false on symlink_metadata) is
+            // safe because we unlink it rather than following it.
+            Ok(meta) if last && meta.is_dir() => bail!(
+                "--dump-rendered: {} is a directory; dump somewhere else",
+                path.display()
+            ),
+            Ok(_) if last => return Ok(()),
+            Ok(meta) if meta.file_type().is_symlink() => bail!(
+                "--dump-rendered: {} is a symbolic link; dump into a directory without one",
+                path.display()
+            ),
+            Ok(meta) if !meta.is_dir() => bail!(
+                "--dump-rendered: {} is not a directory; dump somewhere else",
+                path.display()
+            ),
+            Ok(_) => {}
+        }
+    }
+    Ok(())
 }
 
 /// Refuses a scaffold file at `relative` under `dir` unless the path is
@@ -2146,5 +2207,58 @@ mod tests {
             true,
         )
         .unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dump_rendered_refuses_intermediate_directory_symlink() {
+        let dir = TempDir::new("dump-rendered-symlink");
+        let spec = dir.0.join("api.json");
+        std::fs::write(&spec, PET).unwrap();
+        let config = dir.0.join("roas.toml");
+        std::fs::write(&config, "[rust]\nlayout = \"file_per_type\"\n").unwrap();
+        let out = dir.0.join("out");
+        let dump = dir.0.join("dump");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::create_dir_all(&dump).unwrap();
+        let sentinel = out.join("pet.rs");
+        std::fs::write(&sentinel, "// untouched\n").unwrap();
+        // `file_per_type` writes under `api/...`: place a symlink there
+        // pointing into `--out`.
+        std::os::unix::fs::symlink(&out, dump.join("api")).unwrap();
+
+        let mut run = args(&spec, &out);
+        run.config = Some(config);
+        run.dump_rendered = Some(dump);
+        let error = run_generate(run)
+            .expect_err("intermediate symlink in --dump-rendered must be refused")
+            .to_string();
+        assert!(error.contains("symbolic link"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap(),
+            "// untouched\n",
+            "target file inside --out must remain untouched"
+        );
+    }
+
+    #[test]
+    fn rendered_slot_rejects_traversal_empty_and_leaf_directory() {
+        let dir = TempDir::new("rendered-slot");
+        std::fs::create_dir_all(dir.0.join("existing_dir")).unwrap();
+
+        let err = rendered_slot(&dir.0, Path::new("nonexistent/../../escape.rs"))
+            .expect_err(".. after nonexistent segment must be rejected")
+            .to_string();
+        assert!(err.contains("escapes"), "{err}");
+
+        let err = rendered_slot(&dir.0, Path::new(""))
+            .expect_err("empty relative path must be rejected")
+            .to_string();
+        assert!(err.contains("empty"), "{err}");
+
+        let err = rendered_slot(&dir.0, Path::new("existing_dir"))
+            .expect_err("existing directory at leaf must be rejected")
+            .to_string();
+        assert!(err.contains("is a directory"), "{err}");
     }
 }
