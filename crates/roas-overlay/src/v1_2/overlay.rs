@@ -598,4 +598,25 @@ mod tests {
         };
         assert_eq!(action.copy.as_deref(), Some("$.src"));
     }
+
+    #[test]
+    fn apply_remove_handles_reverse_slice_union_and_duplicate_selectors() {
+        let mut doc = json!({ "items": ["a", "b", "c", "d"] });
+        let o = overlay_with(
+            json!([{ "target": "$.items[2:0:-1]", "remove": true }]),
+            json!({}),
+        );
+        let r = o.apply(&mut doc, EnumSet::empty()).unwrap();
+        assert_eq!(r.actions[0].matched, 2);
+        assert_eq!(doc, json!({ "items": ["a", "d"] }));
+
+        let mut doc = json!({ "items": ["a", "b", "c", "d"] });
+        let o = overlay_with(
+            json!([{ "target": "$.items[2, 0, 2]", "remove": true }]),
+            json!({}),
+        );
+        let r = o.apply(&mut doc, EnumSet::empty()).unwrap();
+        assert_eq!(r.actions[0].matched, 2);
+        assert_eq!(doc, json!({ "items": ["b", "d"] }));
+    }
 }
