@@ -10,6 +10,7 @@
 //! than passed over, so a `multipart/form-data` upload never looks
 //! validated because nothing looked at it.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use roas::common::reference::RefOr;
@@ -20,7 +21,7 @@ use roas::v3_2::spec::Spec;
 use serde_json::Value;
 
 use crate::decoder::Decoders;
-use crate::parameter::is_json;
+use crate::parameter::{is_json, normalize_media_type};
 use crate::report::{ErrorKind, Location, ValidationError};
 use crate::request::RequestView;
 use crate::schema;
@@ -31,6 +32,7 @@ pub(crate) fn validate(
     request: &RequestView<'_>,
     spec: &Spec,
     decoders: &Decoders,
+    regexes: &schema::RegexCache,
     errors: &mut Vec<ValidationError>,
 ) {
     let mut push = |pointer: String, kind: ErrorKind| {
@@ -80,9 +82,15 @@ pub(crate) fn validate(
         }
     };
 
+    if entry.item_schema.is_some() {
+        push(
+            String::new(),
+            ErrorKind::Unsupported("streaming `itemSchema` bodies".to_owned()),
+        );
+    }
     let Some(declared) = &entry.schema else {
-        // A Media Type Object without a schema describes nothing to
-        // check against, which is not an error.
+        // A Media Type Object without `schema` or `itemSchema` describes
+        // nothing to check against, which is not an error.
         return;
     };
 
@@ -111,7 +119,7 @@ pub(crate) fn validate(
         }
     };
 
-    for failure in schema::check(&value, declared, spec) {
+    for failure in schema::check_with_cache(&value, declared, spec, regexes) {
         push(
             failure.pointer,
             match failure.kind {
@@ -141,12 +149,7 @@ fn select<'c>(
     let sent = sent?;
     let mut ranges: Vec<(String, &RefOr<MediaType>)> = Vec::new();
     for (key, entry) in content {
-        let key_media_type = key
-            .split(';')
-            .next()
-            .unwrap_or(key)
-            .trim()
-            .to_ascii_lowercase();
+        let key_media_type = normalize_media_type(key);
         if key_media_type == sent {
             return Some((sent.to_owned(), entry));
         }
@@ -179,33 +182,30 @@ pub(crate) fn decode(
     // gets it — including for a media type this crate would otherwise
     // have read itself. It is handed `content_type`, parameters and
     // all, since that is where a `boundary` or a `charset` lives.
-    if let Some(decoder) = decoders.find(media_type) {
+    let normalized = normalize_media_type(media_type);
+    if let Some(decoder) = decoders.find(&normalized) {
         return decoder(bytes, content_type).map_err(Decoded::Malformed);
     }
 
-    if is_json(media_type) {
+    if is_json(&normalized) {
         return serde_json::from_slice(bytes)
             .map_err(|error| Decoded::Malformed(format!("invalid JSON: {error}")));
     }
 
-    if media_type == "application/x-www-form-urlencoded" {
+    if normalized == "application/x-www-form-urlencoded" {
         let text = as_text(bytes)?;
-        return crate::parameter::read_form_body(
-            &text,
-            object_properties(declared, spec),
-            encoding,
-            spec,
-        )
-        .map_err(Decoded::Malformed);
+        let properties = object_properties(declared, spec);
+        return crate::parameter::read_form_body(&text, properties.as_deref(), encoding, spec)
+            .map_err(Decoded::Malformed);
     }
 
     // Text is judged as the string it is — a `text/plain` body with a
     // `pattern` is a real thing to check.
-    if media_type.starts_with("text/") {
+    if normalized.starts_with("text/") {
         return Ok(Value::String(as_text(bytes)?));
     }
 
-    Err(Decoded::Unsupported(format!("a {media_type} body")))
+    Err(Decoded::Unsupported(format!("a {normalized} body")))
 }
 
 /// A body as UTF-8 text, or a malformed-body failure.
@@ -219,10 +219,14 @@ fn as_text(bytes: &[u8]) -> Result<String, Decoded> {
 fn object_properties<'s>(
     schema: &'s RefOr<Schema, SchemaRef>,
     spec: &'s Spec,
-) -> Option<&'s BTreeMap<String, RefOr<Schema, SchemaRef>>> {
-    match schema.get_item(spec).ok()? {
-        Schema::Single(single) => match single.as_ref() {
-            SingleSchema::Object(object) => object.properties.as_ref(),
+) -> Option<Cow<'s, BTreeMap<String, RefOr<Schema, SchemaRef>>>> {
+    match schema::resolve_final_schema(spec, schema)? {
+        Cow::Borrowed(Schema::Single(single)) => match single.as_ref() {
+            SingleSchema::Object(object) => object.properties.as_ref().map(Cow::Borrowed),
+            _ => None,
+        },
+        Cow::Owned(Schema::Single(single)) => match *single {
+            SingleSchema::Object(object) => object.properties.map(Cow::Owned),
             _ => None,
         },
         _ => None,

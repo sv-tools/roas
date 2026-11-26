@@ -119,6 +119,7 @@ The body is not part of that conversion, on purpose. A framework body is a strea
 match validator.validate(&RequestView::new("DELETE", "/pets")) {
     Err(RoutingError::PathNotFound { .. }) => { /* 404 */ }
     Err(RoutingError::MethodNotAllowed { allowed, .. }) => { /* 405, `Allow: {allowed}` */ }
+    Err(RoutingError::Unresolved { .. }) | Err(_) => { /* description could not be resolved */ }
     Ok(report) if report.is_valid() => { /* on you go */ }
     Ok(report) => { /* 400, and `report.errors` says why */ }
 }
