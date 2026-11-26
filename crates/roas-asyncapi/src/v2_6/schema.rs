@@ -439,7 +439,7 @@ impl ValidateWithContext for Schema {
         }
 
         if let Some(multiple_of) = self.multiple_of
-            && multiple_of <= 0.0
+            && (!multiple_of.is_finite() || multiple_of <= 0.0)
         {
             ctx.error_field("multipleOf", "must be greater than zero");
         }
@@ -1152,5 +1152,24 @@ mod tests {
         let mut ctx = Context::with_path(EnumSet::empty(), "#.payload.dependencies.d");
         dependency.validate_with_context(&mut ctx);
         assert!(ctx.errors.is_empty());
+    }
+
+    #[test]
+    fn multiple_of_rejects_non_finite_values() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let schema = Schema {
+                multiple_of: Some(bad),
+                ..Default::default()
+            };
+            let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+            schema.validate_with_context(&mut ctx);
+            assert!(
+                ctx.errors
+                    .iter()
+                    .any(|e| e == "#.payload.multipleOf: must be greater than zero"),
+                "expected multipleOf error for {bad}, got: {:?}",
+                ctx.errors
+            );
+        }
     }
 }

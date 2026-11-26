@@ -13,9 +13,13 @@ use roas_asyncapi::{v2_6, v3_0};
 
 const COMMAND: &str = "smartylighting_streetlights__streetlightId__command_turn";
 const MEASURED: &str = "smartylighting_streetlights__streetlightId__lighting_measured";
+const STREETLIGHTS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/v2_6_data/streetlights.yaml"
+);
 
 fn converted() -> (v3_0::Document, Vec<String>) {
-    let text = std::fs::read_to_string("tests/v2_6_data/streetlights.yaml").expect("the fixture");
+    let text = std::fs::read_to_string(STREETLIGHTS).expect("the fixture");
     let source: v2_6::Document = yaml::from_str(&text).expect("valid YAML");
     source
         .validate(EnumSet::empty())
@@ -150,7 +154,7 @@ fn every_note_says_where_it_came_from() {
 
 #[test]
 fn a_note_names_its_kind() {
-    let text = std::fs::read_to_string("tests/v2_6_data/streetlights.yaml").expect("the fixture");
+    let text = std::fs::read_to_string(STREETLIGHTS).expect("the fixture");
     let source: v2_6::Document = yaml::from_str(&text).expect("valid YAML");
     let (_, report) = convert(source);
 

@@ -173,6 +173,14 @@ pub struct ServerVariable {
 
 impl ValidateWithContext for ServerVariable {
     fn validate_with_context(&self, ctx: &mut Context) {
+        // `uniqueItems: true` on the enumeration.
+        for (i, value) in self.enum_values.iter().enumerate() {
+            if self.enum_values[..i].contains(value) {
+                ctx.in_index("enum", i, |ctx| {
+                    ctx.error(format!("duplicate value `{value}`"))
+                });
+            }
+        }
         if let Some(default) = &self.default
             && !self.enum_values.is_empty()
             && !self.enum_values.contains(default)
@@ -340,5 +348,20 @@ mod tests {
         let mut ctx = Context::with_path(EnumSet::empty(), "#.variables.v");
         free.validate_with_context(&mut ctx);
         assert!(ctx.errors.is_empty());
+    }
+
+    #[test]
+    fn server_variable_enum_must_be_unique() {
+        let variable: ServerVariable =
+            serde_json::from_value(json!({ "enum": ["a", "b", "a"] })).unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.variables.v");
+        variable.validate_with_context(&mut ctx);
+        assert_eq!(
+            ctx.errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["#.variables.v.enum[2]: duplicate value `a`"]
+        );
     }
 }

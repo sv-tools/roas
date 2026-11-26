@@ -25,7 +25,11 @@ fn percent_decode(fragment: &str) -> Option<String> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
-            decoded.push(u8::from_str_radix(fragment.get(i + 1..i + 3)?, 16).ok()?);
+            let hex = fragment.get(i + 1..i + 3)?;
+            if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
             i += 3;
         } else {
             decoded.push(bytes[i]);
@@ -152,6 +156,7 @@ mod tests {
             "/a~",   // a trailing `~`
             "/a%2",  // a truncated escape
             "/a%zz", // a non-hex escape
+            "/a%+a", // a signed hex escape accepted by `from_str_radix`
             "/a%FF", // octets that are not UTF-8
             "no-leading-slash",
         ] {

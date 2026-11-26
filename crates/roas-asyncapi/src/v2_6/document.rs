@@ -432,6 +432,42 @@ impl Document {
         }
     }
 
+    /// Check a channel item's own document-level wiring: declared
+    /// `servers`, operation `security` (including inline `traits`), and
+    /// `message` `$ref` targets.
+    fn validate_channel_wiring(&self, ctx: &mut Context, channel: &ChannelItem) {
+        // A channel's servers are plain names into `servers`.
+        for (i, server) in channel.servers.iter().enumerate() {
+            if !server.is_empty() && !self.servers.contains_key(server) {
+                ctx.in_index("servers", i, |ctx| {
+                    ctx.error(format!("server `{server}` is not declared"));
+                });
+            }
+        }
+        for (kind, operation) in [
+            ("publish", &channel.publish),
+            ("subscribe", &channel.subscribe),
+        ] {
+            if let Some(operation) = operation {
+                ctx.in_field(kind, |ctx| {
+                    self.validate_security(ctx, "security", &operation.security);
+                    for (i, operation_trait) in operation.traits.iter().enumerate() {
+                        if let Some(operation_trait) = operation_trait.item() {
+                            ctx.in_index("traits", i, |ctx| {
+                                self.validate_security(ctx, "security", &operation_trait.security);
+                            });
+                        }
+                    }
+                    if let Some(message) = &operation.message {
+                        ctx.in_field("message", |ctx| {
+                            self.validate_message_refs(ctx, message);
+                        });
+                    }
+                });
+            }
+        }
+    }
+
     fn validate_inner(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error> {
         let mut ctx = Context::for_document(options, self);
 
@@ -447,36 +483,25 @@ impl Document {
         ctx.validate_map_keys("servers", &self.servers);
         for (name, server) in &self.servers {
             ctx.in_key("servers", name, |ctx| {
-                server.validate_with_context(ctx);
-                // Follow a `$ref` so a referenced server's security is
-                // checked as well as an inline one's.
+                // Check `$ref` resolution before `validate_with_context` so
+                // the general reference check defers to this more specific
+                // message. Referenced component servers validate their own
+                // `security` at their declaration site under `components`.
                 let resolution = server.get_item(self);
                 if let Some(problem) = resolution.problem()
                     && let RefOr::Reference(reference) = server
+                    && !reference.reference.is_empty()
                 {
                     ctx.error_field(
                         "$ref",
                         format!("server `{}` {problem}", reference.reference),
                     );
                 }
-                if let Some(server) = resolution.found() {
+                server.validate_with_context(ctx);
+                if let Some(server) = server.item() {
                     self.validate_security(ctx, "security", &server.security);
                 }
             });
-        }
-
-        // Component servers are reachable only through a `$ref`, so
-        // their own security requirements are checked here.
-        if let Some(components) = &self.components {
-            for (name, server) in &components.servers {
-                if let Some(server) = server.item() {
-                    ctx.in_key("components", "servers", |ctx| {
-                        ctx.in_field(name, |ctx| {
-                            self.validate_security(ctx, "security", &server.security);
-                        });
-                    });
-                }
-            }
         }
 
         for (path, channel) in &self.channels {
@@ -494,6 +519,11 @@ impl Document {
                 {
                     ctx.error_field("$ref", format!("channel `{reference}` {problem}"));
                 }
+                // Check this channel's own wiring before
+                // `channel.validate_with_context` so general `$ref` checks
+                // defer to specific `message` diagnostics. Referenced
+                // channels are validated at their own declaration sites.
+                self.validate_channel_wiring(ctx, channel);
                 // The item's own fields are checked either way, and the
                 // *resolved* item's parameters are what this path's
                 // placeholders must match.
@@ -502,32 +532,6 @@ impl Document {
                 // declared anywhere along the chain, since `$ref`
                 // siblings are kept.
                 ChannelItem::validate_path_parameters(ctx, path, &self.channel_chain(channel));
-                // `$ref` siblings are preserved, so the item as written
-                // is checked as well as the channel it references.
-                for item in self.channel_chain(channel) {
-                    // A channel's servers are plain names into `servers`.
-                    for (i, server) in item.servers.iter().enumerate() {
-                        if !server.is_empty() && !self.servers.contains_key(server) {
-                            ctx.in_index("servers", i, |ctx| {
-                                ctx.error(format!("server `{server}` is not declared"));
-                            });
-                        }
-                    }
-                    for (kind, operation) in
-                        [("publish", &item.publish), ("subscribe", &item.subscribe)]
-                    {
-                        if let Some(operation) = operation {
-                            ctx.in_field(kind, |ctx| {
-                                self.validate_security(ctx, "security", &operation.security);
-                                if let Some(message) = &operation.message {
-                                    ctx.in_field("message", |ctx| {
-                                        self.validate_message_refs(ctx, message);
-                                    });
-                                }
-                            });
-                        }
-                    }
-                }
             });
         }
 
@@ -581,7 +585,32 @@ impl Document {
             ctx.in_field("externalDocs", |ctx| docs.validate_with_context(ctx));
         }
         if let Some(components) = &self.components {
-            ctx.in_field("components", |ctx| components.validate_with_context(ctx));
+            ctx.in_field("components", |ctx| {
+                // Document-level cross-reference checks for reusable
+                // components run before `components.validate_with_context`
+                // so the general `$ref` checks defer to the specific
+                // diagnostics.
+                for (name, server) in &components.servers {
+                    if let Some(server) = server.item() {
+                        ctx.in_key("servers", name, |ctx| {
+                            self.validate_security(ctx, "security", &server.security);
+                        });
+                    }
+                }
+                for (name, channel) in &components.channels {
+                    ctx.in_key("channels", name, |ctx| {
+                        self.validate_channel_wiring(ctx, channel);
+                    });
+                }
+                for (name, operation_trait) in &components.operation_traits {
+                    if let Some(operation_trait) = operation_trait.item() {
+                        ctx.in_key("operationTraits", name, |ctx| {
+                            self.validate_security(ctx, "security", &operation_trait.security);
+                        });
+                    }
+                }
+                components.validate_with_context(ctx);
+            });
         }
 
         ctx.into_result()
@@ -3018,6 +3047,127 @@ mod tests {
                 "#.servers.aliased.$ref: server `#/components/servers/hop` is not a usable JSON Pointer",
                 "#.servers.direct.$ref: server `./other.yaml#bad` is not a usable JSON Pointer",
             ],
+        );
+    }
+
+    #[test]
+    fn broken_server_and_message_refs_are_reported_once() {
+        let errors = errors_for(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": {
+                "missing": { "$ref": "#/components/servers/ghost" },
+                "empty": { "$ref": "" }
+            },
+            "channels": {
+                "user": {
+                    "publish": { "message": { "$ref": "#/components/messages/ghost" } },
+                    "subscribe": { "message": { "$ref": "" } }
+                }
+            }
+        }));
+        let mut sorted = errors;
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            [
+                "#.channels.user.publish.message.$ref: message `#/components/messages/ghost` names nothing in this document",
+                "#.channels.user.subscribe.message.$ref: must not be empty",
+                "#.servers.empty.$ref: must not be empty",
+                "#.servers.missing.$ref: server `#/components/servers/ghost` names nothing in this document",
+            ]
+        );
+    }
+
+    #[test]
+    fn component_channels_and_operation_traits_validate_document_wiring() {
+        let errors = errors_for(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": {
+                "prod": { "url": "amqp://example.com", "protocol": "amqp" }
+            },
+            "channels": {},
+            "components": {
+                "securitySchemes": {
+                    "basic": { "type": "userPassword" }
+                },
+                "channels": {
+                    "shared": {
+                        "servers": ["ghost"],
+                        "publish": {
+                            "security": [ { "unknown": [] } ],
+                            "message": { "$ref": "#/components/messages/ghost" }
+                        }
+                    }
+                },
+                "operationTraits": {
+                    "auth": {
+                        "security": [ { "basic": ["read"] } ]
+                    }
+                }
+            }
+        }));
+        let mut sorted = errors;
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            [
+                "#.components.channels.shared.publish.message.$ref: message `#/components/messages/ghost` names nothing in this document",
+                "#.components.channels.shared.publish.security[0].unknown: is not declared in `components.securitySchemes`",
+                "#.components.channels.shared.servers[0]: server `ghost` is not declared",
+                "#.components.operationTraits.auth.security[0].basic: must not list scopes: the `userPassword` scheme type takes none",
+            ]
+        );
+    }
+
+    #[test]
+    fn referenced_components_report_wiring_errors_once_at_declaration_site() {
+        let mut errors = errors_for(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": {
+                "prod": { "$ref": "#/components/servers/real" }
+            },
+            "channels": {
+                "users": { "$ref": "#/components/channels/shared" },
+                "inlineTrait": {
+                    "publish": {
+                        "traits": [
+                            { "security": [ { "undeclared": [] } ] }
+                        ]
+                    }
+                }
+            },
+            "components": {
+                "servers": {
+                    "real": {
+                        "url": "amqp://example.com",
+                        "protocol": "amqp",
+                        "security": [ { "missingScheme": [] } ]
+                    }
+                },
+                "channels": {
+                    "shared": {
+                        "servers": ["ghost"],
+                        "publish": {
+                            "security": [ { "unknown": [] } ],
+                            "message": { "$ref": "#/components/messages/ghost" }
+                        }
+                    }
+                }
+            }
+        }));
+        errors.sort();
+        assert_eq!(
+            errors,
+            [
+                "#.channels.inlineTrait.publish.traits[0].security[0].undeclared: is not declared in `components.securitySchemes`",
+                "#.components.channels.shared.publish.message.$ref: message `#/components/messages/ghost` names nothing in this document",
+                "#.components.channels.shared.publish.security[0].unknown: is not declared in `components.securitySchemes`",
+                "#.components.channels.shared.servers[0]: server `ghost` is not declared",
+                "#.components.servers.real.security[0].missingScheme: is not declared in `components.securitySchemes`",
+            ]
         );
     }
 }

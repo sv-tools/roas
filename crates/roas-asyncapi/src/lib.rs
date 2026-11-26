@@ -161,7 +161,7 @@
 //! so nothing is dropped or approximated.
 //!
 //! With `v2_6` and `v3_0` both enabled,
-//! [`v3_0::from_v2_6::convert`] converts a 2.6 document. v3
+//! `v3_0::from_v2_6::convert` converts a 2.6 document. v3
 //! reorganized the document rather than extending it, so that one is
 //! genuinely lossy: it returns a report saying where a name had to be
 //! invented and what had nowhere to go.

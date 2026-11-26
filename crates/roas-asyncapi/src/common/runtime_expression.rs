@@ -46,7 +46,8 @@ pub enum RuntimeExpressionError {
     /// No `#` separates the source from the fragment.
     MissingFragment,
     /// The fragment after `#` is not a valid JSON Pointer (RFC 6901
-    /// requires it to be empty or start with `/`).
+    /// requires it to be empty or start with `/`, with `~` only in
+    /// `~0` / `~1` escapes).
     InvalidPointer,
 }
 
@@ -57,7 +58,7 @@ impl RuntimeExpressionError {
             Self::MissingMessagePrefix => "must start with `$message.`",
             Self::UnknownSource => "source must be `header` or `payload`",
             Self::MissingFragment => "must have a `#` fragment (use `#` alone for the whole value)",
-            Self::InvalidPointer => "fragment must be a JSON Pointer starting with `/`",
+            Self::InvalidPointer => "fragment must be a valid RFC 6901 JSON Pointer",
         }
     }
 }
@@ -84,9 +85,17 @@ pub fn parse(expression: &str) -> Result<RuntimeExpression<'_>, RuntimeExpressio
     };
 
     // RFC 6901: a pointer is either empty or a sequence of `/`-prefixed
-    // reference tokens.
-    if !pointer.is_empty() && !pointer.starts_with('/') {
-        return Err(RuntimeExpressionError::InvalidPointer);
+    // reference tokens where `~` is only valid in `~0` / `~1` escapes.
+    if !pointer.is_empty() {
+        if !pointer.starts_with('/') {
+            return Err(RuntimeExpressionError::InvalidPointer);
+        }
+        let mut chars = pointer.chars();
+        while let Some(c) = chars.next() {
+            if c == '~' && !matches!(chars.next(), Some('0' | '1')) {
+                return Err(RuntimeExpressionError::InvalidPointer);
+            }
+        }
     }
 
     Ok(RuntimeExpression { source, pointer })
@@ -149,10 +158,19 @@ mod tests {
 
     #[test]
     fn rejects_fragment_that_is_not_a_json_pointer() {
-        assert_eq!(
-            parse("$message.payload#user/id").unwrap_err(),
-            RuntimeExpressionError::InvalidPointer
-        );
+        for bad in [
+            "$message.payload#user/id",
+            "$message.payload#/a~2b",
+            "$message.header#/a~",
+        ] {
+            assert_eq!(
+                parse(bad).unwrap_err(),
+                RuntimeExpressionError::InvalidPointer,
+                "should reject {bad}"
+            );
+        }
+        let valid = parse("$message.payload#/a~0b/c~1d").unwrap();
+        assert_eq!(valid.pointer, "/a~0b/c~1d");
     }
 
     #[test]

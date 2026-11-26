@@ -59,6 +59,15 @@ impl ValidateWithContext for Parameter {
             }
         }
 
+        // `uniqueItems: true` on the enumeration.
+        for (i, value) in self.enum_values.iter().enumerate() {
+            if self.enum_values[..i].contains(value) {
+                ctx.in_index("enum", i, |ctx| {
+                    ctx.error(format!("duplicate value `{value}`"))
+                });
+            }
+        }
+
         // A default outside the enumeration can never be substituted.
         if let Some(default) = &self.default
             && !self.enum_values.is_empty()
@@ -141,5 +150,20 @@ mod tests {
         let mut ctx = Context::with_path(EnumSet::empty(), "#.parameters.p");
         free.validate_with_context(&mut ctx);
         assert!(ctx.errors.is_empty());
+    }
+
+    #[test]
+    fn enum_values_must_be_unique() {
+        let parameter: Parameter =
+            serde_json::from_value(json!({ "enum": ["a", "b", "a"] })).unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.parameters.p");
+        parameter.validate_with_context(&mut ctx);
+        assert_eq!(
+            ctx.errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["#.parameters.p.enum[2]: duplicate value `a`"]
+        );
     }
 }
