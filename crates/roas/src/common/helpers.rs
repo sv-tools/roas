@@ -94,11 +94,14 @@ pub fn validate_required_uri<T>(uri: &String, ctx: &mut Context<T>, path: String
 
 /// Validates that the given URL string starts with "http://" or "https://".
 /// If the URL is invalid, records an error in the context.
+///
+/// Callers that want to silence empty values for a specific field (such as
+/// `ExternalDocumentation.url` under
+/// [`Options::IgnoreEmptyExternalDocumentationUrl`]) should gate the call
+/// themselves — this helper does not bake in any field-specific option.
 #[cfg(any(feature = "v2", feature = "v3_0", feature = "v3_1"))]
 pub fn validate_required_url<T>(url: &String, ctx: &mut Context<T>, path: String) {
-    if !ctx.is_option(Options::IgnoreEmptyExternalDocumentationUrl) {
-        validate_required_string(url, ctx, path.clone());
-    }
+    validate_required_string(url, ctx, path.clone());
     // If the URL is empty or the ignore option is set, skip validation.
     if url.is_empty() || ctx.is_option(Options::IgnoreInvalidUrls) {
         return;

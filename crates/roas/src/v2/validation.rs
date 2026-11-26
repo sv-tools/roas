@@ -364,6 +364,32 @@ pub fn validate_security_definitions(ctx: &mut Context<Spec>) {
     }
 }
 
+/// Validate that no two paths in `Spec.paths` collapse to the same
+/// canonical (template-stripped) form. Extension keys (`x-...`) are skipped.
+pub fn validate_path_template_uniqueness(
+    ctx: &mut Context<Spec>,
+    paths: &BTreeMap<String, PathItem>,
+) {
+    let mut canonicals: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    for key in paths.keys() {
+        if key.starts_with("x-") {
+            continue;
+        }
+        let canonical = regex!(r"\{[^}]+\}").replace_all(key, "{}").into_owned();
+        canonicals.entry(canonical).or_default().push(key.as_str());
+    }
+    for (canonical, keys) in canonicals {
+        if keys.len() > 1 {
+            ctx.error(
+                "#.paths".to_owned(),
+                format_args!(
+                    "templated paths {keys:?} collapse to the same shape `{canonical}`; OAS forbids equivalent templates"
+                ),
+            );
+        }
+    }
+}
+
 /// Validate operation-level + path-item parameters together with knowledge of
 /// the path template. Called from `Spec::validate` for each path entry.
 pub fn validate_path_item(ctx: &mut Context<Spec>, template: &str, path: &str, item: &PathItem) {
@@ -1282,5 +1308,16 @@ mod tests {
             "errors: {:?}",
             ctx.errors
         );
+    }
+
+    #[test]
+    fn path_template_uniqueness_skips_extension_keys() {
+        let mut paths = BTreeMap::new();
+        paths.insert("x-a/{id}".to_owned(), PathItem::default());
+        paths.insert("x-a/{name}".to_owned(), PathItem::default());
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        validate_path_template_uniqueness(&mut ctx, &paths);
+        assert!(ctx.errors.is_empty(), "got: {:?}", ctx.errors);
     }
 }

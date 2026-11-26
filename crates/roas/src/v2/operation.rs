@@ -182,6 +182,10 @@ impl ValidateWithContext<Spec> for Operation {
             }
         }
 
+        if let Some(docs) = &self.external_docs {
+            docs.validate_with_context(ctx, format!("{path}.externalDocs"));
+        }
+
         if let Some(samples) = &self.x_code_samples {
             for (i, sample) in samples.iter().enumerate() {
                 sample.validate_with_context(ctx, format!("{path}.x-codeSamples[{i}]"));

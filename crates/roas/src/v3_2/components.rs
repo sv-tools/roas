@@ -79,90 +79,101 @@ impl ValidateWithContext<Spec> for Components {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         let re = regex!(r"^[a-zA-Z0-9.\-_]+$");
 
-        if let Some(objs) = &self.schemas {
-            for (name, obj) in objs {
-                let reference = format!("#/components/schemas/{name}");
-                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedSchemas) {
-                    ctx.error(reference, "unused");
+        // Pass 1: validate every component key and every component body that
+        // was not already validated through a `$ref` walk. Running this before
+        // unused checks ensures component-to-component references (including
+        // reverse-alphabetical aliases like `ZAlias -> ATarget`) mark their
+        // targets visited before pass 2 runs, and prevents duplicate errors on
+        // referenced components.
+        macro_rules! validate_bag {
+            ($map:expr, $section:literal) => {
+                if let Some(objs) = &$map {
+                    for (name, obj) in objs {
+                        validate_string_matches(
+                            name,
+                            re,
+                            ctx,
+                            format!(concat!("{}.", $section, "[<name>]"), path),
+                        );
+                        let reference = format!(concat!("#/components/", $section, "/{}"), name);
+                        if ctx.mark_validated(reference) {
+                            obj.validate_with_context(
+                                ctx,
+                                format!(concat!("{}.", $section, "[{}]"), path, name),
+                            );
+                        }
+                    }
                 }
-                validate_string_matches(name, re, ctx, format!("{path}.schemas[<name>]"));
-                obj.validate_with_context(ctx, format!("{path}.schemas[{name}]"));
-            }
+            };
         }
 
-        if let Some(objs) = &self.responses {
-            for (name, obj) in objs {
-                let reference = format!("#/components/responses/{name}");
-                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedResponses) {
-                    ctx.error(reference, "unused");
+        validate_bag!(self.schemas, "schemas");
+        validate_bag!(self.responses, "responses");
+        validate_bag!(self.parameters, "parameters");
+        validate_bag!(self.examples, "examples");
+        validate_bag!(self.request_bodies, "requestBodies");
+        validate_bag!(self.headers, "headers");
+        validate_bag!(self.security_schemes, "securitySchemes");
+        if let Some(objs) = &self.path_items {
+            // operationId uniqueness is enforced by the pre-pass in
+            // `Spec::validate_with_context`; re-inserting here would
+            // double-count and report a false duplicate.
+            for (name, item) in objs {
+                validate_string_matches(name, re, ctx, format!("{path}.pathItems[<name>]"));
+                let reference = format!("#/components/pathItems/{name}");
+                if ctx.mark_validated(reference) {
+                    item.validate_with_context(ctx, format!("{path}.pathItems[{name}]"));
                 }
-                validate_string_matches(name, re, ctx, format!("{path}.responses[<name>]"));
-                obj.validate_with_context(ctx, format!("{path}.responses[{name}]"));
             }
         }
+        validate_bag!(self.links, "links");
+        validate_bag!(self.callbacks, "callbacks");
+        validate_bag!(self.media_types, "mediaTypes");
 
-        if let Some(objs) = &self.parameters {
-            for (name, obj) in objs {
-                let reference = format!("#/components/parameters/{name}");
-                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedParameters) {
-                    ctx.error(reference, "unused");
-                }
-                validate_string_matches(name, re, ctx, format!("{path}.parameters[<name>]"));
-                obj.validate_with_context(ctx, format!("{path}.parameters[{name}]"));
-            }
-        }
-
-        if let Some(objs) = &self.examples {
-            for (name, obj) in objs {
-                let reference = format!("#/components/examples/{name}");
-                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedExamples) {
-                    ctx.error(reference, "unused");
-                }
-                validate_string_matches(name, re, ctx, format!("{path}.examples[<name>]"));
-                obj.validate_with_context(ctx, format!("{path}.examples[{name}]"));
-            }
-        }
-
-        if let Some(objs) = &self.request_bodies {
-            for (name, obj) in objs {
-                let reference = format!("#/components/requestBodies/{name}");
-                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedRequestBodies)
+        // Pass 2: report unused components and unused OAuth2 scopes now that
+        // every cross-component reference has been visited.
+        macro_rules! check_unused_bag {
+            ($map:expr, $section:literal, $opt:expr) => {
+                if let Some(objs) = &$map
+                    && !ctx.is_option($opt)
                 {
-                    ctx.error(reference, "unused");
+                    for name in objs.keys() {
+                        let reference = format!(concat!("#/components/", $section, "/{}"), name);
+                        if !ctx.is_visited(&reference) {
+                            ctx.error(reference, "unused");
+                        }
+                    }
                 }
-                validate_string_matches(name, re, ctx, format!("{path}.requestBodies[<name>]"));
-                obj.validate_with_context(ctx, format!("{path}.requestBodies[{name}]"));
-            }
+            };
         }
 
-        if let Some(objs) = &self.headers {
-            for (name, obj) in objs {
-                let reference = format!("#/components/headers/{name}");
-                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedHeaders) {
-                    ctx.error(reference, "unused");
-                }
-                validate_string_matches(name, re, ctx, format!("{path}.headers[<name>]"));
-                obj.validate_with_context(ctx, format!("{path}.headers[{name}]"));
-            }
-        }
-
-        if let Some(objs) = &self.security_schemes {
+        check_unused_bag!(self.schemas, "schemas", Options::IgnoreUnusedSchemas);
+        check_unused_bag!(self.responses, "responses", Options::IgnoreUnusedResponses);
+        check_unused_bag!(
+            self.parameters,
+            "parameters",
+            Options::IgnoreUnusedParameters
+        );
+        check_unused_bag!(self.examples, "examples", Options::IgnoreUnusedExamples);
+        check_unused_bag!(
+            self.request_bodies,
+            "requestBodies",
+            Options::IgnoreUnusedRequestBodies
+        );
+        check_unused_bag!(self.headers, "headers", Options::IgnoreUnusedHeaders);
+        if let Some(objs) = &self.security_schemes
+            && !ctx.is_option(Options::IgnoreUnusedSecuritySchemes)
+        {
             for (name, obj) in objs {
                 let reference = format!("#/components/securitySchemes/{name}");
-                if !ctx.is_visited(&reference)
-                    && !ctx.is_option(Options::IgnoreUnusedSecuritySchemes)
-                {
+                if !ctx.is_visited(&reference) {
                     ctx.error(reference.clone(), "unused");
                 }
-                validate_string_matches(name, re, ctx, format!("{path}.securitySchemes[<name>]"));
-                obj.validate_with_context(ctx, format!("{path}.securitySchemes[{name}]"));
                 if let Ok(SecurityScheme::OAuth2(oauth2)) = obj.get_item(ctx.spec) {
                     let mut check_unused = |scopes: &BTreeMap<String, String>| {
                         for scope in scopes.keys() {
                             let r = format!("{reference}/{scope}");
-                            if !ctx.is_visited(&r)
-                                && !ctx.is_option(Options::IgnoreUnusedSecuritySchemes)
-                            {
+                            if !ctx.is_visited(&r) {
                                 ctx.error(r, "unused");
                             }
                         }
@@ -185,53 +196,14 @@ impl ValidateWithContext<Spec> for Components {
                 }
             }
         }
-
-        if let Some(objs) = &self.path_items {
-            // operationId uniqueness is enforced by the pre-pass in
-            // `Spec::validate_with_context`; re-inserting here would
-            // double-count and report a false duplicate.
-            for (name, item) in objs {
-                let reference = format!("#/components/pathItems/{name}");
-                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedPathItems) {
-                    ctx.error(reference, "unused");
-                }
-                validate_string_matches(name, re, ctx, format!("{path}.pathItems[<name>]"));
-                item.validate_with_context(ctx, format!("{path}.pathItems[{name}]"));
-            }
-        }
-
-        if let Some(objs) = &self.links {
-            for (name, obj) in objs {
-                let reference = format!("#/components/links/{name}");
-                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedLinks) {
-                    ctx.error(reference, "unused");
-                }
-                validate_string_matches(name, re, ctx, format!("{path}.links[<name>]"));
-                obj.validate_with_context(ctx, format!("{path}.links[{name}]"));
-            }
-        }
-
-        if let Some(objs) = &self.callbacks {
-            for (name, obj) in objs {
-                let reference = format!("#/components/callbacks/{name}");
-                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedCallbacks) {
-                    ctx.error(reference, "unused");
-                }
-                validate_string_matches(name, re, ctx, format!("{path}.callbacks[<name>]"));
-                obj.validate_with_context(ctx, format!("{path}.callbacks[{name}]"));
-            }
-        }
-
-        if let Some(objs) = &self.media_types {
-            for (name, obj) in objs {
-                let reference = format!("#/components/mediaTypes/{name}");
-                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedMediaTypes) {
-                    ctx.error(reference, "unused");
-                }
-                validate_string_matches(name, re, ctx, format!("{path}.mediaTypes[<name>]"));
-                obj.validate_with_context(ctx, format!("{path}.mediaTypes[{name}]"));
-            }
-        }
+        check_unused_bag!(self.path_items, "pathItems", Options::IgnoreUnusedPathItems);
+        check_unused_bag!(self.links, "links", Options::IgnoreUnusedLinks);
+        check_unused_bag!(self.callbacks, "callbacks", Options::IgnoreUnusedCallbacks);
+        check_unused_bag!(
+            self.media_types,
+            "mediaTypes",
+            Options::IgnoreUnusedMediaTypes
+        );
     }
 }
 
@@ -649,6 +621,173 @@ mod tests {
             ctx.errors.mentions("must match pattern"),
             "expected pattern error: {:?}",
             ctx.errors
+        );
+    }
+
+    #[test]
+    fn reverse_alphabetical_alias_not_falsely_unused_and_no_duplicate_errors() {
+        use crate::validation::Validate;
+        let spec: Spec = serde_json::from_value(json!({
+            "openapi": "3.2.0",
+            "info": { "title": "T", "version": "1.0" },
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": { "$ref": "#/components/schemas/ZAlias" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {
+                "schemas": {
+                    "ATarget": { "type": "string", "minLength": 5, "maxLength": 1 },
+                    "ZAlias": { "$ref": "#/components/schemas/ATarget" }
+                }
+            }
+        }))
+        .unwrap();
+        let err = spec.validate(Options::new(), None).unwrap_err();
+        assert!(
+            !err.mentions("unused"),
+            "neither ATarget nor ZAlias is unused: {:?}",
+            err.errors
+        );
+        let min_max_errors: Vec<_> = err
+            .errors
+            .iter()
+            .filter(|e| e.contains("minLength"))
+            .collect();
+        assert_eq!(
+            min_max_errors.len(),
+            1,
+            "referenced component error must be reported once, got: {:?}",
+            err.errors
+        );
+
+        // Even when ZAlias itself is unused, ATarget is referenced by ZAlias
+        // and must not be falsely flagged unused due to BTreeMap order.
+        let unref_spec: Spec = serde_json::from_value(json!({
+            "openapi": "3.2.0",
+            "info": { "title": "T", "version": "1.0" },
+            "components": {
+                "schemas": {
+                    "ATarget": { "type": "string" },
+                    "ZAlias": { "$ref": "#/components/schemas/ATarget" }
+                }
+            }
+        }))
+        .unwrap();
+        let err2 = unref_spec.validate(Options::new(), None).unwrap_err();
+        assert!(
+            !err2.mentions("#/components/schemas/ATarget"),
+            "ATarget is referenced by ZAlias: {:?}",
+            err2.errors
+        );
+        assert!(err2.mentions("#/components/schemas/ZAlias"));
+    }
+
+    #[test]
+    fn define_media_type_inserts_and_validates_name() {
+        let mut spec = Spec::default();
+        let mt = crate::v3_2::media_type::MediaType::default();
+        let r = spec.define_media_type("JsonOk", mt).unwrap();
+        assert_eq!(r, RefOr::new_ref("#/components/mediaTypes/JsonOk"));
+        assert!(
+            spec.define_media_type("bad name", Default::default())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn external_and_dangling_aliases_do_not_poison_visited_set() {
+        use crate::validation::Validate;
+        let spec: Spec = serde_json::from_value(json!({
+            "openapi": "3.2.0",
+            "info": { "title": "T", "version": "1.0" },
+            "paths": {
+                "/a": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": { "$ref": "#/components/schemas/ExtAlias" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "/b": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": { "$ref": "https://example.test/pet.json#/Pet" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "/c": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": { "$ref": "#/components/schemas/DanglingAlias" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "/d": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": { "$ref": "#/components/schemas/Missing" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {
+                "schemas": {
+                    "ExtAlias": { "$ref": "https://example.test/pet.json#/Pet" },
+                    "DanglingAlias": { "$ref": "#/components/schemas/Missing" }
+                }
+            }
+        }))
+        .unwrap();
+        let err = spec.validate(Options::new(), None).unwrap_err();
+        assert!(
+            err.mentions_all(&["paths[/b]", "https://example.test/pet.json#/Pet"]),
+            "external ref on /b must not be silently skipped: {:?}",
+            err.errors
+        );
+        assert!(
+            err.mentions_all(&["paths[/d]", "#/components/schemas/Missing"]),
+            "dangling ref on /d must not be silently skipped: {:?}",
+            err.errors
         );
     }
 }

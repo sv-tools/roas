@@ -166,15 +166,19 @@ pub fn validate_operation_parameters(
     #[derive(Clone, Copy)]
     enum Kind {
         Path,
+        Query,
+        Querystring,
         Other,
     }
     fn kind_of(p: &Parameter) -> Kind {
         match p {
             Parameter::Path(_) => Kind::Path,
+            Parameter::Query(_) => Kind::Query,
+            Parameter::Querystring(_) => Kind::Querystring,
             _ => Kind::Other,
         }
     }
-    let mut merged: HashMap<(String, &'static str), Kind> = HashMap::new();
+    let mut merged: BTreeMap<(String, &'static str), Kind> = BTreeMap::new();
     for params in [path_item_params, op_params].into_iter().flatten() {
         for raw in params {
             if let ResolvedParam::Item(p) = resolve_parameter(ctx.spec, raw) {
@@ -185,9 +189,16 @@ pub fn validate_operation_parameters(
     }
 
     let mut declared_path_params: BTreeSet<String> = BTreeSet::new();
+    let mut querystring_count = 0usize;
+    let mut has_query = false;
     for ((name, _loc), kind) in &merged {
-        if matches!(kind, Kind::Path) {
-            declared_path_params.insert(name.clone());
+        match kind {
+            Kind::Path => {
+                declared_path_params.insert(name.clone());
+            }
+            Kind::Query => has_query = true,
+            Kind::Querystring => querystring_count += 1,
+            Kind::Other => {}
         }
     }
 
@@ -222,21 +233,8 @@ pub fn validate_operation_parameters(
     }
 
     // OAS 3.2: an `in: querystring` parameter MUST NOT appear more than
-    // once in the same operation, and MUST NOT coexist with any
-    // `in: query` parameter at the same level (path-item + operation).
-    let mut querystring_count = 0usize;
-    let mut has_query = false;
-    for params in [path_item_params, op_params].into_iter().flatten() {
-        for raw in params {
-            if let ResolvedParam::Item(p) = resolve_parameter(ctx.spec, raw) {
-                match p {
-                    Parameter::Querystring(_) => querystring_count += 1,
-                    Parameter::Query(_) => has_query = true,
-                    _ => {}
-                }
-            }
-        }
-    }
+    // once in the effective (override-merged) parameter set of an
+    // operation, and MUST NOT coexist with any `in: query` parameter.
     if querystring_count > 1 {
         ctx.error(
             op_path.to_owned(),
@@ -356,7 +354,7 @@ pub fn validate_security_requirements(
 
 /// Validate Spec.tags: every tag name MUST be unique.
 pub fn validate_tag_uniqueness(ctx: &mut Context<Spec>, tags: &[Tag]) {
-    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for t in tags {
         *counts.entry(t.name.as_str()).or_insert(0) += 1;
     }
@@ -380,7 +378,7 @@ pub fn validate_path_template_uniqueness<V>(
     section: &str,
     paths: &BTreeMap<String, V>,
 ) {
-    let mut canonicals: HashMap<String, Vec<&str>> = HashMap::new();
+    let mut canonicals: BTreeMap<String, Vec<&str>> = BTreeMap::new();
     for key in paths.keys() {
         if key.starts_with("x-") {
             continue;
@@ -412,7 +410,10 @@ pub fn validate_path_item(ctx: &mut Context<Spec>, template: &str, path: &str, i
     // follow the chain to the effective PathItem so the path-template ↔
     // parameter correspondence check sees the operations actually mounted
     // at this template. Inline content (when present) takes precedence.
-    let effective = if item.parameters.is_none() && item.operations.is_none() {
+    let effective = if item.parameters.is_none()
+        && item.operations.is_none()
+        && item.additional_operations.is_none()
+    {
         resolve_path_item_chain(ctx.spec, item)
     } else {
         item
@@ -421,6 +422,18 @@ pub fn validate_path_item(ctx: &mut Context<Spec>, template: &str, path: &str, i
     if let Some(ops) = &effective.operations {
         for (method, op) in ops {
             let op_path = format!("{path}.{method}");
+            validate_operation_parameters(
+                ctx,
+                &op_path,
+                template,
+                pi_params,
+                op.parameters.as_deref(),
+            );
+        }
+    }
+    if let Some(extra) = &effective.additional_operations {
+        for (method, op) in extra {
+            let op_path = format!("{path}.additionalOperations[{method}]");
             validate_operation_parameters(
                 ctx,
                 &op_path,
@@ -1357,6 +1370,132 @@ mod tests {
             ctx.errors.is_empty(),
             "unknown prefix ref should stop chain without error: {:?}",
             ctx.errors
+        );
+    }
+
+    #[test]
+    fn querystring_override_at_operation_level_is_valid() {
+        use crate::validation::Validate;
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": { "title": "T", "version": "1.0" },
+            "paths": {
+                "/search": {
+                    "parameters": [
+                        {
+                            "name": "qs",
+                            "in": "querystring",
+                            "content": { "application/x-www-form-urlencoded": {} }
+                        }
+                    ],
+                    "get": {
+                        "parameters": [
+                            {
+                                "name": "qs",
+                                "in": "querystring",
+                                "description": "overridden",
+                                "content": { "application/x-www-form-urlencoded": {} }
+                            }
+                        ],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        assert!(
+            spec.validate(Options::new(), None).is_ok(),
+            "operation overriding path-item querystring param with same name must succeed: {:?}",
+            spec.validate(Options::new(), None)
+        );
+
+        // Two differently-named querystring params across levels still error.
+        let two_qs: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": { "title": "T", "version": "1.0" },
+            "paths": {
+                "/search": {
+                    "parameters": [
+                        {
+                            "name": "qs1",
+                            "in": "querystring",
+                            "content": { "application/x-www-form-urlencoded": {} }
+                        }
+                    ],
+                    "get": {
+                        "parameters": [
+                            {
+                                "name": "qs2",
+                                "in": "querystring",
+                                "content": { "application/x-www-form-urlencoded": {} }
+                            }
+                        ],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        assert!(
+            two_qs
+                .validate(Options::new(), None)
+                .unwrap_err()
+                .mentions("at most one `in: querystring`")
+        );
+
+        // Path-item `in: query` + operation `in: querystring` still errors.
+        let mixed: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": { "title": "T", "version": "1.0" },
+            "paths": {
+                "/search": {
+                    "parameters": [
+                        { "name": "q", "in": "query", "schema": { "type": "string" } }
+                    ],
+                    "get": {
+                        "parameters": [
+                            {
+                                "name": "qs",
+                                "in": "querystring",
+                                "content": { "application/x-www-form-urlencoded": {} }
+                            }
+                        ],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        assert!(
+            mixed
+                .validate(Options::new(), None)
+                .unwrap_err()
+                .mentions("mutually exclusive with `in: query`")
+        );
+    }
+
+    #[test]
+    fn additional_operations_parameters_are_validated() {
+        use crate::validation::Validate;
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": { "title": "T", "version": "1.0" },
+            "paths": {
+                "/items/{id}": {
+                    "additionalOperations": {
+                        "COPY": {
+                            "responses": { "200": { "description": "ok" } }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let err = spec.validate(Options::new(), None).unwrap_err();
+        assert!(
+            err.mentions_all(&["additionalOperations[COPY]", "{id}"]),
+            "missing path param on additionalOperations[COPY] must error: {:?}",
+            err.errors
         );
     }
 }

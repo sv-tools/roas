@@ -397,12 +397,23 @@ impl<D, R: ReferenceObject> RefOr<D, R> {
                 // reached below.
                 r.validate_with_context(ctx, path.clone());
                 let reference = r.reference();
+                if reference.is_empty() {
+                    return;
+                }
                 if !ctx.visit(reference.to_owned()) {
                     return;
                 }
                 if reference.starts_with("#/") {
                     match ctx.spec.resolve_reference(reference) {
-                        Some(d) => d.validate_with_context(ctx, reference.to_owned()),
+                        Some(d) => {
+                            let target = ctx.spec.resolved_reference(reference);
+                            if target != reference {
+                                ctx.visit(target.to_owned());
+                            }
+                            if ctx.mark_validated(target.to_owned()) {
+                                d.validate_with_context(ctx, target.to_owned());
+                            }
+                        }
                         None => ctx.error(path, format_args!(".$ref: `{reference}` not found")),
                     }
                     return;
@@ -1596,5 +1607,20 @@ mod tests {
             _ => panic!(),
         }
         assert!(ctx.conflicts.is_empty());
+    }
+
+    #[test]
+    fn empty_ref_reports_only_must_not_be_empty() {
+        let spec = FooSpec { foo: None };
+        let mut ctx = Context::new(&spec, Options::new());
+        let r: RefOr<Foo> = RefOr::new_ref("");
+        r.validate_with_context(&mut ctx, "#.test".into());
+        assert_eq!(
+            ctx.errors.len(),
+            1,
+            "empty $ref must not duplicate external-ref error: {:?}",
+            ctx.errors
+        );
+        assert!(ctx.errors[0].contains("must not be empty"));
     }
 }

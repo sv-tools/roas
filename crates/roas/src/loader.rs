@@ -620,19 +620,88 @@ fn rewrite_refs_against(value: &mut Value, base: &Url) -> Vec<(usize, String)> {
     originals
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RefWalkCtx {
+    /// Standard OpenAPI / JSON Schema object: fixed keyword fields plus `x-*` extensions.
+    Object,
+    /// User-keyed map (`properties`, `headers`, `components.*`, `definitions`, etc.):
+    /// every entry key is user-chosen (including `default`, `example`, `x-*`) and its
+    /// value is walked as an OpenAPI / JSON Schema object.
+    KeyedMap,
+    /// Map with user/spec keys alongside `x-*` Specification Extensions (`paths`, `responses`).
+    ExtensionBearingMap,
+}
+
 fn visit_refs(value: &mut Value, visitor: &mut impl FnMut(&mut String)) {
+    visit_refs_in(value, RefWalkCtx::Object, visitor);
+}
+
+fn visit_refs_in(value: &mut Value, ctx: RefWalkCtx, visitor: &mut impl FnMut(&mut String)) {
     match value {
         Value::Object(map) => {
-            if let Some(Value::String(s)) = map.get_mut("$ref") {
+            if ctx == RefWalkCtx::Object
+                && let Some(Value::String(s)) = map.get_mut("$ref")
+            {
                 visitor(s);
             }
-            for v in map.values_mut() {
-                visit_refs(v, visitor);
+            for (k, v) in map.iter_mut() {
+                match ctx {
+                    RefWalkCtx::KeyedMap => visit_refs_in(v, RefWalkCtx::Object, visitor),
+                    RefWalkCtx::ExtensionBearingMap => {
+                        if k.starts_with("x-") {
+                            continue;
+                        }
+                        visit_refs_in(v, RefWalkCtx::Object, visitor);
+                    }
+                    RefWalkCtx::Object => {
+                        // Literal instance payloads and `x-*` Specification Extensions
+                        // hold arbitrary user JSON, not OpenAPI Reference Objects.
+                        if matches!(
+                            k.as_str(),
+                            "example" | "default" | "const" | "enum" | "value" | "dataValue"
+                        ) || k.starts_with("x-")
+                        {
+                            continue;
+                        }
+                        // `examples` is a literal JSON array on JSON Schema 2020-12
+                        // objects, but a keyed map of `RefOr<Example>` on OpenAPI
+                        // MediaType / Parameter / Header / Components objects.
+                        if k == "examples" {
+                            if v.is_object() {
+                                visit_refs_in(v, RefWalkCtx::KeyedMap, visitor);
+                            }
+                            continue;
+                        }
+                        let child_ctx = match k.as_str() {
+                            "paths" | "responses" => RefWalkCtx::ExtensionBearingMap,
+                            "properties"
+                            | "patternProperties"
+                            | "dependentSchemas"
+                            | "$defs"
+                            | "definitions"
+                            | "headers"
+                            | "schemas"
+                            | "parameters"
+                            | "requestBodies"
+                            | "securitySchemes"
+                            | "pathItems"
+                            | "mediaTypes"
+                            | "callbacks"
+                            | "links"
+                            | "encoding"
+                            | "webhooks"
+                            | "additionalOperations"
+                            | "content" => RefWalkCtx::KeyedMap,
+                            _ => RefWalkCtx::Object,
+                        };
+                        visit_refs_in(v, child_ctx, visitor);
+                    }
+                }
             }
         }
         Value::Array(items) => {
             for v in items.iter_mut() {
-                visit_refs(v, visitor);
+                visit_refs_in(v, RefWalkCtx::Object, visitor);
             }
         }
         _ => {}
@@ -1549,6 +1618,112 @@ mod tests {
                 LoaderError::InvalidUri { .. } | LoaderError::NoFetcherRegistered { .. }
             ),
             "expected InvalidUri or NoFetcherRegistered, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rewrite_refs_respects_context_for_example_default_and_extensions() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "https://example.test/dir/spec.json",
+                serde_json::json!({
+                    "paths": {
+                        "/pets": {
+                            "get": {
+                                "responses": {
+                                    "default": { "$ref": "./errors.json#/Err" },
+                                    "200": {
+                                        "description": "ok",
+                                        "headers": {
+                                            "x-rate-limit": { "$ref": "./hdrs.json#/Limit" }
+                                        }
+                                    },
+                                    "x-resp-ext": { "$ref": "./literal.json#/RespExt" }
+                                }
+                            }
+                        },
+                        "x-paths-ext": { "$ref": "./literal.json#/PathsExt" }
+                    },
+                    "components": {
+                        "schemas": {
+                            "Obj": {
+                                "type": "object",
+                                "properties": {
+                                    "default": { "$ref": "./props.json#/Default" },
+                                    "example": { "$ref": "./props.json#/Example" },
+                                    "x-request-id": { "$ref": "./props.json#/ReqId" }
+                                },
+                                "example": { "$ref": "./literal.json#/E" },
+                                "examples": [{ "$ref": "./literal.json#/ArrEx" }],
+                                "default": { "$ref": "./literal.json#/D" },
+                                "x-custom": { "$ref": "./literal.json#/X" }
+                            }
+                        },
+                        "examples": {
+                            "default": { "$ref": "./ex.json#/Def" },
+                            "inline": { "value": { "$ref": "./literal.json#/Val" } }
+                        }
+                    }
+                }),
+            )
+            .unwrap();
+        let doc = loader
+            .load_resource("https://example.test/dir/spec.json")
+            .unwrap();
+        // Real OpenAPI `$ref`s in keyed maps / responses.default ARE rewritten.
+        assert_eq!(
+            doc["paths"]["/pets"]["get"]["responses"]["default"]["$ref"],
+            "https://example.test/dir/errors.json#/Err"
+        );
+        assert_eq!(
+            doc["paths"]["/pets"]["get"]["responses"]["200"]["headers"]["x-rate-limit"]["$ref"],
+            "https://example.test/dir/hdrs.json#/Limit"
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["Obj"]["properties"]["default"]["$ref"],
+            "https://example.test/dir/props.json#/Default"
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["Obj"]["properties"]["example"]["$ref"],
+            "https://example.test/dir/props.json#/Example"
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["Obj"]["properties"]["x-request-id"]["$ref"],
+            "https://example.test/dir/props.json#/ReqId"
+        );
+        assert_eq!(
+            doc["components"]["examples"]["default"]["$ref"],
+            "https://example.test/dir/ex.json#/Def"
+        );
+        // Literal payloads and `x-*` extensions are NOT rewritten.
+        assert_eq!(
+            doc["paths"]["/pets"]["get"]["responses"]["x-resp-ext"]["$ref"],
+            "./literal.json#/RespExt"
+        );
+        assert_eq!(
+            doc["paths"]["x-paths-ext"]["$ref"],
+            "./literal.json#/PathsExt"
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["Obj"]["example"]["$ref"],
+            "./literal.json#/E"
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["Obj"]["examples"][0]["$ref"],
+            "./literal.json#/ArrEx"
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["Obj"]["default"]["$ref"],
+            "./literal.json#/D"
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["Obj"]["x-custom"]["$ref"],
+            "./literal.json#/X"
+        );
+        assert_eq!(
+            doc["components"]["examples"]["inline"]["value"]["$ref"],
+            "./literal.json#/Val"
         );
     }
 }

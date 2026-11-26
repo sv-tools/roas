@@ -62,7 +62,7 @@ impl ValidateWithContext<Spec> for Tag {
             doc.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
         // OAS 3.2: a tag may declare a `parent`. The referenced tag MUST
-        // exist in `Spec.tags`, and a tag MUST NOT name itself as parent.
+        // exist in `Spec.tags`, and the parent chain MUST NOT form a cycle.
         if let Some(parent) = &self.parent {
             if parent.is_empty() {
                 ctx.error(format!("{path}.parent"), "must not be empty");
@@ -81,6 +81,26 @@ impl ValidateWithContext<Spec> for Tag {
                     format!("{path}.parent"),
                     format_args!("`{parent}` is not declared in `#/tags`"),
                 );
+            } else if let Some(tags) = &ctx.spec.tags {
+                // Walk ancestor links to detect multi-hop cycles (e.g. A -> B -> A).
+                let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                seen.insert(self.name.as_str());
+                let mut current = parent.as_str();
+                while let Some(ancestor) = tags.iter().find(|t| t.name == current) {
+                    if !seen.insert(current) {
+                        if current == self.name {
+                            ctx.error(
+                                format!("{path}.parent"),
+                                format_args!("tag parent cycle detected involving `{}`", self.name),
+                            );
+                        }
+                        break;
+                    }
+                    let Some(next) = ancestor.parent.as_deref() else {
+                        break;
+                    };
+                    current = next;
+                }
             }
         }
     }
@@ -347,5 +367,116 @@ mod tests {
             "expected empty-parent error: {:?}",
             ctx.errors
         );
+    }
+
+    #[test]
+    fn multi_hop_parent_cycle_errors() {
+        let spec = Spec {
+            tags: Some(vec![
+                Tag {
+                    name: "a".into(),
+                    parent: Some("b".into()),
+                    ..Default::default()
+                },
+                Tag {
+                    name: "b".into(),
+                    parent: Some("a".into()),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        spec.tags.as_ref().unwrap()[0].validate_with_context(&mut ctx, "tags[0]".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("cycle")),
+            "expected cycle error, got: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn used_child_tag_marks_parent_tag_as_used() {
+        use crate::validation::{Options, Validate, ValidationErrorsExt};
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": { "title": "T", "version": "1.0" },
+            "tags": [
+                { "name": "nav", "kind": "nav" },
+                { "name": "pets", "parent": "nav" }
+            ],
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "tags": ["pets"],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        assert!(
+            spec.validate(Options::new(), None).is_ok(),
+            "parent tag of used child tag must not be flagged unused: {:?}",
+            spec.validate(Options::new(), None)
+        );
+
+        // Shared parent (two used children) and dangling parent on a used tag.
+        let spec2: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": { "title": "T", "version": "1.0" },
+            "tags": [
+                { "name": "nav", "kind": "nav" },
+                { "name": "cats", "parent": "nav" },
+                { "name": "dogs", "parent": "nav" },
+                { "name": "orphan", "parent": "ghost" }
+            ],
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "tags": ["cats", "dogs", "orphan"],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let err2 = spec2.validate(Options::new(), None).unwrap_err();
+        assert!(!err2.mentions("unused"), "got: {:?}", err2.errors);
+        assert!(err2.mentions("ghost"), "got: {:?}", err2.errors);
+    }
+
+    #[test]
+    fn lasso_parent_chain_flags_cycle_members_not_entry() {
+        let spec = Spec {
+            tags: Some(vec![
+                Tag {
+                    name: "a".into(),
+                    parent: Some("b".into()),
+                    ..Default::default()
+                },
+                Tag {
+                    name: "b".into(),
+                    parent: Some("c".into()),
+                    ..Default::default()
+                },
+                Tag {
+                    name: "c".into(),
+                    parent: Some("b".into()),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+        let mut ctx_a = Context::new(&spec, crate::validation::Options::new());
+        spec.tags.as_ref().unwrap()[0].validate_with_context(&mut ctx_a, "tags[0]".into());
+        assert!(
+            ctx_a.errors.is_empty(),
+            "entry tag outside cycle should not emit false cycle error: {:?}",
+            ctx_a.errors
+        );
+        let mut ctx_b = Context::new(&spec, crate::validation::Options::new());
+        spec.tags.as_ref().unwrap()[1].validate_with_context(&mut ctx_b, "tags[1]".into());
+        assert!(ctx_b.errors.iter().any(|e| e.contains("cycle")));
     }
 }

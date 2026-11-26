@@ -826,10 +826,49 @@ impl ResolveReference<SecurityScheme> for Spec {
 
 impl ResolveReference<Tag> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Tag> {
-        self.tags.as_ref().and_then(|x| {
-            x.iter()
-                .find(|x| x.name == reference.trim_start_matches("#/tags/"))
-        })
+        let key = reference.strip_prefix("#/tags/")?;
+        self.tags.as_ref()?.iter().find(|x| x.name == key)
+    }
+}
+
+fn walk_path_item_ops<'a>(
+    item: &'a crate::v3_0::path_item::PathItem,
+    location: String,
+    spec: &'a Spec,
+    out: &mut Vec<(&'a crate::v3_0::operation::Operation, String)>,
+    seen_cb: &mut std::collections::HashSet<*const Callback>,
+) {
+    if let Some(operations) = &item.operations {
+        for (method, op) in operations {
+            walk_op(op, format!("{location}.{method}"), spec, out, seen_cb);
+        }
+    }
+}
+
+fn walk_op<'a>(
+    op: &'a crate::v3_0::operation::Operation,
+    op_loc: String,
+    spec: &'a Spec,
+    out: &mut Vec<(&'a crate::v3_0::operation::Operation, String)>,
+    seen_cb: &mut std::collections::HashSet<*const Callback>,
+) {
+    out.push((op, op_loc.clone()));
+    if let Some(cbs) = &op.callbacks {
+        for (cb_name, cb_ref) in cbs {
+            if let Ok(cb) = cb_ref.get_item(spec)
+                && seen_cb.insert(cb as *const Callback)
+            {
+                for (expr, pi) in &cb.paths {
+                    walk_path_item_ops(
+                        pi,
+                        format!("{op_loc}.callbacks[{cb_name}][{expr}]"),
+                        spec,
+                        out,
+                        seen_cb,
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -855,24 +894,49 @@ impl Spec {
             }
         }
 
-        // memorize all operation ids for all paths first, so we can check the links
+        // Memorize all operationIds across paths and callbacks upfront so
+        // Link.operationId checks can resolve targets and document-wide
+        // uniqueness covers callbacks too.
+        let mut found: Vec<(&crate::v3_0::operation::Operation, String)> = Vec::new();
+        let mut seen_cb: std::collections::HashSet<*const Callback> =
+            std::collections::HashSet::new();
         for (name, item) in self.paths.iter() {
-            if let Some(operations) = &item.operations {
-                for (method, operation) in operations.iter() {
-                    if let Some(operation_id) = &operation.operation_id
-                        && !ctx
-                            .visited
-                            .insert(format!("#/paths/operations/{operation_id}"))
-                        && !ctx.is_option(Options::IgnoreNonUniqOperationIDs)
-                    {
-                        ctx.error(
-                            "#".to_owned(),
-                            format!(
-                                ".paths[{name}].{method}.operationId: `{operation_id}` already in use"
-                            ),
+            walk_path_item_ops(
+                item,
+                format!("paths[{name}]"),
+                self,
+                &mut found,
+                &mut seen_cb,
+            );
+        }
+        if let Some(cbs) = self.components.as_ref().and_then(|c| c.callbacks.as_ref()) {
+            for (cb_name, cb_ref) in cbs {
+                if let Ok(cb) = cb_ref.get_item(self)
+                    && seen_cb.insert(cb as *const Callback)
+                {
+                    for (expr, pi) in &cb.paths {
+                        walk_path_item_ops(
+                            pi,
+                            format!("components.callbacks[{cb_name}][{expr}]"),
+                            self,
+                            &mut found,
+                            &mut seen_cb,
                         );
                     }
                 }
+            }
+        }
+        for (operation, location) in found {
+            if let Some(operation_id) = &operation.operation_id
+                && !ctx
+                    .visited
+                    .insert(format!("#/paths/operations/{operation_id}"))
+                && !ctx.is_option(Options::IgnoreNonUniqOperationIDs)
+            {
+                ctx.error(
+                    "#".to_owned(),
+                    format!(".{location}.operationId: `{operation_id}` already in use"),
+                );
             }
         }
 
@@ -2011,5 +2075,68 @@ mod tests {
             "expected empty name error: {:?}",
             err.errors
         );
+    }
+
+    #[test]
+    fn duplicate_operation_id_in_callbacks_and_url_option_scoping() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {
+                "title": "T",
+                "version": "1",
+                "license": { "name": "MIT", "url": "" }
+            },
+            "externalDocs": { "url": "" },
+            "paths": {
+                "/a": {
+                    "post": {
+                        "operationId": "dupOp",
+                        "callbacks": {
+                            "onEvent": {
+                                "{$request.body#/cb}": {
+                                    "post": {
+                                        "operationId": "dupOp",
+                                        "responses": { "200": { "description": "ok" } }
+                                    }
+                                }
+                            }
+                        },
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            },
+            "components": {
+                "callbacks": {
+                    "unusedCb": {
+                        "{$request.body#/u}": {
+                            "post": {
+                                "operationId": "dupOp",
+                                "responses": { "200": { "description": "ok" } }
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let err = spec
+            .validate(
+                IGNORE_UNUSED | Options::IgnoreEmptyExternalDocumentationUrl,
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            err.mentions_all(&["callbacks[onEvent]", "dupOp"]),
+            "duplicate operationId in inline callback must error: {:?}",
+            err.errors
+        );
+        assert!(
+            err.mentions_all(&["components.callbacks[unusedCb]", "dupOp"]),
+            "duplicate operationId in component callback must error: {:?}",
+            err.errors
+        );
+        assert!(!err.mentions("externalDocs.url"));
+        assert!(err.mentions("info.license.url"));
     }
 }

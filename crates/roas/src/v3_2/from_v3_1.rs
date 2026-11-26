@@ -80,9 +80,12 @@ fn transform_spec(spec: &mut Value) {
 
 /// `x-displayName` → `summary` on a tag. 3.2 introduced `summary` as
 /// a first-class field; the Redoc-specific extension is the same
-/// human-readable label.
+/// human-readable label. Non-string values are left untouched as
+/// extensions rather than crashing deserialization into `Option<String>`.
 fn migrate_x_display_name(tag: &mut Map<String, Value>) {
-    if let Some(v) = tag.remove("x-displayName") {
+    if tag.get("x-displayName").is_some_and(Value::is_string)
+        && let Some(v) = tag.remove("x-displayName")
+    {
         // Don't clobber a `summary` the user already declared.
         tag.entry("summary").or_insert(v);
     }
@@ -620,6 +623,27 @@ mod tests {
         assert_eq!(
             super::string(Value::String("hello".into())),
             Some("hello".to_owned())
+        );
+    }
+
+    #[test]
+    fn non_string_x_display_name_is_preserved_without_crashing() {
+        let mut raw = serde_json::json!({
+            "openapi": "3.1.2",
+            "info": { "title": "T", "version": "1.0" },
+            "paths": {},
+            "tags": [
+                { "name": "pets", "x-displayName": { "en": "Pets" } }
+            ]
+        });
+        super::transform_spec(&mut raw);
+        let v32: V32Spec = serde_json::from_value(raw)
+            .expect("non-string x-displayName must not crash v3.2 deserialization");
+        let tag = &v32.tags.as_ref().unwrap()[0];
+        assert_eq!(tag.summary, None);
+        assert_eq!(
+            tag.extensions.as_ref().and_then(|e| e.get("x-displayName")),
+            Some(&serde_json::json!({ "en": "Pets" }))
         );
     }
 }

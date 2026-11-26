@@ -888,10 +888,8 @@ impl ResolveReference<SecurityScheme> for Spec {
 
 impl ResolveReference<Tag> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Tag> {
-        self.tags.as_ref().and_then(|x| {
-            x.iter()
-                .find(|x| x.name == reference.trim_start_matches("#/tags/"))
-        })
+        let key = reference.strip_prefix("#/tags/")?;
+        self.tags.as_ref()?.iter().find(|x| x.name == key)
     }
 }
 

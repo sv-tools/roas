@@ -623,6 +623,25 @@ impl Spec {
         })
     }
 
+    /// Insert a media type under `#/components/mediaTypes/{name}` and return a `$ref` pointing to it.
+    ///
+    /// Returns an error if `name` does not match `^[a-zA-Z0-9.\-_]+$`.
+    pub fn define_media_type(
+        &mut self,
+        name: impl Into<String>,
+        media_type: crate::v3_2::media_type::MediaType,
+    ) -> Result<RefOr<crate::v3_2::media_type::MediaType>, InvalidComponentName> {
+        let name = name.into();
+        check_component_name(&name)?;
+        let reference = format!("#/components/mediaTypes/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .media_types
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(media_type));
+        Ok(RefOr::new_ref(reference))
+    }
+
     /// Lift the reusable inline components in the document into
     /// their matching `components.<bag>`, replacing each inline
     /// location with a `RefOr::Ref` to the new component. This
@@ -864,10 +883,8 @@ impl ResolveReference<SecurityScheme> for Spec {
 
 impl ResolveReference<Tag> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Tag> {
-        self.tags.as_ref().and_then(|x| {
-            x.iter()
-                .find(|x| x.name == reference.trim_start_matches("#/tags/"))
-        })
+        let key = reference.strip_prefix("#/tags/")?;
+        self.tags.as_ref()?.iter().find(|x| x.name == key)
     }
 }
 
@@ -1110,6 +1127,30 @@ impl Spec {
 
         if let Some(tags) = &self.tags {
             validate_tag_uniqueness(&mut ctx, tags);
+            // A used child tag implies its ancestor `parent` tags are also in
+            // use (e.g. `kind: "nav"` hierarchy groups), so propagate visits
+            // up the parent chain and validate newly-reached parents before
+            // running unused-tag detection.
+            let initially_used: Vec<usize> = tags
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| ctx.is_visited(&format!("#/tags/{}", t.name)))
+                .map(|(i, _)| i)
+                .collect();
+            for start in initially_used {
+                let mut current = tags[start].parent.as_deref();
+                while let Some(parent_name) = current {
+                    let Some(parent_tag) = tags.iter().find(|t| t.name == parent_name) else {
+                        break;
+                    };
+                    let parent_ref = format!("#/tags/{}", parent_tag.name);
+                    if !ctx.visit(parent_ref.clone()) {
+                        break;
+                    }
+                    parent_tag.validate_with_context(&mut ctx, parent_ref);
+                    current = parent_tag.parent.as_deref();
+                }
+            }
             for tag in tags.iter() {
                 let path = format!("#/tags/{}", tag.name);
                 validate_not_visited(tag, &mut ctx, Options::IgnoreUnusedTags, path);

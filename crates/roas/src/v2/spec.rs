@@ -397,13 +397,22 @@ impl Spec {
     }
 }
 
+fn encode_pointer_key(key: &str) -> String {
+    key.replace('~', "~0").replace('/', "~1")
+}
+
+fn decode_pointer_key(reference: &str, prefix: &str) -> Option<String> {
+    let raw = reference.strip_prefix(prefix)?;
+    if raw.contains('/') {
+        return None;
+    }
+    Some(raw.replace("~1", "/").replace("~0", "~"))
+}
+
 impl ResolveReference<ObjectSchema> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&ObjectSchema> {
-        if let Schema::Object(schema) = self
-            .definitions
-            .as_ref()
-            .and_then(|x| x.get(reference.trim_start_matches("#/definitions/")))?
-        {
+        let key = decode_pointer_key(reference, "#/definitions/")?;
+        if let Schema::Object(schema) = self.definitions.as_ref()?.get(&key)? {
             Some(schema)
         } else {
             None
@@ -413,9 +422,8 @@ impl ResolveReference<ObjectSchema> for Spec {
 
 impl ResolveReference<Parameter> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Parameter> {
-        self.parameters
-            .as_ref()
-            .and_then(|x| x.get(reference.trim_start_matches("#/parameters/")))
+        let key = decode_pointer_key(reference, "#/parameters/")?;
+        self.parameters.as_ref()?.get(&key)
     }
 }
 
@@ -536,26 +544,22 @@ impl Spec {
 
 impl ResolveReference<Response> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Response> {
-        self.responses
-            .as_ref()
-            .and_then(|x| x.get(reference.trim_start_matches("#/responses/")))
+        let key = decode_pointer_key(reference, "#/responses/")?;
+        self.responses.as_ref()?.get(&key)
     }
 }
 
 impl ResolveReference<SecurityScheme> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&SecurityScheme> {
-        self.security_definitions
-            .as_ref()
-            .and_then(|x| x.get(reference.trim_start_matches("#/securityDefinitions/")))
+        let key = decode_pointer_key(reference, "#/securityDefinitions/")?;
+        self.security_definitions.as_ref()?.get(&key)
     }
 }
 
 impl ResolveReference<Tag> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Tag> {
-        self.tags
-            .iter()
-            .flatten()
-            .find(|tag| tag.name == reference.trim_start_matches("#/tags/"))
+        let key = reference.strip_prefix("#/tags/")?;
+        self.tags.iter().flatten().find(|tag| tag.name == key)
     }
 }
 
@@ -609,6 +613,10 @@ impl Spec {
             validate_unique_by(security, &mut ctx, "#.security".to_owned(), |r| r.clone());
         }
 
+        // Equivalent-template detection: `/pets/{id}` and `/pets/{name}`
+        // collapse to the same canonical shape.
+        crate::v2::validation::validate_path_template_uniqueness(&mut ctx, &self.paths.paths);
+
         // Validate paths operations and the new path-template / parameter rules.
         for (name, item) in self.paths.iter() {
             let path = format!("#.paths[{name}]");
@@ -654,21 +662,21 @@ impl Spec {
 
         if let Some(definitions) = &self.definitions {
             for (name, definition) in definitions.iter() {
-                let path = format!("#/definitions/{name}");
+                let path = format!("#/definitions/{}", encode_pointer_key(name));
                 validate_not_visited(definition, &mut ctx, Options::IgnoreUnusedSchemas, path);
             }
         }
 
         if let Some(parameters) = &self.parameters {
             for (name, parameter) in parameters.iter() {
-                let path = format!("#/parameters/{name}");
+                let path = format!("#/parameters/{}", encode_pointer_key(name));
                 validate_not_visited(parameter, &mut ctx, Options::IgnoreUnusedParameters, path);
             }
         }
 
         if let Some(responses) = &self.responses {
             for (name, response) in responses.iter() {
-                let path = format!("#/responses/{name}");
+                let path = format!("#/responses/{}", encode_pointer_key(name));
                 validate_not_visited(response, &mut ctx, Options::IgnoreUnusedResponses, path);
             }
         }
@@ -1869,6 +1877,148 @@ mod tests {
         assert!(
             leftover.iter().all(|s| !s.contains("already exists")),
             "IgnoreNonUniqOperationIDs must suppress the duplicate, got: {leftover:?}",
+        );
+    }
+
+    #[test]
+    fn equivalent_path_templates_operation_external_docs_and_url_option_scoping() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "swagger": "2.0",
+            "info": {
+                "title": "T",
+                "version": "1",
+                "license": { "name": "MIT", "url": "" }
+            },
+            "paths": {
+                "/pets/{id}": {
+                    "get": {
+                        "parameters": [
+                            { "name": "id", "in": "path", "required": true, "type": "string" }
+                        ],
+                        "externalDocs": { "url": "" },
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                },
+                "/pets/{name}": {
+                    "get": {
+                        "parameters": [
+                            { "name": "name", "in": "path", "required": true, "type": "string" }
+                        ],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        // Without IgnoreEmptyExternalDocumentationUrl: both externalDocs.url
+        // and info.license.url error, plus equivalent templated paths.
+        let err = spec.validate(Options::new(), None).unwrap_err();
+        assert!(err.mentions("collapse to the same shape"));
+        assert!(err.mentions("externalDocs.url"));
+        assert!(err.mentions("info.license.url"));
+
+        // With IgnoreEmptyExternalDocumentationUrl: externalDocs.url is
+        // silenced, while info.license.url still errors!
+        let err_ignored = spec
+            .validate(Options::IgnoreEmptyExternalDocumentationUrl.only(), None)
+            .unwrap_err();
+        assert!(!err_ignored.mentions("externalDocs.url"));
+        assert!(err_ignored.mentions("info.license.url"));
+    }
+
+    #[test]
+    fn resolve_reference_requires_exact_prefix_and_unescapes_pointer() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "T", "version": "1" },
+            "paths": {},
+            "definitions": {
+                "a/b~c": { "type": "object" }
+            },
+            "parameters": {
+                "p": { "name": "p", "in": "query", "type": "string" }
+            },
+            "responses": {
+                "r": { "description": "ok" }
+            },
+            "securityDefinitions": {
+                "s": { "type": "basic" }
+            },
+            "tags": [ { "name": "t" } ]
+        }))
+        .unwrap();
+
+        assert!(
+            <Spec as ResolveReference<ObjectSchema>>::resolve_reference(
+                &spec,
+                "#/definitions/a~1b~0c"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<ObjectSchema>>::resolve_reference(&spec, "a~1b~0c").is_none()
+        );
+        assert!(
+            <Spec as ResolveReference<ObjectSchema>>::resolve_reference(&spec, "#/definitions/a/b")
+                .is_none()
+        );
+        assert!(
+            <Spec as ResolveReference<Parameter>>::resolve_reference(&spec, "#/parameters/p")
+                .is_some()
+        );
+        assert!(<Spec as ResolveReference<Parameter>>::resolve_reference(&spec, "p").is_none());
+        assert!(
+            <Spec as ResolveReference<Response>>::resolve_reference(&spec, "#/responses/r")
+                .is_some()
+        );
+        assert!(<Spec as ResolveReference<Response>>::resolve_reference(&spec, "r").is_none());
+        assert!(
+            <Spec as ResolveReference<SecurityScheme>>::resolve_reference(
+                &spec,
+                "#/securityDefinitions/s"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<SecurityScheme>>::resolve_reference(&spec, "s").is_none()
+        );
+        assert!(<Spec as ResolveReference<Tag>>::resolve_reference(&spec, "#/tags/t").is_some());
+        assert!(<Spec as ResolveReference<Tag>>::resolve_reference(&spec, "t").is_none());
+
+        // Escaped keys referenced by `~1`/`~0` pointers must be recognized as
+        // visited during unused-component detection.
+        let escaped_spec: Spec = serde_json::from_value(serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "T", "version": "1" },
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "parameters": [{ "$ref": "#/parameters/a~1b" }],
+                        "responses": {
+                            "200": { "$ref": "#/responses/r~01" }
+                        }
+                    }
+                }
+            },
+            "definitions": {
+                "a/b~c": { "type": "object" }
+            },
+            "parameters": {
+                "a/b": { "name": "x", "in": "query", "type": "string" }
+            },
+            "responses": {
+                "r~1": {
+                    "description": "ok",
+                    "schema": { "$ref": "#/definitions/a~1b~0c" }
+                }
+            }
+        }))
+        .unwrap();
+        assert!(
+            escaped_spec.validate(Options::new(), None).is_ok(),
+            "escaped v2 refs must not trigger false unused errors: {:?}",
+            escaped_spec.validate(Options::new(), None)
         );
     }
 }
