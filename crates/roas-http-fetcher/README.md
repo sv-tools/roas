@@ -7,7 +7,7 @@ HTTP/HTTPS [`ResourceFetcher`](https://docs.rs/roas/latest/roas/loader/trait.Res
 [![crates.io](https://img.shields.io/crates/v/roas-http-fetcher.svg)](https://crates.io/crates/roas-http-fetcher)
 [![docs.rs](https://docs.rs/roas-http-fetcher/badge.svg)](https://docs.rs/roas-http-fetcher)
 
-Built on `reqwest` with `rustls-tls`. A single generic `Fetcher<C>` underlies two type aliases:
+Built on `reqwest` with `native-tls`. A single generic `Fetcher<C>` underlies two type aliases:
 
 - `HttpFetcher` (= `Fetcher<reqwest::blocking::Client>`) — implements `ResourceFetcher` for `Loader::register_fetcher`.
 - `AsyncHttpFetcher` (= `Fetcher<reqwest::Client>`) — implements `AsyncResourceFetcher` for `Loader::register_async_fetcher`. A tokio runtime must be active when the returned future is awaited.
