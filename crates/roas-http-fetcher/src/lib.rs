@@ -24,6 +24,7 @@ use reqwest::Client as AsyncClient;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_TYPE, HeaderMap};
+use reqwest::redirect::Policy as RedirectPolicy;
 use roas::loader::{
     AsyncResourceFetcher, DocumentFetchFuture, FetchFuture, LoadedDocument, LoaderError,
     ResourceFetcher,
@@ -31,10 +32,47 @@ use roas::loader::{
 #[cfg(feature = "yaml")]
 use serde::de::Error as _;
 use serde_json::Value;
+use std::io::Read as _;
 use std::time::Duration;
 use url::Url;
 
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default response body cap (64 MiB), matching the YAML scalar budget so an
+/// untrusted server cannot OOM the caller before parsing begins.
+pub const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+const MAX_REDIRECTS: usize = 10;
+
+/// Decide whether a redirect hop is allowed: up to [`MAX_REDIRECTS`] hops,
+/// staying on `http`/`https`, and refusing HTTPS → HTTP downgrades.
+///
+/// `previous` matches `reqwest::redirect::Attempt::previous()` (it includes
+/// the initial request URL as element 0, so the Nth redirect sees `previous.len() == N`).
+fn check_redirect(next: &Url, previous: &[Url]) -> Result<(), &'static str> {
+    if previous.len() > MAX_REDIRECTS {
+        return Err("too many redirects");
+    }
+    let next_scheme = next.scheme();
+    if !matches!(next_scheme, "http" | "https") {
+        return Err("refusing redirect to non-HTTP(S) scheme");
+    }
+    if next_scheme == "http" && previous.iter().any(|u| u.scheme() == "https") {
+        return Err("refusing HTTPS to HTTP redirect downgrade");
+    }
+    Ok(())
+}
+
+/// Default redirect policy: allow up to 10 hops, stay on `http`/`https`, and
+/// refuse HTTPS → HTTP scheme downgrades.
+fn default_redirect_policy() -> RedirectPolicy {
+    RedirectPolicy::custom(
+        |attempt| match check_redirect(attempt.url(), attempt.previous()) {
+            Ok(()) => attempt.follow(),
+            Err(reason) => attempt.error(reason),
+        },
+    )
+}
 
 /// HTTP/HTTPS fetcher generic over the underlying `reqwest` client.
 ///
@@ -46,9 +84,44 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// The struct is `Clone` (the underlying `reqwest` client is `Arc`-backed),
 /// so a single fetcher can be registered for both `http://` and `https://`
 /// prefixes on the same `Loader`, sharing one connection pool.
+///
+/// # Security considerations
+///
+/// The default client caps response bodies at [`DEFAULT_MAX_BODY_BYTES`]
+/// (64 MiB), refuses HTTPS → HTTP redirect downgrades, and sets connect and
+/// total request timeouts, but it does **not** restrict destination IP ranges
+/// (SSRF) or follow private-network allowlists. When fetching untrusted URLs,
+/// supply a custom `reqwest` client via `with_client` (e.g. with redirects
+/// disabled or a custom DNS resolver) and enforce URL allowlists before
+/// passing URIs to the loader.
+///
+/// # Blocking fetcher inside Tokio
+///
+/// [`HttpFetcher`] uses `reqwest::blocking::Client`, which panics if dropped
+/// or used directly inside an active Tokio async runtime thread. Use
+/// [`AsyncHttpFetcher`] inside async code, or run [`HttpFetcher`] on a
+/// dedicated blocking thread.
 #[derive(Clone, Debug)]
 pub struct Fetcher<C> {
     client: C,
+    max_body_bytes: usize,
+}
+
+impl<C> Fetcher<C> {
+    /// Override the maximum response body size in bytes (default:
+    /// [`DEFAULT_MAX_BODY_BYTES`], 64 MiB). Responses exceeding this limit
+    /// fail with [`HttpFetchError::BodyTooLarge`].
+    #[must_use]
+    pub fn with_max_body_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_body_bytes = max_bytes;
+        self
+    }
+
+    /// The configured response body size cap in bytes.
+    #[must_use]
+    pub fn max_body_bytes(&self) -> usize {
+        self.max_body_bytes
+    }
 }
 
 /// Blocking HTTP/HTTPS fetcher, suitable for
@@ -61,8 +134,10 @@ pub type HttpFetcher = Fetcher<Client>;
 pub type AsyncHttpFetcher = Fetcher<AsyncClient>;
 
 impl Fetcher<Client> {
-    /// Build a blocking HTTP fetcher with a default `native-tls` client and a
-    /// 30-second request timeout.
+    /// Build a blocking HTTP fetcher with a default `native-tls` client
+    /// (10-second connect timeout, 30-second request timeout, up to 10
+    /// non-downgrading HTTP(S) redirects, and [`DEFAULT_MAX_BODY_BYTES`]
+    /// response body cap).
     ///
     /// Panics if the default `reqwest::blocking::Client` cannot be built.
     /// See [`try_new`](Self::try_new) for a fallible variant.
@@ -74,7 +149,11 @@ impl Fetcher<Client> {
     /// environment failures from the underlying `ClientBuilder`.
     pub fn try_new() -> Result<Self, reqwest::Error> {
         Ok(Self::with_client(
-            Client::builder().timeout(DEFAULT_TIMEOUT).build()?,
+            Client::builder()
+                .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+                .timeout(DEFAULT_TIMEOUT)
+                .redirect(default_redirect_policy())
+                .build()?,
         ))
     }
 
@@ -82,7 +161,10 @@ impl Fetcher<Client> {
     /// Use this to override timeouts, redirect policy, TLS config, or proxy
     /// settings.
     pub fn with_client(client: Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+        }
     }
 
     /// [`ResourceFetcher::fetch_document`], also returning the body the
@@ -92,7 +174,7 @@ impl Fetcher<Client> {
         &mut self,
         uri: &Url,
     ) -> Result<(LoadedDocument, String), LoaderError> {
-        let (retrieval, content_type, bytes) = get(&self.client, uri)?;
+        let (retrieval, content_type, bytes) = get(&self.client, uri, self.max_body_bytes)?;
         with_text(uri, retrieval, content_type.as_deref(), bytes)
     }
 }
@@ -104,8 +186,10 @@ impl Default for Fetcher<Client> {
 }
 
 impl Fetcher<AsyncClient> {
-    /// Build an async HTTP fetcher with a default `native-tls` client and a
-    /// 30-second request timeout.
+    /// Build an async HTTP fetcher with a default `native-tls` client
+    /// (10-second connect timeout, 30-second request timeout, up to 10
+    /// non-downgrading HTTP(S) redirects, and [`DEFAULT_MAX_BODY_BYTES`]
+    /// response body cap).
     ///
     /// Panics if the default `reqwest::Client` cannot be built. See
     /// [`try_new`](Self::try_new) for a fallible variant.
@@ -117,14 +201,21 @@ impl Fetcher<AsyncClient> {
     /// environment failures from the underlying `ClientBuilder`.
     pub fn try_new() -> Result<Self, reqwest::Error> {
         Ok(Self::with_client(
-            AsyncClient::builder().timeout(DEFAULT_TIMEOUT).build()?,
+            AsyncClient::builder()
+                .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+                .timeout(DEFAULT_TIMEOUT)
+                .redirect(default_redirect_policy())
+                .build()?,
         ))
     }
 
     /// Build a fetcher from a caller-provided `reqwest::Client`. Use this to
     /// override timeouts, redirect policy, TLS config, or proxy settings.
     pub fn with_client(client: AsyncClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+        }
     }
 
     /// [`AsyncResourceFetcher::fetch_document`], also returning the body
@@ -134,7 +225,8 @@ impl Fetcher<AsyncClient> {
         &mut self,
         uri: &Url,
     ) -> Result<(LoadedDocument, String), LoaderError> {
-        let (retrieval, content_type, bytes) = get_async(&self.client, uri).await?;
+        let (retrieval, content_type, bytes) =
+            get_async(&self.client, uri, self.max_body_bytes).await?;
         with_text(uri, retrieval, content_type.as_deref(), bytes)
     }
 }
@@ -151,7 +243,7 @@ impl ResourceFetcher for Fetcher<Client> {
     }
 
     fn fetch_document(&mut self, uri: &Url) -> Result<LoadedDocument, LoaderError> {
-        let (retrieval, content_type, bytes) = get(&self.client, uri)?;
+        let (retrieval, content_type, bytes) = get(&self.client, uri, self.max_body_bytes)?;
         parse_body(uri, &retrieval, content_type.as_deref(), &bytes)
             .map(|document| LoadedDocument::new(document, retrieval))
     }
@@ -164,8 +256,9 @@ impl AsyncResourceFetcher for Fetcher<AsyncClient> {
 
     fn fetch_document<'a>(&'a mut self, uri: &'a Url) -> DocumentFetchFuture<'a> {
         let client = self.client.clone();
+        let max_body_bytes = self.max_body_bytes;
         Box::pin(async move {
-            let (retrieval, content_type, bytes) = get_async(&client, uri).await?;
+            let (retrieval, content_type, bytes) = get_async(&client, uri, max_body_bytes).await?;
             parse_body(uri, &retrieval, content_type.as_deref(), &bytes)
                 .map(|document| LoadedDocument::new(document, retrieval))
         })
@@ -176,31 +269,86 @@ impl AsyncResourceFetcher for Fetcher<AsyncClient> {
 /// end, its `Content-Type`, and its body.
 type Fetched = (Url, Option<String>, Vec<u8>);
 
-fn get(client: &Client, uri: &Url) -> Result<Fetched, LoaderError> {
+fn get(client: &Client, uri: &Url, max_body_bytes: usize) -> Result<Fetched, LoaderError> {
     check_scheme(uri)?;
     let response = client.get(uri.as_str()).send().map_err(|source| {
         fetch_error(uri.as_str().to_string(), HttpFetchError::Request { source })
     })?;
     let (retrieval, content_type) =
         accepted(uri, response.status(), response.headers(), response.url())?;
-    let bytes = response
-        .bytes()
-        .map_err(|source| fetch_error(uri.as_str().to_string(), HttpFetchError::Body { source }))?;
-    Ok((retrieval, content_type, bytes.into()))
+    if response
+        .content_length()
+        .is_some_and(|len| len > max_body_bytes as u64)
+    {
+        return Err(fetch_error(
+            uri.as_str().to_string(),
+            HttpFetchError::BodyTooLarge {
+                limit: max_body_bytes,
+            },
+        ));
+    }
+    let mut bytes = Vec::new();
+    let cap = (max_body_bytes as u64).saturating_add(1);
+    response
+        .take(cap)
+        .read_to_end(&mut bytes)
+        .map_err(|source| {
+            fetch_error(uri.as_str().to_string(), HttpFetchError::BodyIo { source })
+        })?;
+    if bytes.len() > max_body_bytes {
+        return Err(fetch_error(
+            uri.as_str().to_string(),
+            HttpFetchError::BodyTooLarge {
+                limit: max_body_bytes,
+            },
+        ));
+    }
+    Ok((retrieval, content_type, bytes))
 }
 
-async fn get_async(client: &AsyncClient, uri: &Url) -> Result<Fetched, LoaderError> {
+async fn get_async(
+    client: &AsyncClient,
+    uri: &Url,
+    max_body_bytes: usize,
+) -> Result<Fetched, LoaderError> {
     check_scheme(uri)?;
-    let response = client.get(uri.as_str()).send().await.map_err(|source| {
+    let mut response = client.get(uri.as_str()).send().await.map_err(|source| {
         fetch_error(uri.as_str().to_string(), HttpFetchError::Request { source })
     })?;
     let (retrieval, content_type) =
         accepted(uri, response.status(), response.headers(), response.url())?;
-    let bytes = response
-        .bytes()
+    if response
+        .content_length()
+        .is_some_and(|len| len > max_body_bytes as u64)
+    {
+        return Err(fetch_error(
+            uri.as_str().to_string(),
+            HttpFetchError::BodyTooLarge {
+                limit: max_body_bytes,
+            },
+        ));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|source| fetch_error(uri.as_str().to_string(), HttpFetchError::Body { source }))?;
-    Ok((retrieval, content_type, bytes.into()))
+        .map_err(|source| fetch_error(uri.as_str().to_string(), HttpFetchError::Body { source }))?
+    {
+        if bytes
+            .len()
+            .checked_add(chunk.len())
+            .is_none_or(|n| n > max_body_bytes)
+        {
+            return Err(fetch_error(
+                uri.as_str().to_string(),
+                HttpFetchError::BodyTooLarge {
+                    limit: max_body_bytes,
+                },
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok((retrieval, content_type, bytes))
 }
 
 /// A successful response's final location and `Content-Type`, or the
@@ -271,7 +419,10 @@ fn parse_body(
 /// decision is `Content-Type`-first, URL-extension-second:
 ///   1. `Content-Type` containing `yaml` (covers `application/yaml`,
 ///      `application/x-yaml`, `text/yaml`, `text/x-yaml`, etc.).
-///   2. URL path ending in `.yaml` or `.yml`.
+///   2. When `Content-Type` is absent, empty, `application/octet-stream`, or
+///      `text/plain` (as served by raw file hosts such as
+///      `raw.githubusercontent.com`), fall back to the URL path extension
+///      (`.yaml` / `.yml`, including percent-encoded characters).
 #[allow(unused_variables)]
 fn is_yaml(content_type: Option<&str>, uri: &Url) -> bool {
     #[cfg(feature = "yaml")]
@@ -286,16 +437,49 @@ fn is_yaml(content_type: Option<&str>, uri: &Url) -> bool {
             if mime.contains("yaml") {
                 return true;
             }
-            if !mime.is_empty() && mime != "application/octet-stream" {
+            if !mime.is_empty() && mime != "application/octet-stream" && mime != "text/plain" {
                 return false;
             }
         }
-        let path = uri.path().to_ascii_lowercase();
-        path.ends_with(".yaml") || path.ends_with(".yml")
+        has_yaml_extension(uri.path())
     }
     #[cfg(not(feature = "yaml"))]
     {
         false
+    }
+}
+
+/// Check whether a URL path ends in `.yaml` or `.yml` (case-insensitive),
+/// decoding ASCII percent-escapes in the final segment so e.g. `spec%2eyaml`
+/// is recognized.
+#[cfg(feature = "yaml")]
+fn has_yaml_extension(path: &str) -> bool {
+    let segment = path.rsplit('/').next().unwrap_or(path);
+    let mut decoded = Vec::with_capacity(segment.len());
+    let bytes = segment.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
+        {
+            decoded.push(((hi << 4) | lo).to_ascii_lowercase());
+            i += 3;
+            continue;
+        }
+        decoded.push(bytes[i].to_ascii_lowercase());
+        i += 1;
+    }
+    decoded.ends_with(b".yaml") || decoded.ends_with(b".yml")
+}
+
+#[cfg(feature = "yaml")]
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -387,12 +571,24 @@ pub enum HttpFetchError {
     #[error("non-success HTTP response: {status}")]
     Status { status: StatusCode },
 
-    /// The response headers came back fine but the body could not be read.
+    /// Reading the async response body failed after headers were received.
+    /// (Blocking body read failures return [`HttpFetchError::BodyIo`].)
     #[error("failed to read response body")]
     Body {
         #[source]
         source: reqwest::Error,
     },
+
+    /// Reading the blocking response body failed with an I/O error.
+    #[error("failed to read response body")]
+    BodyIo {
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The response body exceeded the configured maximum byte limit.
+    #[error("response body exceeds maximum size limit of {limit} bytes")]
+    BodyTooLarge { limit: usize },
 }
 
 fn fetch_error(uri: String, source: HttpFetchError) -> LoaderError {
@@ -662,5 +858,67 @@ mod tests {
         let err = check_scheme(&Url::parse("file:///tmp/x.json").unwrap())
             .expect_err("file:// must be rejected");
         assert!(matches!(err, LoaderError::UnsupportedFetcherUri(s) if s.starts_with("file://")));
+    }
+
+    #[test]
+    fn max_body_bytes_builder_sets_limit() {
+        let f = HttpFetcher::new().with_max_body_bytes(1024);
+        assert_eq!(f.max_body_bytes(), 1024);
+        let af = AsyncHttpFetcher::new().with_max_body_bytes(2048);
+        assert_eq!(af.max_body_bytes(), 2048);
+        let err = HttpFetchError::BodyTooLarge { limit: 1024 };
+        assert!(err.to_string().contains("1024"));
+        let io_err = HttpFetchError::BodyIo {
+            source: std::io::Error::other("truncated"),
+        };
+        assert!(io_err.to_string().contains("response body"));
+    }
+
+    #[test]
+    fn check_redirect_enforces_hop_cap_scheme_and_no_downgrade() {
+        let http = Url::parse("http://example.test/a").unwrap();
+        let https = Url::parse("https://example.test/a").unwrap();
+        let file = Url::parse("file:///etc/passwd").unwrap();
+
+        // Exactly 10 redirects (`previous.len() == 10`) is allowed; the 11th fails.
+        assert!(check_redirect(&http, &vec![http.clone(); 10]).is_ok());
+        assert_eq!(
+            check_redirect(&http, &vec![http.clone(); 11]),
+            Err("too many redirects")
+        );
+        // Non-HTTP(S) schemes are refused.
+        assert_eq!(
+            check_redirect(&file, std::slice::from_ref(&http)),
+            Err("refusing redirect to non-HTTP(S) scheme")
+        );
+        // HTTPS -> HTTP downgrade is refused (even after intermediate hops),
+        // while HTTP -> HTTPS upgrade is allowed.
+        assert_eq!(
+            check_redirect(&http, std::slice::from_ref(&https)),
+            Err("refusing HTTPS to HTTP redirect downgrade")
+        );
+        assert!(check_redirect(&https, &[http]).is_ok());
+    }
+
+    #[cfg(feature = "yaml")]
+    #[test]
+    fn is_yaml_sniffs_text_plain_and_percent_encoded_extensions() {
+        let yaml_url =
+            Url::parse("https://raw.githubusercontent.com/org/repo/main/spec.yaml").unwrap();
+        let encoded_lower = Url::parse("https://example.test/dir/spec%2eyaml").unwrap();
+        let encoded_upper = Url::parse("https://example.test/dir/spec%2EYAML").unwrap();
+        let bad_escape = Url::parse("https://example.test/dir/spec%ZZ.yml").unwrap();
+        let trailing_pct = Url::parse("https://example.test/dir/spec%2").unwrap();
+        let json_url = Url::parse("https://example.test/spec.json").unwrap();
+        assert!(is_yaml(Some("text/plain; charset=utf-8"), &yaml_url));
+        assert!(is_yaml(Some("text/plain"), &encoded_lower));
+        assert!(is_yaml(Some("text/plain"), &encoded_upper));
+        assert!(is_yaml(None, &bad_escape));
+        assert!(!is_yaml(None, &trailing_pct));
+        assert!(!is_yaml(Some("text/plain"), &json_url));
+        assert!(!is_yaml(Some("application/json"), &yaml_url));
+        assert!(is_yaml(Some("application/yaml; charset=utf-8"), &json_url));
+        assert!(is_yaml(Some(""), &yaml_url));
+        assert!(is_yaml(None, &encoded_lower));
     }
 }

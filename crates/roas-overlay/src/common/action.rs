@@ -103,7 +103,10 @@ pub(crate) fn apply_action(
     if selects_primitive && primitives.are_rejected() {
         return Err(err(ApplyErrorKind::PrimitiveActionTarget));
     }
-    if options.contains(ApplyOptions::ErrorOnMixedKindMatch) && !uniform_kinds(&kinds) {
+    if !action.remove
+        && options.contains(ApplyOptions::ErrorOnMixedKindMatch)
+        && !uniform_kinds(&kinds)
+    {
         return Err(err(ApplyErrorKind::MixedKindMatch));
     }
 

@@ -478,15 +478,20 @@ fn resolve(path: &Path) -> Option<PathBuf> {
 /// Resolve `.` and `..` lexically: `std::path::absolute` keeps them, and
 /// `pets/../out` must compare equal to `out`.
 fn normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                if !out.pop() {
-                    out.push("..");
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
                 }
-            }
+                // Never climb above `/` or a Windows drive/UNC prefix.
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                Some(Component::ParentDir) | None => out.push(".."),
+                Some(Component::CurDir) => unreachable!("CurDir is never pushed"),
+            },
             other => out.push(other),
         }
     }
@@ -2260,5 +2265,13 @@ mod tests {
             .expect_err("existing directory at leaf must be rejected")
             .to_string();
         assert!(err.contains("is a directory"), "{err}");
+    }
+
+    #[test]
+    fn normalize_never_climbs_past_root_and_preserves_leading_relative_parents() {
+        assert_eq!(normalize(Path::new("/../a/./b/../c")), Path::new("/a/c"));
+        assert_eq!(normalize(Path::new("/../../x")), Path::new("/x"));
+        assert_eq!(normalize(Path::new("../a/../b")), Path::new("../b"));
+        assert_eq!(normalize(Path::new("a/../../b")), Path::new("../b"));
     }
 }

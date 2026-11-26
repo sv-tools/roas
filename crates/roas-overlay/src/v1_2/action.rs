@@ -31,7 +31,7 @@ pub struct Action {
     /// `Some(Value::Null)`.
     #[serde(
         default,
-        deserialize_with = "present_value",
+        deserialize_with = "crate::common::apply::present_value",
         skip_serializing_if = "Option::is_none"
     )]
     pub update: Option<Value>,
@@ -68,13 +68,6 @@ impl Action {
     pub fn has_operation(&self) -> bool {
         self.is_remove() || self.update.is_some() || self.copy.is_some()
     }
-}
-
-/// Deserialize a field that is present as `Some`, `null` included, so
-/// an explicit `update: null` is told apart from a missing `update`;
-/// pair with `#[serde(default)]` for the missing case.
-pub(crate) fn present_value<'de, D: Deserializer<'de>>(de: D) -> Result<Option<Value>, D::Error> {
-    Value::deserialize(de).map(Some)
 }
 
 /// Record the diagnostics `update`, `copy` and `remove` raise on their

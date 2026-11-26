@@ -73,7 +73,7 @@ pub struct ActionOutcome {
 pub enum Operation {
     Update,
     Remove,
-    /// Overlay v1.1 only: source node located via the action's `copy`
+    /// Overlay v1.1+: source node located via the action's `copy`
     /// JSONPath was merged into each matched `target` node.
     Copy,
 }
@@ -132,13 +132,13 @@ pub enum ApplyErrorKind {
     /// requires action targets to be objects or arrays, for both
     /// `update` and `remove` actions.
     PrimitiveActionTarget,
-    /// Overlay v1.1 only: the action's `copy` JSONPath is
+    /// Overlay v1.1+: the action's `copy` JSONPath is
     /// syntactically valid but matched no node in the working doc.
     CopySourceNotFound(String),
-    /// Overlay v1.1 only: the action's `copy` JSONPath matched more
+    /// Overlay v1.1+: the action's `copy` JSONPath matched more
     /// than one node; the spec requires exactly one source.
     CopySourceMultiple(String),
-    /// Overlay v1.1 only: the action set both `update` and `copy`,
+    /// Overlay v1.1+: the action set both `update` and `copy`,
     /// which the spec treats as mutually exclusive. Validation flags
     /// this; apply fails fast rather than silently dropping one.
     ConflictingMergeSources,

@@ -12,7 +12,9 @@ Built on `reqwest` with `native-tls`. A single generic `Fetcher<C>` underlies tw
 - `HttpFetcher` (= `Fetcher<reqwest::blocking::Client>`) — implements `ResourceFetcher` for `Loader::register_fetcher`.
 - `AsyncHttpFetcher` (= `Fetcher<reqwest::Client>`) — implements `AsyncResourceFetcher` for `Loader::register_async_fetcher`. A tokio runtime must be active when the returned future is awaited.
 
-Both forms are `Clone` so a single fetcher can be registered for both `http://` and `https://` prefixes on the same `Loader`, sharing one underlying connection pool. Schemes other than `http` / `https` are rejected with `LoaderError::UnsupportedFetcherUri`. The default constructor builds a client with a 30-second request timeout; `try_new()` is the fallible variant that surfaces TLS / IO environment failures from `reqwest::ClientBuilder`.
+Both forms are `Clone` so a single fetcher can be registered for both `http://` and `https://` prefixes on the same `Loader`, sharing one underlying connection pool. Schemes other than `http` / `https` are rejected with `LoaderError::UnsupportedFetcherUri`. The default constructor builds a client with a 10-second connect timeout, a 30-second total request timeout, a 64 MiB response body limit (configurable via `with_max_body_bytes`), and a redirect policy capped at 10 hops that refuses HTTPS → HTTP scheme downgrades; `try_new()` is the fallible variant that surfaces TLS / IO environment failures from `reqwest::ClientBuilder`.
+
+> **Security & Runtime Notes:** The default client does not restrict destination IP ranges (SSRF); when loading untrusted URLs, validate destinations up front or supply a restricted `reqwest` client via `with_client`. `HttpFetcher` uses `reqwest::blocking::Client`, which panics if dropped or invoked directly on a Tokio async worker thread — use `AsyncHttpFetcher` inside async code.
 
 ## Features
 
@@ -60,13 +62,14 @@ A non-2xx HTTP response, transport failure, or unreadable body is surfaced throu
 
 The fetchers also implement `fetch_document`, used by `Loader::load_document` and
 `load_document_async`, to preserve the final response URL after redirects alongside
-the unchanged value. With `yaml`, a missing, empty or octet-stream Content-Type
-uses a YAML extension on either the requested or final URL. Thus a `.yaml` URL
-redirecting to an extensionless blob retains its original format hint, and an
-extensionless URL redirecting to `.yaml` works too. Explicit Content-Type still
-takes precedence over both URLs; disabling `yaml` still means JSON only. `with_client`
-continues to honor the supplied client's redirect, timeout, proxy and TLS policies;
-metadata collection does not install a different client or enable more URI schemes.
+the unchanged value. With `yaml`, a missing, empty, `application/octet-stream`, or
+`text/plain` Content-Type uses a YAML extension on either the requested or final URL.
+Thus a `.yaml` URL redirecting to an extensionless blob (or served as `text/plain` by
+raw file hosts) retains its format hint, and an extensionless URL redirecting to
+`.yaml` works too. Explicit Content-Type still takes precedence over both URLs;
+disabling `yaml` still means JSON only. `with_client` continues to honor the supplied
+client's redirect, timeout, proxy and TLS policies; metadata collection does not
+install a different client or enable more URI schemes.
 
 `fetch_document_text` (on both fetchers) returns that document together with the
 response body it was parsed from, for callers that report positions in it.

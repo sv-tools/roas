@@ -74,3 +74,22 @@ fn unresolvable_reference_fails_validation_and_apply() {
     );
     assert_eq!(target, snapshot);
 }
+
+#[test]
+fn remove_with_error_on_mixed_kind_match_succeeds_for_mixed_nodes() {
+    let overlay: Overlay = serde_json::from_value(serde_json::json!({
+        "overlay": "1.2.0",
+        "info": { "title": "Mixed remove", "version": "1.0.0" },
+        "actions": [{ "target": "$.items[*]", "remove": true }]
+    }))
+    .unwrap();
+    let mut target = serde_json::json!({ "items": ["a", { "b": 1 }, [2]] });
+    let report = overlay
+        .apply(
+            &mut target,
+            roas_overlay::apply::ApplyOptions::ErrorOnMixedKindMatch.into(),
+        )
+        .expect("remove must ignore ErrorOnMixedKindMatch");
+    assert_eq!(report.actions[0].matched, 3);
+    assert_eq!(target, serde_json::json!({ "items": [] }));
+}

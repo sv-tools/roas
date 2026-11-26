@@ -29,7 +29,7 @@ use axum::routing::get;
 use notify::RecursiveMode;
 use notify_debouncer_mini::{Debouncer, new_debouncer};
 use std::convert::Infallible;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -237,6 +237,16 @@ fn render_html(renderer: Renderer, watch: bool) -> String {
     }
 }
 
+fn watch_target(watch_path: &Path) -> (PathBuf, Option<std::ffi::OsString>) {
+    let watch_dir = watch_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let target_name = watch_path.file_name().map(std::ffi::OsStr::to_os_string);
+    (watch_dir, target_name)
+}
+
 /// Spawn a debounced filesystem watcher on `source.file`. On each detected
 /// change we re-run the spec-building pipeline and, on success, swap the
 /// cached JSON and broadcast a reload to every SSE subscriber. Parse
@@ -248,31 +258,38 @@ fn spawn_file_watcher(
     spec_json: Arc<Mutex<String>>,
     reload_tx: broadcast::Sender<()>,
 ) -> Result<Debouncer<notify::RecommendedWatcher>> {
+    let (watch_dir, target_name) = watch_target(&watch_path);
     let (event_tx, event_rx) = mpsc::channel::<()>();
     let mut debouncer = new_debouncer(
         Duration::from_millis(150),
         move |res: notify_debouncer_mini::DebounceEventResult| {
-            // Squash every batch into a single tick — we don't care which
-            // events were in it, only that something happened. `Err` here
-            // means the watcher itself failed; skip and try again on the
-            // next event.
-            if res.is_ok() {
-                let _ = event_tx.send(());
+            // Watch the parent directory so atomic editor saves (write temp +
+            // rename over target) don't detach the watcher, and only trigger
+            // on events targeting our file name.
+            if let Ok(events) = res {
+                let matches = target_name.as_deref().is_none_or(|name| {
+                    events
+                        .iter()
+                        .any(|ev| ev.path.file_name().is_some_and(|n| n == name))
+                });
+                if matches {
+                    let _ = event_tx.send(());
+                }
             }
         },
     )
     .context("starting filesystem watcher")?;
     debouncer
         .watcher()
-        .watch(&watch_path, RecursiveMode::NonRecursive)
-        .with_context(|| format!("watching {}", watch_path.display()))?;
+        .watch(&watch_dir, RecursiveMode::NonRecursive)
+        .with_context(|| format!("watching {}", watch_dir.display()))?;
 
     let display_path = watch_path.display().to_string();
     thread::spawn(move || {
         while event_rx.recv().is_ok() {
             match source.build_spec_json() {
                 Ok(new_json) => {
-                    *spec_json.lock().unwrap() = new_json;
+                    *spec_json.lock().unwrap_or_else(|e| e.into_inner()) = new_json;
                     // Ignored: a `SendError` here just means no SSE
                     // subscribers are connected right now, which is fine.
                     let _ = reload_tx.send(());
@@ -397,9 +414,12 @@ async fn drive_prepared_preview(args: &PreviewArgs, prepared: PreparedPreview) -
     eprintln!("Press Ctrl+C to stop.");
 
     if !args.no_open {
-        // Browser open is best-effort; if it fails the user can still hit
-        // the URL manually from stderr.
-        let _ = webbrowser::open(&prepared.url);
+        // Browser open is best-effort and can block on some platforms; run it
+        // on a blocking worker so the HTTP listener starts serving immediately.
+        let url = prepared.url.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = webbrowser::open(&url);
+        });
     }
 
     let app = preview_router(prepared.state);
@@ -425,8 +445,19 @@ async fn handler_index(State(state): State<AppState>) -> Html<String> {
 }
 
 async fn handler_spec(State(state): State<AppState>) -> Response {
-    let body = state.spec_json.lock().unwrap().clone();
-    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+    let body = state
+        .spec_json
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 async fn handler_reload(State(state): State<AppState>) -> Response {
@@ -992,5 +1023,77 @@ mod tests {
         let json = source.build_spec_json().expect("build ok");
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["openapi"], "3.2.0");
+    }
+
+    #[tokio::test]
+    async fn handler_spec_sets_json_content_type_and_no_store_cache_control() {
+        let state = AppState {
+            html: Arc::new(String::new()),
+            spec_json: Arc::new(Mutex::new(r#"{"openapi":"3.2.0"}"#.to_string())),
+            reload_tx: None,
+        };
+        let resp = handler_spec(State(state)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            resp.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+    }
+
+    #[test]
+    fn watch_target_resolves_parent_dir_and_bare_filename_fallback() {
+        let (dir, name) = watch_target(Path::new("spec.yaml"));
+        assert_eq!(dir, Path::new("."));
+        assert_eq!(name.as_deref(), Some(std::ffi::OsStr::new("spec.yaml")));
+
+        let (dir, name) = watch_target(Path::new("/tmp/apis/spec.yaml"));
+        assert_eq!(dir, Path::new("/tmp/apis"));
+        assert_eq!(name.as_deref(), Some(std::ffi::OsStr::new("spec.yaml")));
+    }
+
+    #[tokio::test]
+    async fn file_watcher_survives_atomic_rename_over_watched_file() {
+        let path = write_minimal_v3_2_spec();
+        let args = PreviewArgs {
+            file: Some(path.clone()),
+            from: None,
+            format: None,
+            no_open: true,
+            watch: true,
+            renderer: Renderer::Redoc,
+        };
+        let prepared = prepare_preview(&args).await.expect("prepare ok");
+        let tx = prepared
+            .state
+            .reload_tx
+            .clone()
+            .expect("--watch must allocate a broadcast sender");
+        let mut rx = tx.subscribe();
+        let spec_json = Arc::clone(&prepared.state.spec_json);
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let tmp_sibling = path.with_extension("json.tmp");
+        std::fs::write(
+            &tmp_sibling,
+            br#"{"openapi":"3.2.0","info":{"title":"atomic-renamed","version":"1"},"paths":{}}"#,
+        )
+        .expect("write sibling temp file");
+        std::fs::rename(&tmp_sibling, &path).expect("atomic rename");
+
+        let received = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
+        assert!(
+            matches!(received, Ok(Ok(()))),
+            "watcher must broadcast reload after atomic rename, got {received:?}",
+        );
+        let updated = spec_json.lock().unwrap().clone();
+        let parsed: serde_json::Value = serde_json::from_str(&updated).unwrap();
+        assert_eq!(parsed["info"]["title"], "atomic-renamed");
+
+        drop(prepared);
+        let _ = std::fs::remove_file(&path);
     }
 }
