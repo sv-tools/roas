@@ -251,8 +251,8 @@ fn drop_keywords_v3_1_cannot_hold(obj: &mut Map<String, Value>) {
         "discriminator" => fits::<Discriminator>(v),
         "patternProperties" => v
             .as_object()
-            .is_some_and(|map| map.values().all(Value::is_object)),
-        "propertyNames" => v.is_object(),
+            .is_some_and(|map| map.values().all(|sub| sub.is_object() || sub.is_boolean())),
+        "propertyNames" => v.is_object() || v.is_boolean(),
         "unevaluatedProperties" => v.is_object() || v.is_boolean(),
         _ => true,
     });
@@ -2065,5 +2065,34 @@ mod tests {
                 panic!("{name}: converted spec did not validate cleanly:\n{e}");
             }
         }
+    }
+
+    #[test]
+    fn boolean_pattern_properties_and_property_names_survive_v3_0_to_v3_1() {
+        let v30: V30Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": { "title": "T", "version": "1.0" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Obj": {
+                        "type": "object",
+                        "patternProperties": { "^x-": true },
+                        "propertyNames": false
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let v31 = V31Spec::try_from(v30).unwrap();
+        let value = serde_json::to_value(&v31).unwrap();
+        assert_eq!(
+            value["components"]["schemas"]["Obj"]["patternProperties"]["^x-"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["components"]["schemas"]["Obj"]["propertyNames"],
+            serde_json::json!(false)
+        );
     }
 }

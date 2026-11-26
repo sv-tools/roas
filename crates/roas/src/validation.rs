@@ -220,6 +220,8 @@ impl Display for Error {
     }
 }
 
+impl std::error::Error for Error {}
+
 #[derive(EnumSetType, Debug)]
 pub enum Options {
     /// Ignore missing tags.
@@ -555,6 +557,7 @@ pub(crate) struct Context<'a, T> {
     /// by [`Options::IgnoreExternalReferences`]).
     pub loader: Option<&'a mut Loader>,
     pub visited: HashSet<String>,
+    pub(crate) validated: HashSet<String>,
     pub errors: Vec<ValidationError>,
     pub options: EnumSet<Options>,
 }
@@ -656,6 +659,13 @@ impl<T> Context<'_, T> {
         self.visited.contains(path)
     }
 
+    /// Record that the component at `path` has had its body validated,
+    /// returning `true` the first time so `RefOr` and `Components` never
+    /// validate the same component twice.
+    pub fn mark_validated(&mut self, path: String) -> bool {
+        self.validated.insert(path)
+    }
+
     pub fn is_option(&self, option: Options) -> bool {
         self.options.contains(option)
     }
@@ -667,6 +677,7 @@ impl Context<'_, ()> {
             spec,
             loader: None,
             visited: HashSet::new(),
+            validated: HashSet::new(),
             errors: Vec::new(),
             options,
         }
@@ -957,5 +968,9 @@ mod tests {
         assert!(err.has_exact("#.a: first error"));
         assert!(err.has_exact("#.b: second error"));
         assert!(!err.has_exact("#.a: other"));
+
+        // `Error` implements `std::error::Error`.
+        let dyn_err: Box<dyn std::error::Error> = Box::new(err);
+        assert!(dyn_err.to_string().contains("2 errors found:"));
     }
 }

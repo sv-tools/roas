@@ -175,31 +175,53 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
         Err(err) => return err,
     };
 
-    if consumed >= parts.len() {
-        return malformed_pointer(reference);
-    }
-    let mut method = parts[consumed];
-    consumed += 1;
+    loop {
+        if consumed >= parts.len() {
+            return malformed_pointer(reference);
+        }
+        let (op, op_display) = if parts[consumed] == "additionalOperations" {
+            if consumed + 1 >= parts.len() {
+                return malformed_pointer(reference);
+            }
+            let method = unescape_pointer_token(parts[consumed + 1]);
+            consumed += 2;
+            let Some(op) = item
+                .additional_operations
+                .as_ref()
+                .and_then(|m| m.get(&method))
+            else {
+                return OperationRefResolution::Err(format!(
+                    "additional operation `{method}` not declared on path `{display_path}`"
+                ));
+            };
+            (op, format!("{display_path}.additionalOperations[{method}]"))
+        } else {
+            // JSON Pointer tokens are case-sensitive; OAS 3.2.0 fixes Operation
+            // field names to lowercase, so `GET` is not the same key as `get`.
+            let method = parts[consumed];
+            consumed += 1;
+            let Some(op) = item.operations.as_ref().and_then(|m| m.get(method)) else {
+                return OperationRefResolution::Err(format!(
+                    "method `{method}` not declared on path `{display_path}`"
+                ));
+            };
+            (op, format!("{display_path}.{method}"))
+        };
 
-    while consumed < parts.len() {
+        if consumed >= parts.len() {
+            return OperationRefResolution::Ok(visits);
+        }
+
         if parts.len() - consumed < 4 || parts[consumed] != "callbacks" {
             return OperationRefResolution::Err(format!(
                 "malformed deep pointer: expected `/callbacks/<name>/<expr>/<method>` continuation, found `{reference}`"
             ));
         }
-        // JSON Pointer tokens are case-sensitive; OAS 3.2.0 fixes Operation
-        // field names to lowercase, so `GET` is not the same key as `get`.
-        let Some(op) = item.operations.as_ref().and_then(|m| m.get(method)) else {
-            return OperationRefResolution::Err(format!(
-                "method `{method}` not declared on path `{display_path}`"
-            ));
-        };
         let cb_name = unescape_pointer_token(parts[consumed + 1]);
         let expr = unescape_pointer_token(parts[consumed + 2]);
-        let next_method = parts[consumed + 3];
         let Some(cb_ref) = op.callbacks.as_ref().and_then(|m| m.get(&cb_name)) else {
             return OperationRefResolution::Err(format!(
-                "callback `{cb_name}` not declared on `{display_path}.{method}`"
+                "callback `{cb_name}` not declared on `{op_display}`"
             ));
         };
         // If the inline callback slot is itself a `$ref` into
@@ -232,7 +254,7 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
                 "expression `{expr}` not declared on callback `{cb_name}`"
             ));
         };
-        display_path = format!("{display_path}.{method}.callbacks[{cb_name}][{expr}]");
+        display_path = format!("{op_display}.callbacks[{cb_name}][{expr}]");
         item = match resolve_path_item_ref_chain(
             spec,
             &display_path,
@@ -246,20 +268,8 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
             }
             Err(err) => return err,
         };
-        method = next_method;
-        consumed += 4;
+        consumed += 3;
     }
-
-    if !item
-        .operations
-        .as_ref()
-        .is_some_and(|m| m.contains_key(method))
-    {
-        return OperationRefResolution::Err(format!(
-            "method `{method}` not declared on path `{display_path}`"
-        ));
-    }
-    OperationRefResolution::Ok(visits)
 }
 
 fn malformed_pointer(reference: &str) -> OperationRefResolution {
@@ -2370,5 +2380,64 @@ mod tests {
             "webhook $ref chain should resolve: {:?}",
             ctx.errors
         );
+    }
+
+    #[test]
+    fn operation_ref_resolves_additional_operations_and_callbacks() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": { "title": "T", "version": "1.0" },
+            "paths": {
+                "/pets": {
+                    "additionalOperations": {
+                        "COPY": {
+                            "callbacks": {
+                                "onCopy": {
+                                    "{$request.body#/cb}": {
+                                        "additionalOperations": {
+                                            "NOTIFY": {
+                                                "responses": { "200": { "description": "ok" } }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            "responses": { "200": { "description": "ok" } }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        for good in [
+            "#/paths/~1pets/additionalOperations/COPY",
+            "#/paths/~1pets/additionalOperations/COPY/callbacks/onCopy/{$request.body#~1cb}/additionalOperations/NOTIFY",
+        ] {
+            let mut ctx = Context::new(&spec, Options::new());
+            Link {
+                operation_ref: Some(good.into()),
+                ..Default::default()
+            }
+            .validate_with_context(&mut ctx, "l".into());
+            assert!(
+                ctx.errors.is_empty(),
+                "expected {good} to resolve cleanly, got: {:?}",
+                ctx.errors
+            );
+        }
+
+        for bad in [
+            "#/paths/~1pets/additionalOperations",
+            "#/paths/~1pets/additionalOperations/MISSING",
+        ] {
+            let mut ctx = Context::new(&spec, Options::new());
+            Link {
+                operation_ref: Some(bad.into()),
+                ..Default::default()
+            }
+            .validate_with_context(&mut ctx, "l".into());
+            assert!(!ctx.errors.is_empty(), "expected {bad} to fail validation");
+        }
     }
 }

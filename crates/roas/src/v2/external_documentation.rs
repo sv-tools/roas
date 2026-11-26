@@ -35,6 +35,11 @@ pub struct ExternalDocumentation {
 
 impl ValidateWithContext<Spec> for ExternalDocumentation {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        if self.url.is_empty()
+            && ctx.is_option(crate::validation::Options::IgnoreEmptyExternalDocumentationUrl)
+        {
+            return;
+        }
         validate_required_url(&self.url, ctx, format!("{path}.url"));
     }
 }

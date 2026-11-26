@@ -335,7 +335,7 @@ pub fn validate_security_requirements(
 
 /// Validate Spec.tags: every tag name MUST be unique.
 pub fn validate_tag_uniqueness(ctx: &mut Context<Spec>, tags: &[Tag]) {
-    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for t in tags {
         *counts.entry(t.name.as_str()).or_insert(0) += 1;
     }
@@ -355,7 +355,7 @@ pub fn validate_path_template_uniqueness(
     ctx: &mut Context<Spec>,
     paths: &BTreeMap<String, PathItem>,
 ) {
-    let mut canonicals: HashMap<String, Vec<&str>> = HashMap::new();
+    let mut canonicals: BTreeMap<String, Vec<&str>> = BTreeMap::new();
     for key in paths.keys() {
         if key.starts_with("x-") {
             continue;

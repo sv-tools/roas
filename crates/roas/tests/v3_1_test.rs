@@ -9,6 +9,10 @@ mod v3_1_tests {
     fn files() {
         for path in fs::read_dir("tests/v3_1_data").unwrap() {
             let path_buf = path.unwrap().path();
+            if !path_buf.is_file() || path_buf.extension().and_then(|s| s.to_str()) != Some("json")
+            {
+                continue;
+            }
             println!("validating: {path_buf:?}");
             let json_spec = fs::read_to_string(&path_buf).unwrap();
             let spec = serde_json::from_str::<Spec>(&json_spec).unwrap();

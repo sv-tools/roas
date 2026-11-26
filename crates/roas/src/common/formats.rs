@@ -41,14 +41,14 @@ impl Display for StringFormat {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum IntegerFormat {
-    // signed 32 bits
-    #[serde(rename = "int32")]
+    /// signed 32 bits
     Int32,
-    // signed 64 bits
-    #[serde(rename = "int64")]
+    /// signed 64 bits
     Int64,
+    /// A custom integer format (e.g. `int8`, `uint32`, `uint64`)
+    Custom(String),
 }
 
 impl Display for IntegerFormat {
@@ -56,18 +56,59 @@ impl Display for IntegerFormat {
         match self {
             IntegerFormat::Int32 => write!(f, "int32"),
             IntegerFormat::Int64 => write!(f, "int64"),
+            IntegerFormat::Custom(s) => write!(f, "{s}"),
         }
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+impl Serialize for IntegerFormat {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            IntegerFormat::Int32 => "int32",
+            IntegerFormat::Int64 => "int64",
+            IntegerFormat::Custom(s) => s,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for IntegerFormat {
+    fn deserialize<D>(deserializer: D) -> Result<IntegerFormat, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct IntegerFormatVisitor;
+
+        impl Visitor<'_> for IntegerFormatVisitor {
+            type Value = IntegerFormat;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("one of `int32`, `int64` or a custom string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                Ok(match value {
+                    "int32" => IntegerFormat::Int32,
+                    "int64" => IntegerFormat::Int64,
+                    _ => IntegerFormat::Custom(String::from(value)),
+                })
+            }
+        }
+
+        deserializer.deserialize_str(IntegerFormatVisitor)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum NumberFormat {
-    // f64
-    #[serde(rename = "float")]
+    /// single-precision floating point
     Float,
-    // f128
-    #[serde(rename = "double")]
+    /// double-precision floating point
     Double,
+    /// A custom number format (e.g. `decimal`)
+    Custom(String),
 }
 
 impl Display for NumberFormat {
@@ -75,7 +116,48 @@ impl Display for NumberFormat {
         match self {
             NumberFormat::Float => write!(f, "float"),
             NumberFormat::Double => write!(f, "double"),
+            NumberFormat::Custom(s) => write!(f, "{s}"),
         }
+    }
+}
+
+impl Serialize for NumberFormat {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            NumberFormat::Float => "float",
+            NumberFormat::Double => "double",
+            NumberFormat::Custom(s) => s,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for NumberFormat {
+    fn deserialize<D>(deserializer: D) -> Result<NumberFormat, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct NumberFormatVisitor;
+
+        impl Visitor<'_> for NumberFormatVisitor {
+            type Value = NumberFormat;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("one of `float`, `double` or a custom string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                Ok(match value {
+                    "float" => NumberFormat::Float,
+                    "double" => NumberFormat::Double,
+                    _ => NumberFormat::Custom(String::from(value)),
+                })
+            }
+        }
+
+        deserializer.deserialize_str(NumberFormatVisitor)
     }
 }
 
@@ -569,5 +651,23 @@ mod tests {
             msg.contains("byte") || msg.contains("string") || msg.contains("expected"),
             "expected a meaningful serde error referencing string formats, got: {msg}"
         );
+    }
+
+    #[test]
+    fn custom_integer_and_number_formats_round_trip() {
+        let uint32: IntegerFormat = serde_json::from_str(r#""uint32""#).unwrap();
+        assert_eq!(uint32, IntegerFormat::Custom("uint32".into()));
+        assert_eq!(uint32.to_string(), "uint32");
+        assert_eq!(serde_json::to_string(&uint32).unwrap(), r#""uint32""#);
+
+        let decimal: NumberFormat = serde_json::from_str(r#""decimal""#).unwrap();
+        assert_eq!(decimal, NumberFormat::Custom("decimal".into()));
+        assert_eq!(decimal.to_string(), "decimal");
+        assert_eq!(serde_json::to_string(&decimal).unwrap(), r#""decimal""#);
+
+        let int_err = serde_json::from_str::<IntegerFormat>("42").unwrap_err();
+        assert!(int_err.to_string().contains("int32"));
+        let num_err = serde_json::from_str::<NumberFormat>("42").unwrap_err();
+        assert!(num_err.to_string().contains("float"));
     }
 }

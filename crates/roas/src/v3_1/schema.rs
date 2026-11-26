@@ -1565,6 +1565,9 @@ impl ValidateWithContext<Spec> for Schema {
                 if let Some(discriminator) = &s.discriminator {
                     discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
                 }
+                if let Some(docs) = &s.external_docs {
+                    docs.validate_with_context(ctx, format!("{path}.externalDocs"));
+                }
             }
             Schema::AnyOf(s) => {
                 if s.any_of.is_empty() {
@@ -1575,6 +1578,9 @@ impl ValidateWithContext<Spec> for Schema {
                 }
                 if let Some(discriminator) = &s.discriminator {
                     discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
+                }
+                if let Some(docs) = &s.external_docs {
+                    docs.validate_with_context(ctx, format!("{path}.externalDocs"));
                 }
             }
             Schema::OneOf(s) => {
@@ -1587,9 +1593,15 @@ impl ValidateWithContext<Spec> for Schema {
                 if let Some(discriminator) = &s.discriminator {
                     discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
                 }
+                if let Some(docs) = &s.external_docs {
+                    docs.validate_with_context(ctx, format!("{path}.externalDocs"));
+                }
             }
             Schema::Not(s) => {
                 s.not.validate_with_context(ctx, format!("{path}.not"));
+                if let Some(docs) = &s.external_docs {
+                    docs.validate_with_context(ctx, format!("{path}.externalDocs"));
+                }
             }
         }
     }
@@ -1662,6 +1674,10 @@ impl ValidateWithContext<Spec> for StringSchema {
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
+        // Note: JSON Schema 2020-12 `pattern` uses ECMA-262 regex syntax
+        // (which allows constructs like `[]`, `[^]`, lookarounds, and
+        // backreferences that Rust's `regex` crate rejects), so we do not
+        // run `validate_pattern` here.
         // Spec: minLength MUST be ≤ maxLength when both are present.
         if let (Some(min), Some(max)) = (self.min_length, self.max_length)
             && min > max
@@ -1783,7 +1799,7 @@ impl ValidateWithContext<Spec> for ObjectSchema {
 
         if let Some(properties) = &self.pattern_properties {
             for (pattern, schema) in properties {
-                let path = format!("{path}.pattern_properties[{pattern}]");
+                let path = format!("{path}.patternProperties[{pattern}]");
                 schema.validate_with_context(ctx, path.clone());
                 validate_pattern(pattern, ctx, path);
             }
@@ -1830,6 +1846,12 @@ impl ValidateWithContext<Spec> for NullSchema {
 
 impl ValidateWithContext<Spec> for MultiSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        if self.read_only == Some(true) && self.write_only == Some(true) {
+            ctx.error(
+                path.clone(),
+                ".readOnly and .writeOnly are mutually exclusive",
+            );
+        }
         // JSON Schema 2020-12 §6.1.1: when `type` is an array it MUST contain
         // at least one element. An empty `type: []` is not a valid schema.
         if self.schema_types.is_empty() {
@@ -3354,7 +3376,7 @@ mod tests {
         single.validate_with_context(&mut ctx, "s".into());
         // Valid pattern should not error
         assert!(
-            !ctx.errors.iter().any(|e| e.contains("pattern_properties")),
+            !ctx.errors.iter().any(|e| e.contains("patternProperties")),
             "errors: {:?}",
             ctx.errors
         );
@@ -4146,5 +4168,60 @@ mod tests {
             "errors: {:?}",
             ctx.errors
         );
+    }
+
+    #[test]
+    fn validates_composition_external_docs_and_multi_read_write_only() {
+        use crate::validation::Options;
+        let spec = Spec::default();
+
+        // ECMA-262 `pattern` constructs (e.g. `^[^]$`, `[]`) must not be
+        // rejected by Rust's `regex` parser.
+        for pat in ["^[^]$", "[]"] {
+            let s: Schema = serde_json::from_value(serde_json::json!({
+                "type": "string",
+                "pattern": pat
+            }))
+            .unwrap();
+            let mut ctx = Context::new(&spec, Options::new());
+            s.validate_with_context(&mut ctx, "s".into());
+            assert!(
+                ctx.errors.is_empty(),
+                "ECMA-262 pattern {pat} failed: {:?}",
+                ctx.errors
+            );
+        }
+
+        // MultiSchema readOnly && writeOnly
+        let m: Schema = serde_json::from_value(serde_json::json!({
+            "type": ["string", "null"],
+            "readOnly": true,
+            "writeOnly": true
+        }))
+        .unwrap();
+        let mut ctx = Context::new(&spec, Options::new());
+        m.validate_with_context(&mut ctx, "m".into());
+        assert!(
+            ctx.errors.mentions("mutually exclusive"),
+            "got: {:?}",
+            ctx.errors
+        );
+
+        // Composition externalDocs validated across allOf, anyOf, oneOf, not
+        for raw in [
+            serde_json::json!({"allOf": [{"type": "string"}], "externalDocs": {"url": ""}}),
+            serde_json::json!({"anyOf": [{"type": "string"}], "externalDocs": {"url": ""}}),
+            serde_json::json!({"oneOf": [{"type": "string"}], "externalDocs": {"url": ""}}),
+            serde_json::json!({"not": {"type": "string"}, "externalDocs": {"url": ""}}),
+        ] {
+            let c: Schema = serde_json::from_value(raw).unwrap();
+            let mut ctx = Context::new(&spec, Options::new());
+            c.validate_with_context(&mut ctx, "c".into());
+            assert!(
+                ctx.errors.mentions("c.externalDocs.url"),
+                "got: {:?}",
+                ctx.errors
+            );
+        }
     }
 }

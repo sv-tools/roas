@@ -996,9 +996,10 @@ impl Translator<'_> {
     }
 
     fn integer(&self, s: &IntegerSchema, pointer: String) -> FrontSchema {
-        let width = s.format.as_ref().map(|f| match f {
-            IntegerFormat::Int32 => IntWidth::Int32,
-            IntegerFormat::Int64 => IntWidth::Int64,
+        let width = s.format.as_ref().and_then(|f| match f {
+            IntegerFormat::Int32 => Some(IntWidth::Int32),
+            IntegerFormat::Int64 => Some(IntWidth::Int64),
+            IntegerFormat::Custom(_) => None,
         });
         let mut front = self.leaf(
             pointer,
@@ -1025,9 +1026,10 @@ impl Translator<'_> {
     }
 
     fn number(&self, s: &NumberSchema, pointer: String) -> FrontSchema {
-        let width = s.format.as_ref().map(|f| match f {
-            NumberFormat::Float => FloatWidth::Float,
-            NumberFormat::Double => FloatWidth::Double,
+        let width = s.format.as_ref().and_then(|f| match f {
+            NumberFormat::Float => Some(FloatWidth::Float),
+            NumberFormat::Double => Some(FloatWidth::Double),
+            NumberFormat::Custom(_) => None,
         });
         let mut front = self.leaf(
             pointer,
@@ -1504,5 +1506,21 @@ mod tests {
             panic!()
         };
         assert!(matches!(additional, Additional::Schema(_)));
+    }
+
+    #[test]
+    fn custom_integer_and_number_formats_lower_to_unconstrained_width() {
+        let front = translate(serde_json::json!({
+            "U32": {"type": "integer", "format": "uint32"},
+            "Dec": {"type": "number", "format": "decimal"}
+        }));
+        let Kind::Integer { width, .. } = &inline(&front.components["U32"]).kind else {
+            panic!()
+        };
+        assert_eq!(*width, None);
+        let Kind::Number { width, .. } = &inline(&front.components["Dec"]).kind else {
+            panic!()
+        };
+        assert_eq!(*width, None);
     }
 }
