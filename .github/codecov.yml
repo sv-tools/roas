@@ -59,6 +59,18 @@ component_management:
       name: roas-arazzo-executor
       paths:
         - crates/roas-arazzo-executor/**
+    - component_id: roas-asyncapi
+      name: roas-asyncapi
+      paths:
+        - crates/roas-asyncapi/**
+    - component_id: roas-http-validator
+      name: roas-http-validator
+      paths:
+        - crates/roas-http-validator/**
+    - component_id: roas-codegen
+      name: roas-codegen
+      paths:
+        - crates/roas-codegen/**
 
     # ---- per OpenAPI spec version (within the `roas` crate) ----
     - component_id: common
@@ -113,6 +125,12 @@ component_management:
       paths:
         - crates/roas-overlay/src/v1_1/**
         - crates/roas-overlay/tests/v1_1_test.rs
+    - component_id: overlay-v1_2
+      name: overlay-v1.2
+      paths:
+        - crates/roas-overlay/src/v1_2.rs
+        - crates/roas-overlay/src/v1_2/**
+        - crates/roas-overlay/tests/v1_2_test.rs
 
     # ---- per Arazzo version (within the `roas-arazzo` crate) ----
     - component_id: arazzo-common

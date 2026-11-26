@@ -23,6 +23,7 @@ binary you use from a shell or a CI job.
 | **Arazzo**          | 1.0, 1.1                           | parse · validate · upconvert 1.0 → 1.1                                                                                                                                                                       | [`roas-arazzo`](crates/roas-arazzo)                   |
 | **Arazzo, running** | 1.0, 1.1                           | perform every step's request, judge its criteria, follow its `retry` / `goto` / `end` actions and the workflows it calls, and report what happened                                                           | [`roas-arazzo-executor`](crates/roas-arazzo-executor) |
 | **OpenAPI, serving**| 2.0, 3.0.x, 3.1.x, 3.2.x           | judge a live HTTP request against the description — route it, rebuild every parameter from its `style`, and check it and the body against their schemas                                                      | [`roas-http-validator`](crates/roas-http-validator)   |
+| **OpenAPI, codegen**| 2.0, 3.0.x, 3.1.x, 3.2.x           | lower schemas to a language-neutral IR and generate Rust or Go types (with optional runtime validation and MiniJinja template overrides)                                                                     | [`roas-codegen`](crates/roas-codegen)                 |
 
 Where a specification and its published JSON Schema disagree, these crates
 follow the **prose**; the schemas do not track the specifications one for one.
@@ -40,9 +41,9 @@ docker run --rm -v "$PWD:/specs" -w /specs ghcr.io/sv-tools/roas:latest openapi 
 
 | Command                                                | What it does                                                                                                      |
 |--------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
-| `roas openapi validate\|convert\|preview`              | parse and validate an OpenAPI spec, upconvert it (merging, applying overlays and collapsing on the way), or render it in a browser |
+| `roas openapi validate\|convert\|generate\|preview`    | parse and validate an OpenAPI spec, upconvert it (merging, applying overlays and collapsing on the way), generate Rust or Go types, or render it in a browser |
 | `roas overlay validate\|convert\|apply`                | work with Overlay documents; `apply` edits a spec of any version                                                  |
-| `roas arazzo validate\|convert\|list\|run`             | work with Arazzo descriptions — `list` says what workflows one offers, `run` performs them                        |
+| `roas arazzo validate\|convert\|list\|check\|run`      | work with Arazzo descriptions — `list` says what workflows one offers, `check` emits editor diagnostics, `run` performs them |
 | `roas asyncapi validate\|convert`                      | work with AsyncAPI documents; `convert --to v3_0` reports what 2.6 → 3.x could not carry                          |
 | `roas completions <SHELL>` · `roas manpages --out DIR` | shell completions and troff manpages                                                                              |
 
@@ -125,6 +126,14 @@ framework: `http` — and with it axum, warp, tonic and hyper — plus actix-web
 poem, salvo and rocket. Routing failures are a different answer from validation
 failures, because a 404 is a different response from a 400.
 
+### [`roas-codegen`](crates/roas-codegen) — OpenAPI, codegen
+
+Generates Rust and Go types from OpenAPI 2.0–3.2 descriptions on top of `roas`.
+A description is version-detected, normalized to 3.2, validated, and lowered to
+a language-neutral IR before a MiniJinja backend renders files in memory (with
+optional generated validation, type substitutions, and user template overrides).
+Nothing generated depends on `roas`.
+
 ### [`roas-file-fetcher`](crates/roas-file-fetcher) · [`roas-http-fetcher`](crates/roas-http-fetcher) — loading
 
 `roas` resolves external `$ref`s through `ResourceFetcher` /
@@ -143,6 +152,7 @@ registry, a cache, or an embedded bundle.
 | [`roas-arazzo`](crates/roas-arazzo)                   | [![docs.rs](https://docs.rs/roas-arazzo/badge.svg)](https://docs.rs/roas-arazzo)                   | [![crates.io](https://img.shields.io/crates/v/roas-arazzo.svg)](https://crates.io/crates/roas-arazzo)                   |
 | [`roas-arazzo-executor`](crates/roas-arazzo-executor) | [![docs.rs](https://docs.rs/roas-arazzo-executor/badge.svg)](https://docs.rs/roas-arazzo-executor) | [![crates.io](https://img.shields.io/crates/v/roas-arazzo-executor.svg)](https://crates.io/crates/roas-arazzo-executor) |
 | [`roas-http-validator`](crates/roas-http-validator)   | [![docs.rs](https://docs.rs/roas-http-validator/badge.svg)](https://docs.rs/roas-http-validator) | [![crates.io](https://img.shields.io/crates/v/roas-http-validator.svg)](https://crates.io/crates/roas-http-validator) |
+| [`roas-codegen`](crates/roas-codegen)                 | [![docs.rs](https://docs.rs/roas-codegen/badge.svg)](https://docs.rs/roas-codegen)               | [![crates.io](https://img.shields.io/crates/v/roas-codegen.svg)](https://crates.io/crates/roas-codegen)               |
 | [`roas-file-fetcher`](crates/roas-file-fetcher)       | [![docs.rs](https://docs.rs/roas-file-fetcher/badge.svg)](https://docs.rs/roas-file-fetcher)       | [![crates.io](https://img.shields.io/crates/v/roas-file-fetcher.svg)](https://crates.io/crates/roas-file-fetcher)       |
 | [`roas-http-fetcher`](crates/roas-http-fetcher)       | [![docs.rs](https://docs.rs/roas-http-fetcher/badge.svg)](https://docs.rs/roas-http-fetcher)       | [![crates.io](https://img.shields.io/crates/v/roas-http-fetcher.svg)](https://crates.io/crates/roas-http-fetcher)       |
 | [`roas-cli`](crates/roas-cli)                         | —                                                                                                  | [![crates.io](https://img.shields.io/crates/v/roas-cli.svg)](https://crates.io/crates/roas-cli)                         |
