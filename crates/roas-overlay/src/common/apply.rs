@@ -2,6 +2,9 @@
 //! [§4.4.3.1 merging rules](https://spec.openapis.org/overlay/v1.0.0.html#merging-rules)
 //! and a thin wrapper around [`serde_json_path`].
 
+use std::cmp::Ordering;
+use std::collections::HashSet;
+
 use serde_json::Value;
 use serde_json_path::JsonPath;
 
@@ -87,6 +90,53 @@ pub fn remove_at(doc: &mut Value, pointer: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// Remove duplicate RFC 6901 pointers while preserving first-seen order.
+///
+/// RFC 9535 JSONPath queries with overlapping union selectors (e.g.
+/// `$.items[0, 0]` or `$.items[*, 0]`) can select the same node more
+/// than once; deduplicating ensures each matched node is mutated or
+/// removed at most once.
+pub(crate) fn dedup_pointers(pointers: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::with_capacity(pointers.len());
+    pointers
+        .into_iter()
+        .filter(|ptr| seen.insert(ptr.clone()))
+        .collect()
+}
+
+/// Order RFC 6901 pointers so that removing each one in sequence never
+/// shifts or invalidates a pointer that has not been removed yet:
+/// deepest paths first, and among equal-depth paths, higher array
+/// indices before lower ones (compared numerically, not
+/// lexicographically).
+pub(crate) fn sort_for_remove(pointers: &mut [String]) {
+    pointers.sort_by(|a, b| compare_remove_order(a, b));
+}
+
+fn compare_remove_order(a: &str, b: &str) -> Ordering {
+    let depth_a = a.bytes().filter(|&byte| byte == b'/').count();
+    let depth_b = b.bytes().filter(|&byte| byte == b'/').count();
+    // Deeper paths first so descendants are removed before any ancestor
+    // or ancestor-sibling array element can shift them. Within equal
+    // depth, numeric segments precede non-numeric ones (forming a
+    // strict weak order), sorted descending numerically and tie-broken
+    // by raw string.
+    depth_b.cmp(&depth_a).then_with(|| {
+        for (sa, sb) in a.split('/').skip(1).zip(b.split('/').skip(1)) {
+            let ord = match (sa.parse::<usize>(), sb.parse::<usize>()) {
+                (Ok(ia), Ok(ib)) => ib.cmp(&ia).then_with(|| sb.cmp(sa)),
+                (Ok(_), Err(_)) => Ordering::Less,
+                (Err(_), Ok(_)) => Ordering::Greater,
+                (Err(_), Err(_)) => sb.cmp(sa),
+            };
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        }
+        Ordering::Equal
+    })
 }
 
 /// Unescape a single JSON Pointer segment per
@@ -203,5 +253,54 @@ mod tests {
         let mut doc = json!([1, 2, 3]);
         assert!(!remove_at(&mut doc, "/9"));
         assert!(!remove_at(&mut doc, "/notnum"));
+    }
+
+    #[test]
+    fn sort_for_remove_orders_deepest_first_and_numeric_indices_descending() {
+        let mut ptrs = vec![
+            "/items/2".to_owned(),
+            "/items/10".to_owned(),
+            "/items/0".to_owned(),
+            "/items/0/children/0".to_owned(),
+            "/items/0/children/2".to_owned(),
+        ];
+        sort_for_remove(&mut ptrs);
+        assert_eq!(
+            ptrs,
+            vec![
+                "/items/0/children/2",
+                "/items/0/children/0",
+                "/items/10",
+                "/items/2",
+                "/items/0",
+            ]
+        );
+
+        // Mixed numeric and non-numeric keys at the same depth must form a
+        // strict weak order (no transitivity cycle).
+        let mut mixed = vec![
+            "/1a".to_owned(),
+            "/2".to_owned(),
+            "/10".to_owned(),
+            "/01".to_owned(),
+            "/1".to_owned(),
+            "/0a".to_owned(),
+        ];
+        sort_for_remove(&mut mixed);
+        assert_eq!(mixed, vec!["/10", "/2", "/1", "/01", "/1a", "/0a"]);
+    }
+
+    #[test]
+    fn dedup_pointers_preserves_first_seen_order() {
+        let ptrs = vec![
+            "/items/2".to_owned(),
+            "/items/0".to_owned(),
+            "/items/2".to_owned(),
+            "/items/1".to_owned(),
+        ];
+        assert_eq!(
+            dedup_pointers(ptrs),
+            vec!["/items/2", "/items/0", "/items/1"]
+        );
     }
 }

@@ -76,9 +76,13 @@ impl ValidateWithContext for FailureAction {
         if !self.parameters.is_empty() && self.workflow_id.is_none() {
             ctx.error_field("parameters", "are only valid when `workflowId` is set");
         }
-        // Reject negatives and NaN (the schema requires `minimum: 0`).
-        if self.retry_after.is_some_and(|n| n < 0.0 || n.is_nan()) {
-            ctx.error_field("retryAfter", "must not be negative");
+        // Reject negatives, NaN, and infinities (the schema requires finite `minimum: 0`).
+        if let Some(n) = self.retry_after {
+            if n < 0.0 || n.is_nan() {
+                ctx.error_field("retryAfter", "must not be negative");
+            } else if !n.is_finite() {
+                ctx.error_field("retryAfter", "must be finite");
+            }
         }
         for (i, parameter) in self.parameters.iter().enumerate() {
             ctx.in_index("parameters", i, |ctx| parameter.validate_with_context(ctx));
@@ -133,6 +137,36 @@ mod tests {
             name: "n".into(),
             type_: FailureActionType::Retry,
             retry_after: Some(-1.0),
+            ..Default::default()
+        };
+        assert!(
+            validate(&a)
+                .iter()
+                .any(|e| e == "#.a.retryAfter: must not be negative")
+        );
+    }
+
+    #[test]
+    fn infinite_retry_after_fails_validation() {
+        let a = FailureAction {
+            name: "n".into(),
+            type_: FailureActionType::Retry,
+            retry_after: Some(f64::INFINITY),
+            ..Default::default()
+        };
+        assert!(
+            validate(&a)
+                .iter()
+                .any(|e| e == "#.a.retryAfter: must be finite")
+        );
+    }
+
+    #[test]
+    fn nan_retry_after_fails_validation() {
+        let a = FailureAction {
+            name: "n".into(),
+            type_: FailureActionType::Retry,
+            retry_after: Some(f64::NAN),
             ..Default::default()
         };
         assert!(

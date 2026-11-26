@@ -227,6 +227,88 @@ fn a_calling_steps_timeout_applies_to_the_whole_call() {
     );
 }
 
+#[test]
+fn a_calling_steps_timeout_still_fails_when_success_criteria_are_present() {
+    let description = description(json!([
+        {
+            "workflowId": "w",
+            "steps": [{
+                "stepId": "call",
+                "workflowId": "login",
+                "timeout": 0,
+                "successCriteria": [{ "condition": "1 == 1" }]
+            }]
+        },
+        {
+            "workflowId": "login",
+            "steps": [{ "stepId": "post", "operationId": "login" }]
+        }
+    ]));
+    let mut client = Fake::new().reply(200, &json!({}));
+
+    let report = execute(&description, &options(), &mut client).expect("the run is fine");
+
+    assert_eq!(
+        report.outcome,
+        Outcome::Failed,
+        "a timed-out workflow call must fail even with truthy successCriteria"
+    );
+}
+
+#[test]
+fn a_failed_child_workflow_still_fails_caller_when_success_criteria_are_present() {
+    let description = description(json!([
+        {
+            "workflowId": "w",
+            "steps": [{
+                "stepId": "call",
+                "workflowId": "login",
+                "successCriteria": [{ "condition": "1 == 1" }]
+            }]
+        },
+        {
+            "workflowId": "login",
+            "steps": [{
+                "stepId": "post",
+                "operationId": "login",
+                "successCriteria": [{ "condition": "$statusCode == 200" }]
+            }]
+        }
+    ]));
+    let mut client = Fake::new().reply(500, &json!({}));
+
+    let report = execute(&description, &options(), &mut client).expect("the run is fine");
+
+    assert_eq!(
+        report.outcome,
+        Outcome::Failed,
+        "a failed child workflow must fail the calling step even with truthy successCriteria"
+    );
+}
+
+#[test]
+fn lazy_execute_rejects_unrepresentable_retry_after_without_panicking() {
+    let description = one(json!([{
+        "stepId": "listPets",
+        "operationId": "listPets",
+        "successCriteria": [{ "condition": "$statusCode == 200" }],
+        "onFailure": [{
+            "name": "again",
+            "type": "retry",
+            "retryAfter": 1e308,
+            "retryLimit": 1
+        }]
+    }]));
+    let mut client = Fake::new().reply(503, &json!({}));
+
+    let error = execute(&description, &options(), &mut client)
+        .expect_err("unrepresentable retryAfter must error instead of panicking");
+    assert!(
+        matches!(error, ExecutionError::Unsupported(_)),
+        "expected Unsupported, got {error:?}"
+    );
+}
+
 // ---- 3: what `retry` means ------------------------------------------
 
 #[test]

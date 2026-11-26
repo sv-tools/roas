@@ -3,7 +3,9 @@
 use crate::apply::{
     ActionOutcome, Apply, ApplyError, ApplyErrorKind, ApplyOptions, ApplyReport, Operation,
 };
-use crate::common::apply::{compile_path, locate, merge_json, remove_at};
+use crate::common::apply::{
+    compile_path, dedup_pointers, locate, merge_json, remove_at, sort_for_remove,
+};
 use crate::v1_0::action::Action;
 use crate::v1_0::info::Info;
 use crate::v1_0::version::Version;
@@ -98,7 +100,7 @@ fn apply_action(
 
     let path =
         compile_path(&action.target).map_err(|msg| err(ApplyErrorKind::InvalidJsonPath(msg)))?;
-    let pointers = locate(doc, &path);
+    let mut pointers = dedup_pointers(locate(doc, &path));
 
     // Validate ensures every action has either `update` or `remove: true`,
     // so the only meaningful action shapes here are remove (`is_remove`)
@@ -148,12 +150,15 @@ fn apply_action(
     }
 
     if action.is_remove() {
-        // Process in reverse to preserve earlier pointer validity
-        // when siblings live in the same array. `remove_at` returns
-        // false for stale or unsupported pointers (e.g. the document
-        // root); count only the removes that actually took effect.
+        // Sort deepest-first and descending by numeric array index so
+        // removing one node never shifts or invalidates a pending
+        // pointer (even for reverse slices or out-of-order unions).
+        // `remove_at` returns false for stale or unsupported pointers
+        // (e.g. the document root); count only the removes that
+        // actually took effect.
+        sort_for_remove(&mut pointers);
         let mut removed = 0;
-        for ptr in pointers.iter().rev() {
+        for ptr in &pointers {
             if remove_at(doc, ptr) {
                 removed += 1;
             }
@@ -174,20 +179,15 @@ fn apply_action(
         .update
         .as_ref()
         .expect("no_effect path covers the None case");
-    for (ptr, kind) in pointers.iter().zip(kinds.iter()) {
+    for ptr in &pointers {
         if let Some(node) = doc.pointer_mut(ptr) {
-            match kind {
-                NodeKind::Array => {
-                    if let Value::Array(arr) = node {
-                        arr.push(update.clone());
-                    }
-                }
-                NodeKind::Object => merge_json(node, update),
-                NodeKind::Primitive | NodeKind::Missing => {
-                    // Primitives were rejected above; Missing happens
-                    // only if a prior action invalidated the pointer
-                    // (impossible here because pointers were just
-                    // located against the current doc).
+            match node {
+                Value::Array(arr) => arr.push(update.clone()),
+                Value::Object(_) => merge_json(node, update),
+                _ => {
+                    // Primitives were rejected above; only reachable if
+                    // an ancestor update replaced a nested node with a
+                    // primitive.
                 }
             }
         }
@@ -678,5 +678,54 @@ mod tests {
         let r = o.apply(&mut doc, EnumSet::empty()).unwrap();
         assert_eq!(r.actions[0].matched, 0);
         assert_eq!(doc, snapshot);
+    }
+
+    #[test]
+    fn apply_remove_handles_reverse_slice_out_of_order_union_and_duplicates() {
+        // Reverse slice (`[::-1]`): locate returns descending indices.
+        let mut doc = json!({ "items": [{ "id": 0 }, { "id": 1 }, { "id": 2 }, { "id": 3 }] });
+        let o = ovl(vec![Action {
+            target: "$.items[2:0:-1]".into(),
+            remove: Some(true),
+            ..Default::default()
+        }]);
+        let r = o.apply(&mut doc, EnumSet::empty()).unwrap();
+        assert_eq!(r.actions[0].matched, 2);
+        assert_eq!(doc, json!({ "items": [{ "id": 0 }, { "id": 3 }] }));
+
+        // Out-of-order union (`[2, 0]`).
+        let mut doc = json!({ "items": [{ "id": 0 }, { "id": 1 }, { "id": 2 }, { "id": 3 }] });
+        let o = ovl(vec![Action {
+            target: "$.items[2, 0]".into(),
+            remove: Some(true),
+            ..Default::default()
+        }]);
+        let r = o.apply(&mut doc, EnumSet::empty()).unwrap();
+        assert_eq!(r.actions[0].matched, 2);
+        assert_eq!(doc, json!({ "items": [{ "id": 1 }, { "id": 3 }] }));
+
+        // Duplicate selector (`[0, 0]`) must only remove element 0 once.
+        let mut doc = json!({ "items": [{ "id": 0 }, { "id": 1 }] });
+        let o = ovl(vec![Action {
+            target: "$.items[0, 0]".into(),
+            remove: Some(true),
+            ..Default::default()
+        }]);
+        let r = o.apply(&mut doc, EnumSet::empty()).unwrap();
+        assert_eq!(r.actions[0].matched, 1);
+        assert_eq!(doc, json!({ "items": [{ "id": 1 }] }));
+    }
+
+    #[test]
+    fn apply_update_deduplicates_repeated_selector_matches() {
+        let mut doc = json!({ "items": [1] });
+        let o = ovl(vec![Action {
+            target: "$['items', 'items']".into(),
+            update: Some(json!(2)),
+            ..Default::default()
+        }]);
+        let r = o.apply(&mut doc, EnumSet::empty()).unwrap();
+        assert_eq!(r.actions[0].matched, 1);
+        assert_eq!(doc, json!({ "items": [1, 2] }));
     }
 }

@@ -176,29 +176,46 @@ impl Decimal {
         self.mantissa == 0
     }
 
-    /// This number's mantissa scaled to `scale`, or `None` when that
-    /// does not fit an `i128`.
-    fn at_scale(self, scale: i32) -> Option<i128> {
-        let steps = self.scale.checked_sub(scale)?;
-        if steps < 0 {
-            return None; // would lose digits rather than gain them
+    /// Compare magnitudes (`|self|` vs `|other|`) without scaling, so
+    /// numbers separated by arbitrary powers of ten are always ordered
+    /// accurately.
+    fn abs_cmp(self, other: Self) -> Ordering {
+        let a = self.mantissa.unsigned_abs();
+        let b = other.mantissa.unsigned_abs();
+        match (a == 0, b == 0) {
+            (true, true) => return Ordering::Equal,
+            (true, false) => return Ordering::Less,
+            (false, true) => return Ordering::Greater,
+            (false, false) => {}
         }
-        let steps = u32::try_from(steps).ok()?;
-        if steps > MAX_DIGITS {
-            return None;
-        }
-        self.mantissa.checked_mul(10_i128.checked_pow(steps)?)
+        // Scientific exponent (power of ten of the most significant digit):
+        // computed in `i64` so extreme `i32` scales never overflow.
+        let exp_a = i64::from(self.scale) + i64::from(a.ilog10());
+        let exp_b = i64::from(other.scale) + i64::from(b.ilog10());
+        exp_a.cmp(&exp_b).then_with(|| {
+            // Both numbers are normalized (no trailing zeros) and share
+            // the same most-significant decimal place, so lexicographical
+            // comparison of their decimal digits is exact magnitude order.
+            let (da, la) = decimal_digits(a);
+            let (db, lb) = decimal_digits(b);
+            da[..la].cmp(&db[..lb])
+        })
     }
 
-    /// Compare exactly, or say that the numbers are too large to.
-    pub(crate) fn compare(self, other: Self) -> Option<Ordering> {
-        // A difference in sign settles it without any scaling.
+    /// Compare two exact decimals. Always succeeds, even when their scales
+    /// differ by more than `i128` digits.
+    pub(crate) fn compare(self, other: Self) -> Ordering {
+        // A difference in sign settles it without inspecting magnitudes.
         let signs = self.mantissa.signum().cmp(&other.mantissa.signum());
         if signs != Ordering::Equal {
-            return Some(signs);
+            return signs;
         }
-        let scale = self.scale.min(other.scale);
-        Some(self.at_scale(scale)?.cmp(&other.at_scale(scale)?))
+        let mag = self.abs_cmp(other);
+        if self.mantissa < 0 {
+            mag.reverse()
+        } else {
+            mag
+        }
     }
 
     /// Whether this is an exact integer multiple of `step`, or `None`
@@ -213,6 +230,12 @@ impl Decimal {
         }
         if self.is_zero() {
             return Some(true);
+        }
+        // A non-zero number strictly smaller in magnitude than `|step|`
+        // can never be an integer multiple of `step`, even across huge
+        // scale gaps.
+        if self.abs_cmp(step) == Ordering::Less {
+            return Some(false);
         }
         let shift = self.scale.checked_sub(step.scale)?;
         let (numerator, denominator) = if shift >= 0 {
@@ -255,6 +278,33 @@ impl Decimal {
         // constructor requires of its caller.
         serde_json::Value::Number(serde_json::Number::from_string_unchecked(self.to_string()))
     }
+}
+
+impl PartialOrd for Decimal {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Decimal {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.compare(*other)
+    }
+}
+
+/// Write a non-zero `u128`'s base-10 digits (most-significant first) into a
+/// stack buffer and return `(buffer, len)`.
+fn decimal_digits(mut n: u128) -> ([u8; 40], usize) {
+    let mut buf = [0_u8; 40];
+    let mut pos = buf.len();
+    while n > 0 {
+        pos -= 1;
+        buf[pos] = (n % 10) as u8;
+        n /= 10;
+    }
+    let len = buf.len() - pos;
+    buf.copy_within(pos.., 0);
+    (buf, len)
 }
 
 impl Display for Decimal {
@@ -321,39 +371,48 @@ mod tests {
         // The pair that a `f64` makes equal.
         assert_eq!(
             decimal("9007199254740993").compare(decimal("9007199254740992")),
-            Some(Ordering::Greater),
+            Ordering::Greater,
         );
         // And the fractional bound that rounds to a whole number.
         assert_eq!(
             decimal("9007199254740994").compare(decimal("9007199254740993.5")),
-            Some(Ordering::Greater),
+            Ordering::Greater,
         );
         assert_eq!(
             decimal("9007199254740993").compare(decimal("9007199254740993.5")),
-            Some(Ordering::Less),
+            Ordering::Less,
         );
     }
 
     #[test]
     fn comparison_settles_signs_without_scaling() {
-        assert_eq!(
-            decimal("-1e30").compare(decimal("1e-30")),
-            Some(Ordering::Less)
-        );
-        assert_eq!(decimal("0").compare(decimal("-0.0")), Some(Ordering::Equal));
+        assert_eq!(decimal("-1e30").compare(decimal("1e-30")), Ordering::Less);
+        assert_eq!(decimal("0").compare(decimal("-0.0")), Ordering::Equal);
     }
 
     #[test]
     fn ordinary_decimals_compare_the_way_arithmetic_says() {
+        assert_eq!(decimal("0.1").compare(decimal("0.1")), Ordering::Equal);
+        assert_eq!(decimal("0.1").compare(decimal("0.2")), Ordering::Less);
+        assert_eq!(decimal("10").compare(decimal("9.9")), Ordering::Greater);
+    }
+
+    #[test]
+    fn comparing_across_large_scale_gaps_always_orders_exactly() {
+        assert_eq!(decimal("1e41").compare(decimal("100")), Ordering::Greater);
+        assert_eq!(decimal("1e-39").compare(decimal("1")), Ordering::Less);
+        assert_eq!(decimal("-1e41").compare(decimal("-100")), Ordering::Less);
+        assert_eq!(decimal("-1e-39").compare(decimal("-1")), Ordering::Greater);
         assert_eq!(
-            decimal("0.1").compare(decimal("0.1")),
-            Some(Ordering::Equal)
+            decimal("1e2147483647").compare(decimal("1e-2147483648")),
+            Ordering::Greater
         );
-        assert_eq!(decimal("0.1").compare(decimal("0.2")), Some(Ordering::Less));
-        assert_eq!(
-            decimal("10").compare(decimal("9.9")),
-            Some(Ordering::Greater)
-        );
+        // Same scientific exponent with a 39-digit mantissa (`i128::MIN`).
+        let min = decimal(&i128::MIN.to_string());
+        assert_eq!(min.compare(decimal("-9e38")), Ordering::Greater);
+        assert_eq!(min.compare(decimal("-1e38")), Ordering::Less);
+        assert_eq!(decimal("1.5").compare(decimal("1.52")), Ordering::Less);
+        assert_eq!(decimal("1.52").compare(decimal("1.5")), Ordering::Greater);
     }
 
     #[test]
@@ -465,8 +524,8 @@ mod tests {
     #[test]
     fn the_most_negative_number_behaves_like_any_other() {
         let min = decimal(&i128::MIN.to_string());
-        assert_eq!(min.compare(decimal("0")), Some(Ordering::Less));
-        assert_eq!(min.compare(min), Some(Ordering::Equal));
+        assert_eq!(min.compare(decimal("0")), Ordering::Less);
+        assert_eq!(min.compare(min), Ordering::Equal);
         assert!(min.is_integer());
         // `i128::MIN % -1` overflows though the answer is plainly zero.
         assert_eq!(min.is_multiple_of(decimal("-1")), Some(true));
@@ -491,7 +550,10 @@ mod tests {
     fn divisibility_at_an_extreme_scale_does_not_overflow() {
         // `shift` reaches `i32::MIN` here, which cannot be negated.
         let tiny = decimal("1e-2147483648");
-        assert_eq!(tiny.is_multiple_of(decimal("1")), None);
+        // Strictly smaller than step `1`, so definitely not a multiple.
+        assert_eq!(tiny.is_multiple_of(decimal("1")), Some(false));
+        assert_eq!(decimal("1e-40").is_multiple_of(decimal("1")), Some(false));
+        // Still cannot fit `1 / 1e-2147483648` without overflowing shift.
         assert_eq!(decimal("1").is_multiple_of(tiny), None);
     }
 
