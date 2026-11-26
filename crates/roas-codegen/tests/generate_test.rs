@@ -2603,3 +2603,175 @@ fn decimal_helper_names_are_free_without_a_decimal() {
         g.files[0].contents
     );
 }
+
+#[test]
+fn v2_id_rebasing_schema_is_suppressed_and_example_refs_are_not() {
+    let raw = serde_json::json!({
+        "swagger": "2.0",
+        "info": {"title": "t", "version": "1"},
+        "paths": {},
+        "definitions": {
+            "BadId": {
+                "$id": "https://example.com/bad",
+                "type": "object",
+                "properties": {"x": {"type": "string"}}
+            },
+            "BadLoose": {
+                "$id": "https://example.com/bad-loose",
+                "properties": {"x": {"type": "string"}}
+            },
+            "GoodWithExample": {
+                "type": "object",
+                "example": {"$ref": "https://example.com/ignored.json", "$id": "ignored"},
+                "default": {"$ref": "https://example.com/default.json"},
+                "x-custom": {"$ref": "https://example.com/ext.json"},
+                "properties": {"name": {"type": "string"}}
+            }
+        }
+    });
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let doc = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///v2.json").unwrap())
+        .expect("parses");
+    let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid");
+    let g = generate(&doc, &rust_config("")).unwrap();
+    let code: String = g.files.iter().map(|f| f.contents.as_str()).collect();
+    assert!(
+        !code.contains("struct BadId"),
+        "BadId must be suppressed:\n{code}"
+    );
+    assert!(
+        !code.contains("BadLoose"),
+        "BadLoose and its synthetic ~object must be suppressed:\n{code}"
+    );
+    assert!(
+        code.contains("struct GoodWithExample"),
+        "GoodWithExample must be generated:\n{code}"
+    );
+}
+
+#[test]
+fn composed_open_with_branch_named_raw_does_not_emit_duplicate_from_raw() {
+    let doc = document(serde_json::json!({
+        "Raw": {"type": "object", "properties": {"a": {"type": "string"}}},
+        "Other": {"type": "array", "items": {"type": "string"}},
+        "Mixed": {"allOf": [
+            {"$ref": "#/components/schemas/Raw"},
+            {"$ref": "#/components/schemas/Other"}
+        ]}
+    }));
+    let g = generate(&doc, &rust_config("")).unwrap();
+    let code: String = g.files.iter().map(|f| f.contents.as_str()).collect();
+    assert_eq!(code.matches("pub fn from_raw(").count(), 1, "{code}");
+    assert!(code.contains("pub fn from_raw2("), "{code}");
+    assert!(code.contains("pub fn as_raw2("), "{code}");
+}
+
+#[test]
+fn invalid_rust_rename_and_regex_module_and_edition_2015_are_refused_and_deps_deduped() {
+    let doc = document(serde_json::json!({
+        "Pet": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "format": "raw-json"}
+            }
+        }
+    }));
+
+    // Invalid type rename (including whitespace/comments) is refused as Config error, not InvalidOutput.
+    for bad in [
+        "not valid!",
+        "foo // comment",
+        " foo ",
+        "/*x*/foo",
+        "foo\n",
+        "_",
+    ] {
+        let bad_type = ConfigFile::from_toml(
+            &format!("target = \"rust\"\n[types.Pet]\nrename = {bad:?}\n"),
+            Path::new("/"),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        assert!(
+            matches!(
+                generate(&doc, &bad_type),
+                Err(GenerateError::Config(msg)) if msg.contains("types.Pet.rename")
+            ),
+            "expected Config error for rename {bad:?}"
+        );
+    }
+
+    // Invalid field rename is refused as Config error.
+    let bad_field = ConfigFile::from_toml(
+        "target = \"rust\"\n[types.Pet.fields.id]\nrename = \"123bad\"\n",
+        Path::new("/"),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    assert!(matches!(
+        generate(&doc, &bad_field),
+        Err(GenerateError::Config(msg)) if msg.contains("types.Pet.fields.id.rename")
+    ));
+
+    // `rust.module = "regex"` is rejected as crate-shadowing.
+    assert!(
+        ConfigFile::from_toml(
+            "target = \"rust\"\n[rust]\nmodule = \"regex\"\n",
+            Path::new("/")
+        )
+        .unwrap()
+        .build()
+        .is_err()
+    );
+
+    // `rust.edition = "2015"` is refused (incompatible with emitted `r#...` raw idents).
+    let ed2015 = ConfigFile::from_toml(
+        "target = \"rust\"\n[rust]\nedition = \"2015\"\n",
+        Path::new("/"),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    assert!(matches!(
+        generate(&doc, &ed2015),
+        Err(GenerateError::Config(msg)) if msg.contains("2015")
+    ));
+
+    // Substitution importing `serde_json` does not emit a duplicate `RustDependency`.
+    let dedup_cfg = ConfigFile::from_toml(
+        "target = \"rust\"\n[substitutions.raw-json.rust]\nname = \"serde_json::Value\"\nimport = \"serde_json\"\n",
+        Path::new("/"),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let g = generate(&doc, &dedup_cfg).unwrap();
+    assert_eq!(
+        g.dependencies
+            .rust
+            .iter()
+            .filter(|d| d.name == "serde_json")
+            .count(),
+        1,
+        "{:?}",
+        g.dependencies.rust
+    );
+
+    // Schema renamed to `roas_catch_all` does not collide with generated helper struct.
+    let catch_all_doc = document(serde_json::json!({
+        "Holder": {
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "additionalProperties": {"type": "integer"}
+        }
+    }));
+    let g = generate(
+        &catch_all_doc,
+        &rust_config("[types.Holder]\nrename = \"roas_catch_all\"\n"),
+    )
+    .unwrap();
+    let code: String = g.files.iter().map(|f| f.contents.as_str()).collect();
+    assert!(code.contains("pub struct roas_catch_all2"), "{code}");
+}

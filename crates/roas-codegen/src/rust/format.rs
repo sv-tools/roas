@@ -39,17 +39,17 @@ pub(crate) fn format(text: &str, edition: &str) -> Result<String, String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("rustfmt could not be started: {e}"))?;
-    // rustfmt may exit before reading everything; it is always waited on,
-    // so a long-running caller collects no zombies.
-    let written = child
-        .stdin
-        .take()
-        .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
-    // Its input is closed either way, so it finishes; what it said is the
-    // reason, whether it stopped reading early or failed at the end.
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("rustfmt could not be waited on: {e}"))?;
+    // Write stdin on a scoped thread while draining stdout/stderr in
+    // `wait_with_output`, avoiding pipe buffer deadlocks on large files.
+    let stdin = child.stdin.take();
+    let (written, output) = std::thread::scope(|s| {
+        let writer = s
+            .spawn(move || stdin.is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok()));
+        let output = child.wait_with_output();
+        let written = writer.join().unwrap_or(false);
+        (written, output)
+    });
+    let output = output.map_err(|e| format!("rustfmt could not be waited on: {e}"))?;
     if !output.status.success() {
         let said = String::from_utf8_lossy(&output.stderr);
         return Err(match said.lines().map(str::trim).find(|l| !l.is_empty()) {

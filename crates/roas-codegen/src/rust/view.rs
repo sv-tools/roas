@@ -268,6 +268,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         diagnostics: Vec::new(),
     };
     select_check(ir, config)?;
+    check_rust_renames(config)?;
     builder.allocate_type_names();
     // Reset: only what this build renders counts.
     super::validation::take_uses_regex();
@@ -310,12 +311,11 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         });
     }
     for import in builder.externs.values() {
-        let dependency = RustDependency {
-            name: import.clone(),
-            features: Vec::new(),
-        };
-        if !dependencies.contains(&dependency) {
-            dependencies.push(dependency);
+        if !dependencies.iter().any(|d| d.name == *import) {
+            dependencies.push(RustDependency {
+                name: import.clone(),
+                features: Vec::new(),
+            });
         }
     }
     dependencies.sort();
@@ -391,6 +391,37 @@ pub(crate) fn select_check(ir: &Ir, config: &Config) -> Result<(), GenerateError
     Ok(())
 }
 
+/// Every configured Rust `rename` on a type or field must be a valid Rust
+/// identifier (once keywords are legalized), never arbitrary punctuation.
+fn check_rust_renames(config: &Config) -> Result<(), GenerateError> {
+    fn check_ident(name: &str, selector: &str) -> Result<(), GenerateError> {
+        let legalized = legal(name.to_owned());
+        if name.is_empty()
+            || name == "_"
+            || !syn::parse_str::<syn::Ident>(&legalized).is_ok_and(|ident| ident == legalized)
+        {
+            return Err(GenerateError::Config(format!(
+                "`{selector} = {name:?}` is not a valid Rust identifier"
+            )));
+        }
+        Ok(())
+    }
+    for (type_name, type_config) in &config.types {
+        if let Some(rename) = &type_config.rename {
+            check_ident(rename, &format!("types.{type_name}.rename"))?;
+        }
+        for (field_name, field_config) in &type_config.fields {
+            if let Some(rename) = &field_config.rename {
+                check_ident(
+                    rename,
+                    &format!("types.{type_name}.fields.{field_name}.rename"),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Builder<'_> {
     fn allocate_type_names(&mut self) {
         let mut allocator = Allocator::default();
@@ -428,6 +459,10 @@ impl Builder<'_> {
             "reject_null",
             "require_present",
             "integer_token",
+            "roas_string_only",
+            "roas_string_only_variant",
+            "roas_object_only",
+            "roas_catch_all",
         ] {
             allocator.reserve(reserved);
         }
@@ -1132,6 +1167,8 @@ impl Builder<'_> {
         branches: &[crate::ir::Branch],
     ) -> Result<Vec<BranchView>, GenerateError> {
         let mut allocator = Allocator::default();
+        // `ComposedOpen` defines `fn raw(&self)` and `fn from_raw(...)` directly.
+        allocator.reserve("raw");
         let mut out = Vec::new();
         for branch in branches {
             let base = snake(&branch.suggested_name);

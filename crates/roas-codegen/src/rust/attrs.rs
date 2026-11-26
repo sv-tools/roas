@@ -2,7 +2,7 @@
 //! such — and the serde keys the backend owns are refused by name.
 
 use crate::generate::GenerateError;
-use syn::parse::{Parse, Parser};
+use syn::parse::Parser;
 
 /// Field-level serde keys that carry the wire contract.
 const FIELD_OWNED: &[&str] = &[
@@ -111,29 +111,41 @@ pub(crate) fn cfg_gates(attrs: &[String], at: &str) -> Result<Vec<String>, Gener
 
 /// The serde keys `attr` sets, including those under a `cfg_attr`, which
 /// set them just the same when the predicate holds.
-fn serde_keys(attr: &syn::Attribute) -> Vec<String> {
+fn serde_keys(attr: &syn::Attribute) -> Result<Vec<String>, String> {
     let mut keys = Vec::new();
-    meta_serde_keys(&attr.meta, &mut keys);
-    keys
+    meta_serde_keys(&attr.meta, &mut keys)?;
+    Ok(keys)
 }
 
-fn meta_serde_keys(meta: &syn::Meta, keys: &mut Vec<String>) {
+/// Consume a balanced `(...)` argument group inside `#[serde(...)]`.
+fn skip_parenthesized(input: syn::parse::ParseStream) -> syn::Result<()> {
+    let content;
+    syn::parenthesized!(content in input);
+    content.step(|cursor| {
+        let mut rest = *cursor;
+        while let Some((_, next)) = rest.token_tree() {
+            rest = next;
+        }
+        Ok(((), rest))
+    })
+}
+
+fn meta_serde_keys(meta: &syn::Meta, keys: &mut Vec<String>) -> Result<(), String> {
     if meta.path().is_ident("cfg_attr") {
-        if let Ok(list) = meta.require_list()
-            && let Ok(args) = list.parse_args_with(
+        let list = meta.require_list().map_err(|e| e.to_string())?;
+        let args = list
+            .parse_args_with(
                 syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
             )
-        {
-            for nested in args.iter().skip(1) {
-                meta_serde_keys(nested, keys);
-            }
+            .map_err(|e| e.to_string())?;
+        for nested in args.iter().skip(1) {
+            meta_serde_keys(nested, keys)?;
         }
-        return;
+        return Ok(());
     }
-    if meta.path().is_ident("serde")
-        && let Ok(list) = meta.require_list()
-    {
-        let _ = list.parse_nested_meta(|meta| {
+    if meta.path().is_ident("serde") {
+        let list = meta.require_list().map_err(|e| e.to_string())?;
+        list.parse_nested_meta(|meta| {
             if let Some(ident) = meta.path.get_ident() {
                 keys.push(ident.to_string());
             }
@@ -142,14 +154,13 @@ fn meta_serde_keys(meta: &syn::Meta, keys: &mut Vec<String>) {
                 let _: syn::Token![=] = meta.input.parse()?;
                 let _: syn::Expr = meta.input.parse()?;
             } else if meta.input.peek(syn::token::Paren) {
-                let content;
-                syn::parenthesized!(content in meta.input);
-                let _: syn::punctuated::Punctuated<syn::Expr, syn::Token![,]> =
-                    content.parse_terminated(syn::Expr::parse, syn::Token![,])?;
+                skip_parenthesized(meta.input)?;
             }
             Ok(())
-        });
+        })
+        .map_err(|e| e.to_string())?;
     }
+    Ok(())
 }
 
 /// The names `#[serde(alias = "…")]` among `attrs` lets a field also be
@@ -191,10 +202,7 @@ pub(crate) fn serde_aliases(attrs: &[String], at: &str) -> Result<Vec<String>, G
                     }
                 }
             } else if nested.input.peek(syn::token::Paren) {
-                let content;
-                syn::parenthesized!(content in nested.input);
-                let _: syn::punctuated::Punctuated<syn::Expr, syn::Token![,]> =
-                    content.parse_terminated(syn::Expr::parse, syn::Token![,])?;
+                skip_parenthesized(nested.input)?;
             }
             Ok(())
         })
@@ -227,7 +235,12 @@ pub(crate) fn serde_aliases(attrs: &[String], at: &str) -> Result<Vec<String>, G
 fn check(attrs: &[String], at: &str, owned: &[&str], level: &str) -> Result<(), GenerateError> {
     for attr in attrs {
         let parsed = parse(attr, at)?;
-        for key in serde_keys(&parsed) {
+        let keys = serde_keys(&parsed).map_err(|reason| GenerateError::InvalidAttribute {
+            at: at.to_owned(),
+            attr: attr.clone(),
+            reason,
+        })?;
+        for key in keys {
             if owned.contains(&key.as_str()) {
                 return Err(GenerateError::ReservedAttribute {
                     at: at.to_owned(),
@@ -328,5 +341,36 @@ mod tests {
         assert!(matches!(error, GenerateError::InvalidAttribute { .. }));
         let error = check_field_attrs(&["#[a] #[b]".into()], "Pet.tag").unwrap_err();
         assert!(matches!(error, GenerateError::InvalidAttribute { .. }));
+        // Malformed serde/cfg_attr syntax must fail rather than skipping subsequent reserved keys.
+        let error = check_field_attrs(&["#[serde(foo = *, rename = \"evil\")]".into()], "Pet.tag")
+            .unwrap_err();
+        assert!(matches!(error, GenerateError::InvalidAttribute { .. }));
+        let error = check_container_attrs(
+            &["#[cfg_attr(all(), serde(foo = *, deny_unknown_fields))]".into()],
+            "Pet",
+        )
+        .unwrap_err();
+        assert!(matches!(error, GenerateError::InvalidAttribute { .. }));
+        // Non-expression tokens inside a non-reserved parenthesized serde arg are skipped,
+        // so a trailing reserved key is still caught and `serde_aliases` still reads aliases.
+        let error = check_field_attrs(
+            &["#[serde(other(type = \"x\"), rename = \"evil\")]".into()],
+            "Pet.tag",
+        )
+        .unwrap_err();
+        assert!(matches!(error, GenerateError::ReservedAttribute { key, .. } if key == "rename"));
+        let aliases = serde_aliases(
+            &["#[serde(other(type = \"x\"), alias = \"a\")]".into()],
+            "Pet.tag",
+        )
+        .unwrap();
+        assert_eq!(aliases, ["a"]);
+        for bare in ["#[cfg_attr]", "#[cfg_attr(bad syntax)]", "#[serde]"] {
+            let error = check_field_attrs(&[bare.into()], "Pet.tag").unwrap_err();
+            assert!(
+                matches!(error, GenerateError::InvalidAttribute { .. }),
+                "{bare}"
+            );
+        }
     }
 }

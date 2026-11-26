@@ -14,14 +14,17 @@ pub(crate) fn format(text: &str, path: &str) -> Result<String, GenerateError> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| GenerateError::Toolchain(format!("gofmt could not be started: {e}")))?;
-    // gofmt may exit before reading everything; it is always waited on,
-    // so a long-running caller collects no zombies.
-    let written = child
-        .stdin
-        .take()
-        .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
-    let output = child
-        .wait_with_output()
+    // Write stdin on a scoped thread while draining stdout/stderr in
+    // `wait_with_output`, avoiding pipe buffer deadlocks on large files.
+    let stdin = child.stdin.take();
+    let (written, output) = std::thread::scope(|s| {
+        let writer = s
+            .spawn(move || stdin.is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok()));
+        let output = child.wait_with_output();
+        let written = writer.join().unwrap_or(false);
+        (written, output)
+    });
+    let output = output
         .map_err(|e| GenerateError::Toolchain(format!("gofmt could not be waited on: {e}")))?;
     if !output.status.success() {
         let said = String::from_utf8_lossy(&output.stderr);

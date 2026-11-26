@@ -4,7 +4,27 @@
 
 use std::collections::BTreeSet;
 
-/// Split a raw name into lowercase words: on non-alphanumerics, on
+/// Whether `c` is legal inside a Rust identifier (XID_Continue, ASCII fast path).
+fn is_ident_continue(c: char) -> bool {
+    if c.is_ascii() {
+        c.is_ascii_alphanumeric()
+    } else {
+        c.is_alphanumeric() && syn::parse_str::<syn::Ident>(&format!("_{c}")).is_ok()
+    }
+}
+
+/// Whether `ident` starts with a character legal at the start of a Rust identifier.
+fn starts_valid_ident(ident: &str) -> bool {
+    ident.chars().next().is_some_and(|c| {
+        if c.is_ascii() {
+            c.is_ascii_alphabetic()
+        } else {
+            syn::parse_str::<syn::Ident>(ident).is_ok()
+        }
+    })
+}
+
+/// Split a raw name into lowercase words: on non-identifier characters, on
 /// lower-to-upper boundaries, and at the end of an acronym
 /// (`HTTPServer` → `http`, `server`).
 pub(crate) fn words(raw: &str) -> Vec<String> {
@@ -12,7 +32,7 @@ pub(crate) fn words(raw: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     for (i, &c) in chars.iter().enumerate() {
-        if !c.is_alphanumeric() {
+        if !is_ident_continue(c) {
             if !current.is_empty() {
                 out.push(std::mem::take(&mut current));
             }
@@ -21,13 +41,12 @@ pub(crate) fn words(raw: &str) -> Vec<String> {
         let prev = if i > 0 { Some(chars[i - 1]) } else { None };
         let next = chars.get(i + 1).copied();
         let boundary = match prev {
-            Some(p) if p.is_alphanumeric() => {
+            Some(p) if is_ident_continue(p) => {
                 (c.is_uppercase() && p.is_lowercase())
                     || (c.is_uppercase()
                         && p.is_uppercase()
                         && next.is_some_and(char::is_lowercase))
-                    || (c.is_ascii_digit() != p.is_ascii_digit()
-                        && !(c.is_ascii_digit() && p.is_ascii_digit()))
+                    || (c.is_numeric() != p.is_numeric())
             }
             _ => false,
         };
@@ -50,7 +69,7 @@ fn capitalize(word: &str) -> String {
     }
 }
 
-/// `PascalCase` from name parts. Never empty, never digit-led.
+/// `PascalCase` from name parts. Never empty, never starts with a non-XID_Start char.
 pub(crate) fn pascal(parts: &[String]) -> String {
     let mut out: String = parts
         .iter()
@@ -60,13 +79,13 @@ pub(crate) fn pascal(parts: &[String]) -> String {
     if out.is_empty() {
         out = "Unnamed".to_owned();
     }
-    if out.starts_with(|c: char| c.is_ascii_digit()) {
+    if !starts_valid_ident(&out) {
         out.insert(0, 'N');
     }
     out
 }
 
-/// `snake_case` from name parts. Never empty, never digit-led.
+/// `snake_case` from name parts. Never empty, never starts with a non-XID_Start char.
 pub(crate) fn snake(parts: &[String]) -> String {
     let mut out = parts
         .iter()
@@ -76,7 +95,7 @@ pub(crate) fn snake(parts: &[String]) -> String {
     if out.is_empty() {
         out = "unnamed".to_owned();
     }
-    if out.starts_with(|c: char| c.is_ascii_digit()) {
+    if !starts_valid_ident(&out) {
         out.insert(0, 'n');
     }
     out
@@ -201,5 +220,25 @@ mod tests {
         assert_eq!(a.allocate("Pet".into()), "Pet2");
         assert_eq!(a.allocate("Pet".into()), "Pet3");
         assert_eq!(a.allocate("Int64".into()), "Int642");
+    }
+
+    #[test]
+    fn non_ascii_numerals_and_non_xid_chars_produce_valid_rust_idents() {
+        for raw in ["x²", "½", "١", "foo١bar", "café", "éclair", "αβ", "m²/s"] {
+            let p_name = legal(pascal(&p(raw)));
+            let s_name = legal(snake(&p(raw)));
+            assert!(
+                syn::parse_str::<syn::Ident>(&p_name).is_ok(),
+                "invalid pascal ident {p_name:?} for {raw:?}"
+            );
+            assert!(
+                syn::parse_str::<syn::Ident>(&s_name).is_ok(),
+                "invalid snake ident {s_name:?} for {raw:?}"
+            );
+        }
+        assert_eq!(pascal(&p("x²")), "X");
+        assert_eq!(pascal(&p("½")), "Unnamed");
+        assert_eq!(pascal(&p("١")), "N١");
+        assert_eq!(snake(&p("١")), "n١");
     }
 }
