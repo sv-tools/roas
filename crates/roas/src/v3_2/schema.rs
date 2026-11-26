@@ -1622,9 +1622,10 @@ impl ValidateWithContext<Spec> for StringSchema {
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
-        if let Some(pattern) = &self.pattern {
-            validate_pattern(pattern, ctx, format!("{path}.pattern"));
-        }
+        // Note: JSON Schema 2020-12 `pattern` uses ECMA-262 regex syntax
+        // (which allows constructs like `[]`, `[^]`, lookarounds, and
+        // backreferences that Rust's `regex` crate rejects), so we do not
+        // run `validate_pattern` here.
         // Spec: minLength MUST be ≤ maxLength when both are present.
         if let (Some(min), Some(max)) = (self.min_length, self.max_length)
             && min > max
@@ -3903,19 +3904,26 @@ mod tests {
     }
 
     #[test]
-    fn validates_string_pattern_composition_external_docs_and_multi_read_write_only() {
+    fn validates_composition_external_docs_and_multi_read_write_only() {
         use crate::validation::Options;
         let spec = Spec::default();
 
-        // StringSchema invalid regex pattern
-        let s: Schema = serde_json::from_value(serde_json::json!({
-            "type": "string",
-            "pattern": "[unclosed"
-        }))
-        .unwrap();
-        let mut ctx = Context::new(&spec, Options::new());
-        s.validate_with_context(&mut ctx, "s".into());
-        assert!(ctx.errors.mentions("s.pattern"), "got: {:?}", ctx.errors);
+        // ECMA-262 `pattern` constructs (e.g. `^[^]$`, `[]`) must not be
+        // rejected by Rust's `regex` parser.
+        for pat in ["^[^]$", "[]"] {
+            let s: Schema = serde_json::from_value(serde_json::json!({
+                "type": "string",
+                "pattern": pat
+            }))
+            .unwrap();
+            let mut ctx = Context::new(&spec, Options::new());
+            s.validate_with_context(&mut ctx, "s".into());
+            assert!(
+                ctx.errors.is_empty(),
+                "ECMA-262 pattern {pat} failed: {:?}",
+                ctx.errors
+            );
+        }
 
         // MultiSchema readOnly && writeOnly
         let m: Schema = serde_json::from_value(serde_json::json!({
