@@ -173,10 +173,8 @@ impl<'a> Lowerer<'a> {
                 .chain(std::iter::once(parent.as_str()))
                 .collect();
             let target = |reference: &str| -> Option<String> {
-                let name = reference
-                    .strip_prefix("#/components/schemas/")
-                    .unwrap_or(reference);
-                members.contains(name).then(|| name.to_owned())
+                let name = component_from_mapping_ref(reference)?;
+                members.contains(name.as_str()).then_some(name)
             };
             let fallback_name = match discriminator.default_mapping.as_deref() {
                 Some(reference) => target(reference).unwrap_or_else(|| {
@@ -1619,13 +1617,8 @@ impl<'a> Lowerer<'a> {
         let mut by_component: BTreeMap<String, String> = BTreeMap::new();
         if let Some(mapping) = &discriminator.mapping {
             for (value, target) in mapping {
-                let component = target
-                    .strip_prefix("#/components/schemas/")
-                    .unwrap_or(target);
-                if by_component
-                    .insert(component.to_owned(), value.clone())
-                    .is_some()
-                {
+                let component = component_from_mapping_ref(target)?;
+                if by_component.insert(component, value.clone()).is_some() {
                     return None;
                 }
             }
@@ -1667,8 +1660,10 @@ impl<'a> Lowerer<'a> {
             let Some(Slot::Inline(tag)) = properties.get(&discriminator.property_name) else {
                 return None;
             };
+            if tag.nullable {
+                return None;
+            }
             let pinned = match (&tag.const_value, &tag.kind) {
-                (Some(Value::String(c)), _) => c == &value,
                 (
                     None,
                     Kind::String {
@@ -1676,6 +1671,21 @@ impl<'a> Lowerer<'a> {
                         ..
                     },
                 ) if one.len() == 1 => one[0] == value,
+                (
+                    Some(Value::String(c)),
+                    Kind::Object {
+                        properties,
+                        required,
+                        additional: crate::front::Additional::Any,
+                        typeless: true,
+                    },
+                ) if properties.is_empty()
+                    && required.is_empty()
+                    && tag.constraints.pattern_properties.is_empty()
+                    && tag.unsupported.is_empty() =>
+                {
+                    c == &value
+                }
                 _ => false,
             };
             if !pinned || !values.insert(value.clone()) {
@@ -2159,6 +2169,35 @@ fn tarjan(edges: &[Vec<usize>]) -> Vec<usize> {
     s.component
 }
 
+/// Extract a component schema name from a `discriminator.mapping` or
+/// `defaultMapping` entry — either a bare schema name or a local
+/// `#/components/schemas/<token>` JSON Pointer (unescaping RFC 6901 `~1`/`~0`).
+fn component_from_mapping_ref(reference: &str) -> Option<String> {
+    if let Some(rest) = reference.strip_prefix("#/components/schemas/") {
+        if rest.is_empty() || rest.contains('/') {
+            return None;
+        }
+        let mut out = String::with_capacity(rest.len());
+        let mut chars = rest.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '~' {
+                match chars.next() {
+                    Some('0') => out.push('~'),
+                    Some('1') => out.push('/'),
+                    _ => return None,
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        Some(out)
+    } else if reference.is_empty() || reference.starts_with('#') {
+        None
+    } else {
+        Some(reference.to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2506,5 +2545,194 @@ mod tests {
         assert!(
             matches!(&s.fields.iter().find(|f| f.raw_name == "when").unwrap().ty, TypeRef::Extern(k) if k == "date-time")
         );
+    }
+
+    #[test]
+    fn discriminator_mapping_unescapes_rfc6901_pointers() {
+        let ir = lower_json(serde_json::json!({
+            "A/B": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": { "kind": { "type": "string", "const": "ab" } }
+            },
+            "C~D": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": { "kind": { "type": "string", "const": "cd" } }
+            },
+            "Choice": {
+                "oneOf": [
+                    { "$ref": "#/components/schemas/A~1B" },
+                    { "$ref": "#/components/schemas/C~0D" }
+                ],
+                "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {
+                        "ab": "#/components/schemas/A~1B",
+                        "cd": "#/components/schemas/C~0D"
+                    }
+                }
+            }
+        }));
+        assert!(matches!(
+            def(&ir, "/components/schemas/Choice").kind,
+            TypeKind::UnionTagged(_)
+        ));
+    }
+
+    #[test]
+    fn safe_one_of_rejects_nullable_or_contradicting_discriminator_tag() {
+        // Nullable discriminator property (`enum: ["cat", null]`) must fall back to UnionOpen.
+        let ir_nullable = lower_json(serde_json::json!({
+            "Cat": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": { "kind": { "type": ["string", "null"], "enum": ["cat", null] } }
+            },
+            "Dog": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": { "kind": { "type": "string", "const": "dog" } }
+            },
+            "Pet": {
+                "oneOf": [
+                    { "$ref": "#/components/schemas/Cat" },
+                    { "$ref": "#/components/schemas/Dog" }
+                ],
+                "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {
+                        "cat": "#/components/schemas/Cat",
+                        "dog": "#/components/schemas/Dog"
+                    }
+                }
+            }
+        }));
+        assert!(matches!(
+            def(&ir_nullable, "/components/schemas/Pet").kind,
+            TypeKind::UnionOpen(_)
+        ));
+
+        // Contradicting `const` + `enum` on discriminator property must fall back to UnionOpen.
+        let ir_contra = lower_json(serde_json::json!({
+            "Cat": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": {
+                    "kind": { "type": "string", "const": "cat", "enum": ["other"] }
+                }
+            },
+            "Dog": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": { "kind": { "type": "string", "const": "dog" } }
+            },
+            "Pet": {
+                "oneOf": [
+                    { "$ref": "#/components/schemas/Cat" },
+                    { "$ref": "#/components/schemas/Dog" }
+                ],
+                "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {
+                        "cat": "#/components/schemas/Cat",
+                        "dog": "#/components/schemas/Dog"
+                    }
+                }
+            }
+        }));
+        assert!(matches!(
+            def(&ir_contra, "/components/schemas/Pet").kind,
+            TypeKind::UnionOpen(_)
+        ));
+
+        // Typeless `{ "const": "cat" }` is accepted as UnionTagged, while
+        // contradictory typeless `{ "const": "cat", "enum": ["other"] }` falls back.
+        let ir_typeless_ok = lower_json(serde_json::json!({
+            "Cat": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": { "kind": { "const": "cat" } }
+            },
+            "Dog": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": { "kind": { "const": "dog" } }
+            },
+            "Pet": {
+                "oneOf": [
+                    { "$ref": "#/components/schemas/Cat" },
+                    { "$ref": "#/components/schemas/Dog" }
+                ],
+                "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {
+                        "cat": "#/components/schemas/Cat",
+                        "dog": "#/components/schemas/Dog"
+                    }
+                }
+            }
+        }));
+        assert!(matches!(
+            def(&ir_typeless_ok, "/components/schemas/Pet").kind,
+            TypeKind::UnionTagged(_)
+        ));
+
+        let ir_typeless_contra = lower_json(serde_json::json!({
+            "Cat": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": { "kind": { "const": "cat", "enum": ["other"] } }
+            },
+            "Dog": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": { "kind": { "const": "dog" } }
+            },
+            "Pet": {
+                "oneOf": [
+                    { "$ref": "#/components/schemas/Cat" },
+                    { "$ref": "#/components/schemas/Dog" }
+                ],
+                "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {
+                        "cat": "#/components/schemas/Cat",
+                        "dog": "#/components/schemas/Dog"
+                    }
+                }
+            }
+        }));
+        assert!(matches!(
+            def(&ir_typeless_contra, "/components/schemas/Pet").kind,
+            TypeKind::UnionOpen(_)
+        ));
+    }
+
+    #[test]
+    fn component_from_mapping_ref_handles_escapes_and_rejects_invalid_refs() {
+        assert_eq!(
+            component_from_mapping_ref("#/components/schemas/A~1B"),
+            Some("A/B".into())
+        );
+        assert_eq!(
+            component_from_mapping_ref("#/components/schemas/A~01B"),
+            Some("A~1B".into())
+        );
+        assert_eq!(
+            component_from_mapping_ref("BareName"),
+            Some("BareName".into())
+        );
+        for bad in [
+            "",
+            "#",
+            "#/other/Foo",
+            "#/components/schemas/",
+            "#/components/schemas/A/B",
+            "#/components/schemas/Bad~2",
+            "#/components/schemas/Trailing~",
+        ] {
+            assert_eq!(component_from_mapping_ref(bad), None, "{bad:?}");
+        }
     }
 }

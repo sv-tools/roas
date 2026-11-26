@@ -256,7 +256,16 @@ impl ConfigFile {
 fn shadows_a_crate(module: &str) -> bool {
     matches!(
         module,
-        "std" | "core" | "alloc" | "proc_macro" | "test" | "serde" | "serde_json" | "lib" | "main"
+        "std"
+            | "core"
+            | "alloc"
+            | "proc_macro"
+            | "test"
+            | "serde"
+            | "serde_json"
+            | "regex"
+            | "lib"
+            | "main"
     )
 }
 
@@ -343,7 +352,9 @@ pub struct Config {
     pub header: Option<String>,
     pub extra_imports: Vec<String>,
     pub allow_codegen_extensions: bool,
-    /// Absolute by now.
+    /// Directory of templates overriding the built-in ones. Resolved against
+    /// the config file's directory when loaded via [`ConfigFile::from_toml`]
+    /// or [`ConfigFile::from_path`].
     pub template_dir: Option<PathBuf>,
     pub rust: RustConfig,
     pub go: GoConfig,

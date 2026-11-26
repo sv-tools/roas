@@ -248,12 +248,9 @@ fn check_rust(config: &Config) -> Result<(), GenerateError> {
             "`header` holds an inner doc comment or attribute (`//!`, `#![...]`), which a type's file under `layout = \"file_per_type\"` cannot hold, as the module includes it; write it as `//`, or in the module file's template".into(),
         ));
     }
-    if !matches!(
-        config.rust.edition.as_str(),
-        "2015" | "2018" | "2021" | "2024"
-    ) {
+    if !matches!(config.rust.edition.as_str(), "2018" | "2021" | "2024") {
         return Err(GenerateError::Config(format!(
-            "`rust.edition = {:?}` is not a Rust edition",
+            "`rust.edition = {:?}` is not a supported Rust edition (expected 2018, 2021, or 2024)",
             config.rust.edition
         )));
     }
@@ -350,7 +347,10 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
     }
 
     let source_pointer: fn(&str) -> String = match document.version() {
-        SourceVersion::V2 => |p| p.replacen("/components/schemas/", "/definitions/", 1),
+        SourceVersion::V2 => |p| {
+            p.strip_prefix("/components/schemas/")
+                .map_or_else(|| p.to_owned(), |rest| format!("/definitions/{rest}"))
+        },
         _ => |p| p.to_owned(),
     };
     let front = Translator {
@@ -372,10 +372,10 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
         .collect();
     if !refused.is_empty() {
         for id in ir.types.keys().cloned().collect::<Vec<_>>() {
+            let source_ptr = source_pointer(&crate::diagnostic::source_of(&id.pointer));
             if refused.iter().any(|r| {
                 r.uri == id.uri
-                    && (id.pointer == r.pointer
-                        || r.pointer.starts_with(&format!("{}/", id.pointer)))
+                    && (source_ptr == r.pointer || r.pointer.starts_with(&format!("{source_ptr}/")))
             }) {
                 ir.types.get_mut(&id).expect("present").has_error = true;
             }
