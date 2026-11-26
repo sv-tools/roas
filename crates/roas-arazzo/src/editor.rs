@@ -813,10 +813,12 @@ impl Checks<'_> {
 
     /// Deserialize `value` as `T`; on failure, report where under `path`.
     fn part<T: DeserializeOwned>(&mut self, path: &str, value: &Value) -> bool {
+        let _guard = NestedPathGuard::arm();
         match serde_path_to_error::deserialize::<_, T>(value) {
             Ok(_) => true,
             Err(error) => {
-                let path = join(path, error.path());
+                let mut path = join(path, error.path());
+                path.push_str(&take_nested_path());
                 self.push(Severity::Error, path, false, error.into_inner().to_string());
                 false
             }
@@ -864,12 +866,16 @@ impl Checks<'_> {
             return;
         }
         // Every part fits; the description as a whole should too.
-        let description = match serde_path_to_error::deserialize::<_, M>(value) {
-            Ok(description) => description,
-            Err(error) => {
-                let path = join("#", error.path());
-                self.push(Severity::Error, path, false, error.into_inner().to_string());
-                return;
+        let description = {
+            let _guard = NestedPathGuard::arm();
+            match serde_path_to_error::deserialize::<_, M>(value) {
+                Ok(description) => description,
+                Err(error) => {
+                    let mut path = join("#", error.path());
+                    path.push_str(&take_nested_path());
+                    self.push(Severity::Error, path, false, error.into_inner().to_string());
+                    return;
+                }
             }
         };
         if let Err(errors) = description.validate(options) {
@@ -898,6 +904,56 @@ impl Checks<'_> {
         }
         clean
     }
+}
+
+std::thread_local! {
+    static NESTED_PATH: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+struct NestedPathGuard;
+
+impl NestedPathGuard {
+    fn arm() -> Self {
+        NESTED_PATH.with(|slot| *slot.borrow_mut() = Some(String::new()));
+        Self
+    }
+}
+
+impl Drop for NestedPathGuard {
+    fn drop(&mut self) {
+        NESTED_PATH.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+fn take_nested_path() -> String {
+    NESTED_PATH
+        .with(|slot| slot.borrow_mut().take())
+        .unwrap_or_default()
+}
+
+/// Deserialize a buffered [`Value`] inside a custom `Deserialize` impl (such
+/// as [`crate::common::reusable::ReusableOr`] or
+/// `v1_1::selector::ValueOrSelector`) while preserving inner field
+/// paths for [`Document::read`].
+pub(crate) fn deserialize_nested<T: DeserializeOwned>(
+    value: Value,
+) -> Result<T, serde_json::Error> {
+    let armed = NESTED_PATH.with(|slot| slot.borrow().is_some());
+    if !armed {
+        return serde_json::from_value(value);
+    }
+    serde_path_to_error::deserialize(value).map_err(|error| {
+        let prefix = join("", error.path());
+        if !prefix.is_empty() {
+            NESTED_PATH.with(|slot| {
+                if let Some(existing) = slot.borrow_mut().as_mut() {
+                    let suffix = std::mem::take(existing);
+                    *existing = format!("{prefix}{suffix}");
+                }
+            });
+        }
+        error.into_inner()
+    })
 }
 
 /// `base` followed by the model-style rendering of `path`.
@@ -1640,6 +1696,43 @@ workflows:
             .unwrap_or_else(|| panic!("{:?}", document.diagnostics()));
         // The step that lacks it.
         assert_eq!(action.range.unwrap().start.line, 13);
+    }
+
+    #[cfg(feature = "v1_1")]
+    #[test]
+    fn inner_field_paths_survive_custom_deserializers() {
+        // Nested error inside ReusableOr<Parameter> -> ValueOrSelector -> SelectorType -> version.
+        let nested_selector = VALID.replace(
+            "      - stepId: find\n        operationId: findPet\n",
+            "      - stepId: find\n        operationId: findPet\n        parameters:\n          - name: id\n            in: query\n            value:\n              context: $response.body\n              selector: $.id\n              type:\n                type: jsonpath\n                version: 42\n",
+        );
+        let doc = read(&nested_selector);
+        assert_eq!(
+            doc.diagnostics()[0].path.as_deref(),
+            Some("#.workflows[0].steps[0].parameters[0].value.type.version")
+        );
+
+        // Error inside ReusableOr::Reusable.reference.
+        let bad_reusable = VALID.replace(
+            "      - stepId: find\n        operationId: findPet\n",
+            "      - stepId: find\n        operationId: findPet\n        parameters:\n          - reference: 123\n",
+        );
+        let doc = read(&bad_reusable);
+        assert_eq!(
+            doc.diagnostics()[0].path.as_deref(),
+            Some("#.workflows[0].steps[0].parameters[0].reference")
+        );
+
+        // Error inside CriterionType::Expression.version.
+        let bad_criterion = VALID.replace(
+            "      - stepId: find\n        operationId: findPet\n",
+            "      - stepId: find\n        operationId: findPet\n        successCriteria:\n          - context: $response.body\n            condition: $.ok\n            type:\n              type: jsonpath\n              version: 99\n",
+        );
+        let doc = read(&bad_criterion);
+        assert_eq!(
+            doc.diagnostics()[0].path.as_deref(),
+            Some("#.workflows[0].steps[0].successCriteria[0].type.version")
+        );
     }
 
     #[test]

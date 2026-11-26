@@ -1140,10 +1140,11 @@ fn a_message_trait_gives_what_the_message_leaves_out() {
     assert!(report.is_success(), "{report}");
     // The correlation id comes from the second trait.
     assert_eq!(report.outputs["got"], json!("mine"));
-    // The first trait that sets a field wins.
+    // Per AsyncAPI's sequential JSON Merge Patch order, later traits override
+    // earlier ones (and the message's own fields win over all traits).
     assert_eq!(
         messages.published()[0].content_type.as_deref(),
-        Some("text/plain")
+        Some("application/xml")
     );
 }
 
@@ -1351,4 +1352,42 @@ fn an_end_in_a_called_workflow_closes_its_receives() {
     assert!(report.is_success(), "{report}");
     assert!(messages.received().is_empty());
     assert_eq!(messages.unsubscribed(), [SubscriptionId(1)]);
+}
+
+#[test]
+fn channel_server_ref_into_components_servers_is_resolved() {
+    let asyncapi_doc = json!({
+        "asyncapi": "3.0.0",
+        "info": { "title": "T", "version": "1" },
+        "channels": {
+            "events": {
+                "address": "events.v1",
+                "servers": [{ "$ref": "#/components/servers/prodBroker" }],
+                "messages": { "evt": { "payload": {} } }
+            }
+        },
+        "components": {
+            "servers": {
+                "prodBroker": { "host": "broker.example.com:9092", "protocol": "kafka" }
+            }
+        }
+    });
+    let desc = description(
+        json!([{
+            "stepId": "pub",
+            "channelPath": "$sourceDescriptions.orders#/channels/events",
+            "action": "send",
+            "requestBody": { "payload": { "ok": true } }
+        }]),
+        json!({}),
+    );
+    let opts = Options::new().source("orders", "https://example.com/asyncapi.json", asyncapi_doc);
+    let mut messages = Fake::new();
+    let report = execute_with_messages(&desc, &opts, &mut Fake::new(), &mut messages).unwrap();
+    assert!(report.is_success(), "{report}");
+    let servers = &messages.published()[0].channel.servers;
+    assert_eq!(
+        servers.get("prodBroker").and_then(|s| s.get("host")),
+        Some(&json!("broker.example.com:9092"))
+    );
 }

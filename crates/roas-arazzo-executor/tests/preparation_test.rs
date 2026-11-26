@@ -1064,3 +1064,47 @@ fn preparation_accepts_v1_0_after_upconversion() {
             .is_success()
     );
 }
+
+#[test]
+fn selected_workflow_depends_on_error_is_reported_once() {
+    for depends_on in [
+        json!(["missingWorkflow"]),
+        json!(["w"]),
+        json!(["$inputs.wf"]),
+    ] {
+        let mut value = document(json!([{ "stepId": "a", "operationId": "check" }]));
+        value["workflows"][0]["dependsOn"] = depends_on;
+        let description: Description = serde_json::from_value(value).unwrap();
+        let error = prepare(&description, &options()).unwrap_err();
+        let dep_errors: Vec<_> = error
+            .diagnostics
+            .iter()
+            .filter(|d| d.path.contains("dependsOn"))
+            .collect();
+        assert_eq!(dep_errors.len(), 1, "expected 1 diagnostic, got: {error}");
+    }
+}
+
+#[test]
+fn prepare_rejects_invalid_request_response_message_field_combinations() {
+    for expr in [
+        "$response.query.x",
+        "$response.path.x",
+        "$response.payload",
+        "$request.payload",
+        "$message.body",
+        "$message.query.x",
+        "$message.path.x",
+    ] {
+        let description: Description = serde_json::from_value(document(json!([{
+            "stepId": "a",
+            "operationId": "check",
+            "outputs": { "v": expr }
+        }])))
+        .unwrap();
+        assert!(
+            prepare(&description, &options()).is_err(),
+            "prepare must reject {expr}"
+        );
+    }
+}

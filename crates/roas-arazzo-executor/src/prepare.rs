@@ -9,7 +9,7 @@ use crate::runtime_syntax::{self, Expression, Root};
 use crate::select::{self, Language};
 use crate::{
     AsyncHttpClient, CriterionError, ExecutionError, ExecutionFailure, ExecutionReport,
-    ExpressionError, HttpClient, Options, Run, SelectError,
+    ExpressionError, HttpClient, Options, Run,
 };
 use roas_arazzo::source_map::{SourcePosition, SourceRange};
 use roas_arazzo::v1_1::{
@@ -379,6 +379,7 @@ fn compile<'d>(
         diagnostics: Vec::new(),
         pending: BTreeSet::new(),
         visited: BTreeSet::new(),
+        checked_dependencies: BTreeSet::new(),
         validated: BTreeSet::from([Doc::ENTRY]),
         orders: BTreeMap::new(),
         endpoints: BTreeMap::new(),
@@ -402,6 +403,7 @@ fn compile<'d>(
     let mut queue = Vec::new();
     if let Some(index) = selected {
         compiler.pending.insert((Doc::ENTRY, index));
+        compiler.checked_dependencies.insert((Doc::ENTRY, index));
         match run::ordered_workflows(
             &compiler.documents,
             Doc::ENTRY,
@@ -562,6 +564,8 @@ struct Compiler<'d> {
     diagnostics: Vec<PreparationDiagnostic>,
     pending: BTreeSet<(Doc, usize)>,
     visited: BTreeSet<(Doc, usize)>,
+    /// Workflows whose `dependsOn` graph has already been checked.
+    checked_dependencies: BTreeSet<(Doc, usize)>,
     /// Documents already structurally validated.
     validated: BTreeSet<Doc>,
     orders: BTreeMap<(Doc, &'d str), Vec<usize>>,
@@ -638,6 +642,18 @@ impl<'d> Compiler<'d> {
         workflow: &'d Workflow,
         error: &ExecutionError,
     ) -> Option<Site<'d>> {
+        // Missing, external, and unsupported workflow targets in `dependsOn`
+        // (both workflow-level and step-level) are already reported at the
+        // exact `dependsOn[i]` site when compiling the declaring workflow;
+        // only cycle errors need an additional diagnostic from
+        // `ordered_workflows`.
+        let inner = match error {
+            ExecutionError::InDocument { error, .. } => error.as_ref(),
+            other => other,
+        };
+        if !matches!(inner, ExecutionError::Circular(_)) {
+            return None;
+        }
         let leads = |reference: &str| match self.documents.resolve(self.current, reference) {
             Ok((doc, index)) => {
                 run::ordered_workflows(&self.documents, doc, self.documents.workflow(doc, index))
@@ -657,7 +673,6 @@ impl<'d> Compiler<'d> {
                 .map(|index| (at, step, index))
         });
         match entry {
-            Some(_) if matches!(error, ExecutionError::UnknownWorkflow(_)) => None,
             Some((at, step, index)) => Some(
                 Site {
                     step: Some(step),
@@ -669,8 +684,7 @@ impl<'d> Compiler<'d> {
         }
     }
 
-    /// `dependsOn` ordering errors. Before sources are supplied, an external
-    /// dependency cannot be ordered yet; [`Self::target`] lists its source.
+    /// `dependsOn` cycle errors raised in the current document.
     fn dependency_error(&mut self, site: &Site<'d>, error: ExecutionError) {
         let error = match error {
             // Raised in the document being compiled: its diagnostic names it.
@@ -686,9 +700,7 @@ impl<'d> Compiler<'d> {
             _ if self.current != Doc::ENTRY => return,
             error => error,
         };
-        if self.resolve_operations || !matches!(error, ExecutionError::ExternalWorkflow { .. }) {
-            self.error(site, error);
-        }
+        self.error(site, error);
     }
 
     fn model_site(&self, path: &str) -> Site<'d> {
@@ -841,8 +853,10 @@ impl<'d> Compiler<'d> {
             }
         }
         // Dependency cycles in a called/recovery workflow are invalid too,
-        // including cycles that pass through another document.
-        if let Err(error) = run::ordered_workflows(&self.documents, self.current, workflow)
+        // including cycles that pass through another document. Skip if this
+        // workflow's dependencies were already checked (e.g. the selected entry).
+        if self.checked_dependencies.insert((self.current, index))
+            && let Err(error) = run::ordered_workflows(&self.documents, self.current, workflow)
             && let Some(at) = self.dependency_site(&site, workflow, &error)
         {
             self.dependency_error(&at, error);
@@ -1680,14 +1694,8 @@ impl<'d> Compiler<'d> {
                 }
             }
             Language::Pointer => {
-                let pointer = text.strip_prefix('#').unwrap_or(text);
-                let bad_escape = pointer
-                    .as_bytes()
-                    .windows(2)
-                    .any(|pair| pair[0] == b'~' && !matches!(pair[1], b'0' | b'1'))
-                    || pointer.ends_with('~');
-                if (!pointer.is_empty() && !pointer.starts_with('/')) || bad_escape {
-                    self.error(site, SelectError::Malformed { selector: text.into(), kind: "JSON Pointer", message: "expected an empty pointer or slash-delimited tokens with only ~0/~1 escapes".into() });
+                if let Err(error) = select::validate_pointer(text) {
+                    self.error(site, error);
                 }
             }
             #[cfg(feature = "xpath")]

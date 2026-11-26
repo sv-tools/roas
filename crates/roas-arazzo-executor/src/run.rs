@@ -452,18 +452,20 @@ struct Frame<'d> {
     caller: Option<(String, Then)>,
     /// When this frame started, for a calling step's `timeout`.
     started: Instant,
-    /// Where to come back to when a retry sent the run to another step
-    /// first: "context transfers back upon completion".
-    detour: Option<usize>,
+    /// Stack of step indices to return to when a retry sent the run to
+    /// another step first: "context transfers back upon completion". A stack
+    /// preserves outer detours when a detour step itself triggers a retry
+    /// detour.
+    detour: Vec<usize>,
     /// Receive steps listening in the background, oldest first.
     listening: Vec<Listening>,
     /// Where to come back to once a receive that was joined is done — the
     /// step that needed it, or the end of the workflow — and the detour
-    /// that was pending there.
+    /// stack that was pending there.
     /// A stack: a step a joined receive goes back to may itself join one.
     /// Each entry: the receive step joined, where to go back to, and the
-    /// detour pending there. Only that receive's completion pops it.
-    resume: Vec<(usize, usize, Option<usize>)>,
+    /// detour stack pending there. Only that receive's completion pops it.
+    resume: Vec<(usize, usize, Vec<usize>)>,
     /// An `end`, or a `goto` to another workflow, finished it.
     ended: bool,
     outcome: Outcome,
@@ -1346,7 +1348,7 @@ impl<'d> Run<'d> {
         // back there.
         frame
             .resume
-            .push((listening.step, frame.at, frame.detour.take()));
+            .push((listening.step, frame.at, std::mem::take(&mut frame.detour)));
         frame.at = frame
             .order
             .iter()
@@ -1749,7 +1751,7 @@ impl<'d> Run<'d> {
             retries: BTreeMap::new(),
             caller,
             started: Instant::now(),
-            detour: None,
+            detour: Vec::new(),
             listening: Vec::new(),
             resume: Vec::new(),
             ended: false,
@@ -1958,18 +1960,13 @@ impl<'d> Run<'d> {
         match then {
             // A `goto` handed the workflow over: what it did is what the
             // workflow that left it did, and there is nothing to come
-            // back to.
+            // back to. Preserve the triggering step's own StepState and
+            // exchange (the target workflow's outputs are already recorded in
+            // `self.finished` under `$workflows.<id>`).
             Then::EndCaller => {
                 let parent = self.frames.last_mut().expect("the parent is still there");
-                parent.steps.insert(
-                    step_id,
-                    StepState {
-                        exchange: None,
-                        outputs,
-                        passed: frame.outcome != Outcome::Failed,
-                    },
-                );
                 parent.at = parent.order.len();
+                parent.detour.clear();
                 parent.resume.clear();
                 parent.ended = true;
                 parent.outcome = frame.outcome;
@@ -2170,8 +2167,9 @@ impl<'d> Run<'d> {
         if !cookies.is_empty() {
             headers.push(("Cookie".to_owned(), cookies.join("; ")));
         }
+        let step_header_count = headers.len();
         for (name, value) in &self.options.headers {
-            if !headers
+            if !headers[..step_header_count]
                 .iter()
                 .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
             {
@@ -2331,7 +2329,7 @@ impl<'d> Run<'d> {
                 // the step that asked for it, which is tried again.
                 // A receive completed where it was needed hands control
                 // back there.
-                if let Some(back) = frame.detour.take() {
+                if let Some(back) = frame.detour.pop() {
                     frame.at = back;
                 } else if let Some((_, back, detour)) = pop_resume(frame, frame.order[frame.at]) {
                     frame.at = back;
@@ -2348,6 +2346,7 @@ impl<'d> Run<'d> {
                 self.pending.clear();
                 frame.outcome = outcome;
                 frame.at = frame.order.len();
+                frame.detour.clear();
                 frame.resume.clear();
                 frame.ended = true;
                 // Nothing is forced on the caller here: a workflow that
@@ -2392,7 +2391,9 @@ impl<'d> Run<'d> {
                     (Some(target), _) => {
                         let at = position_of(frame, &target)
                             .map_err(|error| locate(&self.documents, here, error))?;
-                        frame.detour = Some(frame.at);
+                        if at != frame.at {
+                            frame.detour.push(frame.at);
+                        }
                         frame.at = at;
                         Ok(())
                     }
@@ -2485,7 +2486,7 @@ fn correlation(location: &str, message: &expression::Message) -> Option<Value> {
 }
 
 /// The innermost resume entry, if it belongs to the receive `step`.
-fn pop_resume(frame: &mut Frame<'_>, step: usize) -> Option<(usize, usize, Option<usize>)> {
+fn pop_resume(frame: &mut Frame<'_>, step: usize) -> Option<(usize, usize, Vec<usize>)> {
     if frame
         .resume
         .last()
@@ -2838,7 +2839,7 @@ fn body(
         .unwrap_or_else(|| default_type.to_owned());
     // A string payload sent as anything but JSON goes as it is written;
     // everything else is JSON on the wire.
-    let bytes = match (&payload, content_type.contains("json")) {
+    let bytes = match (&payload, content_type.to_ascii_lowercase().contains("json")) {
         (Value::String(text), false) => text.clone().into_bytes(),
         _ => payload.to_string().into_bytes(),
     };
@@ -3116,7 +3117,7 @@ fn alongside(frame: &Frame<'_>, index: usize) -> bool {
         && step.on_failure.is_empty()
         && frame.workflow.success_actions.is_empty()
         && frame.workflow.failure_actions.is_empty()
-        && frame.detour.is_none()
+        && frame.detour.is_empty()
         && frame.resume.is_empty()
 }
 

@@ -24,7 +24,7 @@ pub mod workflow;
 
 pub use crate::common::reusable::{ResolveError, ResolveReusable, Reusable, ReusableOr};
 pub use components::Components;
-pub use criterion::{Criterion, CriterionType};
+pub use criterion::{Criterion, CriterionExpressionKind, CriterionExpressionType, CriterionType};
 pub use description::Description;
 pub use failure_action::{FailureAction, FailureActionType};
 pub use info::Info;
@@ -33,5 +33,5 @@ pub use request_body::{PayloadReplacement, RequestBody};
 pub use source_description::{SourceDescription, SourceType};
 pub use step::Step;
 pub use success_action::{SuccessAction, SuccessActionType};
-pub use version::Version;
+pub use version::{InvalidVersion, Version};
 pub use workflow::Workflow;

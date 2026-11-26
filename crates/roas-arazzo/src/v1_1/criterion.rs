@@ -6,8 +6,13 @@
 
 use crate::v1_1::expression_type::ExpressionType;
 use crate::validation::{Context, ValidateWithContext};
+use serde::de::{
+    MapAccess, Visitor,
+    value::{MapAccessDeserializer, StrDeserializer},
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 
 /// The plain (string) condition types.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
@@ -43,16 +48,26 @@ impl<'de> Deserialize<'de> for CriterionType {
     where
         D: Deserializer<'de>,
     {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        if value.is_string() {
-            serde_json::from_value(value)
-                .map(CriterionType::Simple)
-                .map_err(serde::de::Error::custom)
-        } else {
-            serde_json::from_value(value)
-                .map(CriterionType::Expression)
-                .map_err(serde::de::Error::custom)
+        struct CriterionTypeVisitor;
+
+        impl<'de> Visitor<'de> for CriterionTypeVisitor {
+            type Value = CriterionType;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a criterion type string or expression type object")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                CriterionKind::deserialize(StrDeserializer::new(v)).map(CriterionType::Simple)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                ExpressionType::deserialize(MapAccessDeserializer::new(map))
+                    .map(CriterionType::Expression)
+            }
         }
+
+        deserializer.deserialize_any(CriterionTypeVisitor)
     }
 }
 
@@ -88,6 +103,9 @@ pub struct Criterion {
 impl ValidateWithContext for Criterion {
     fn validate_with_context(&self, ctx: &mut Context) {
         ctx.require_non_empty("condition", &self.condition);
+        if let Some(context) = &self.context {
+            ctx.require_non_empty("context", context);
+        }
 
         // `dependentRequired`: a `type` requires a `context`.
         if self.type_.is_some() && self.context.is_none() {
@@ -164,5 +182,20 @@ mod tests {
                 .iter()
                 .any(|e| e == "#.c.context: is required when `type` is set")
         );
+    }
+
+    #[test]
+    fn empty_context_and_non_string_or_map_type_are_rejected() {
+        let c = Criterion {
+            context: Some(String::new()),
+            condition: "x".into(),
+            ..Default::default()
+        };
+        assert!(
+            validate(&c)
+                .iter()
+                .any(|e| e == "#.c.context: must not be empty")
+        );
+        assert!(serde_json::from_value::<CriterionType>(json!(42)).is_err());
     }
 }

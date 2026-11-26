@@ -236,6 +236,25 @@ pub(crate) fn version_message(expression: &roas_arazzo::v1_1::ExpressionType) ->
     }
 }
 
+/// Validate a JSON Pointer (with optional leading `#` fragment marker) per RFC 6901.
+pub(crate) fn validate_pointer(text: &str) -> Result<&str, SelectError> {
+    let pointer = text.strip_prefix('#').unwrap_or(text);
+    let bad_escape = pointer
+        .as_bytes()
+        .windows(2)
+        .any(|pair| pair[0] == b'~' && !matches!(pair[1], b'0' | b'1'))
+        || pointer.ends_with('~');
+    if (!pointer.is_empty() && !pointer.starts_with('/')) || bad_escape {
+        return Err(SelectError::Malformed {
+            selector: text.to_owned(),
+            kind: "JSON Pointer",
+            message: "expected an empty pointer or slash-delimited tokens with only ~0/~1 escapes"
+                .to_owned(),
+        });
+    }
+    Ok(pointer)
+}
+
 /// Apply `selector` to `data`. `None` when it picked nothing.
 pub(crate) fn apply(
     language: Language,
@@ -247,7 +266,7 @@ pub(crate) fn apply(
         Language::Pointer => {
             // A pointer may be written with the `#` that would precede
             // it in a URI fragment.
-            let pointer = selector.strip_prefix('#').unwrap_or(selector);
+            let pointer = validate_pointer(selector)?;
             Ok(data.pointer(pointer).cloned())
         }
         Language::Path => {
@@ -297,8 +316,26 @@ pub(crate) fn place(
     value: Value,
     compiled: Option<&crate::prepare::Compiled<'_>>,
 ) -> Result<(), String> {
-    let pointer = match language {
-        Language::Pointer => target.strip_prefix('#').unwrap_or(target).to_owned(),
+    match language {
+        Language::Pointer => {
+            let pointer = validate_pointer(target).map_err(|error| error.to_string())?;
+            if let Some(slot) = data.pointer_mut(pointer) {
+                *slot = value;
+                return Ok(());
+            }
+            // A pointer may name a member that is not there yet, which is how a
+            // replacement adds one.
+            let (parent, member) = pointer
+                .rsplit_once('/')
+                .ok_or_else(|| format!("`{target}` does not point anywhere in the payload"))?;
+            match data.pointer_mut(parent) {
+                Some(Value::Object(members)) => {
+                    members.insert(member.replace("~1", "/").replace("~0", "~"), value);
+                    Ok(())
+                }
+                _ => Err(format!("`{target}` points into nothing the payload has")),
+            }
+        }
         Language::Path => {
             let owned;
             let path = match compiled.and_then(|compiled| compiled.paths.get(target)) {
@@ -308,31 +345,39 @@ pub(crate) fn place(
                     &owned
                 }
             };
-            path.query_located(data)
+            let mut seen = std::collections::BTreeSet::new();
+            let mut pointers: Vec<String> = path
+                .query_located(data)
                 .locations()
-                .next()
                 .map(|location| location.to_json_pointer())
-                .ok_or_else(|| format!("`{target}` matches nothing in the payload"))?
+                .filter(|pointer| seen.insert(pointer.clone()))
+                .collect();
+            if pointers.is_empty() {
+                return Err(format!("`{target}` matches nothing in the payload"));
+            }
+            // Replace deepest locations first so replacing an ancestor never
+            // invalidates a matched descendant pointer.
+            pointers.sort_by(|a, b| {
+                let depth_a = a.bytes().filter(|&byte| byte == b'/').count();
+                let depth_b = b.bytes().filter(|&byte| byte == b'/').count();
+                depth_b.cmp(&depth_a)
+            });
+            let mut value = Some(value);
+            let last = pointers.len() - 1;
+            for (index, pointer) in pointers.into_iter().enumerate() {
+                if let Some(slot) = data.pointer_mut(&pointer) {
+                    *slot = if index == last {
+                        value.take().expect("last iteration")
+                    } else {
+                        value.as_ref().expect("value available").clone()
+                    };
+                }
+            }
+            Ok(())
         }
         // Refused by `target_kind_of` before it gets here.
         #[cfg(feature = "xpath")]
-        Language::Xpath(_) => return Err(format!("`{target}` is an XPath target")),
-    };
-    if let Some(slot) = data.pointer_mut(&pointer) {
-        *slot = value;
-        return Ok(());
-    }
-    // A pointer may name a member that is not there yet, which is how a
-    // replacement adds one.
-    let (parent, member) = pointer
-        .rsplit_once('/')
-        .ok_or_else(|| format!("`{target}` does not point anywhere in the payload"))?;
-    match data.pointer_mut(parent) {
-        Some(Value::Object(members)) => {
-            members.insert(member.replace("~1", "/").replace("~0", "~"), value);
-            Ok(())
-        }
-        _ => Err(format!("`{target}` points into nothing the payload has")),
+        Language::Xpath(_) => Err(format!("`{target}` is an XPath target")),
     }
 }
 
@@ -619,5 +664,61 @@ mod tests {
             ),
             Err(SelectError::Expression(_))
         ));
+    }
+
+    #[test]
+    fn jsonpath_place_replaces_every_match_and_deduplicates_nested_matches() {
+        let mut payload = json!({
+            "items": [
+                { "status": "old", "id": 1 },
+                { "status": "old", "id": 2 },
+                { "status": "old", "id": 3 }
+            ]
+        });
+        place(
+            Language::Path,
+            "$.items[*].status",
+            &mut payload,
+            json!("new"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            payload,
+            json!({
+                "items": [
+                    { "status": "new", "id": 1 },
+                    { "status": "new", "id": 2 },
+                    { "status": "new", "id": 3 }
+                ]
+            })
+        );
+
+        // Duplicate selectors and nested ancestor+descendant matches.
+        let mut nested = json!({ "a": { "a": 1 } });
+        place(Language::Path, "$..a", &mut nested, json!(42), None).unwrap();
+        assert_eq!(nested, json!({ "a": 42 }));
+    }
+
+    #[test]
+    fn lazy_pointer_validates_syntax_and_escapes() {
+        let data = json!({ "a": 1 });
+        for bad in ["a", "/a~2b", "/a~", "#a", "#/a~"] {
+            assert!(
+                matches!(
+                    apply(Language::Pointer, bad, &data, None),
+                    Err(SelectError::Malformed {
+                        kind: "JSON Pointer",
+                        ..
+                    })
+                ),
+                "expected malformed pointer error for {bad}"
+            );
+            let mut target = data.clone();
+            assert!(
+                place(Language::Pointer, bad, &mut target, json!(2), None).is_err(),
+                "expected place error for {bad}"
+            );
+        }
     }
 }

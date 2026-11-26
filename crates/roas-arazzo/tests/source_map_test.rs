@@ -3,6 +3,9 @@
 //! real documents, not only on hand-picked scalars.
 #![cfg(feature = "source-map")]
 
+#[path = "../src/test_yaml.rs"]
+mod yaml;
+
 use roas_arazzo::source_map::SourceMap;
 use serde_json::Value;
 use std::path::Path;
@@ -35,7 +38,7 @@ fn every_fixture_string_maps_back_to_its_spelling() {
         for entry in std::fs::read_dir(&directory).unwrap() {
             let path = entry.unwrap().path();
             let text = std::fs::read_to_string(&path).unwrap();
-            let value: Value = serde_saphyr::from_str(&text).unwrap();
+            let value: Value = yaml::from_str(&text).unwrap();
             let map = SourceMap::parse(text.clone()).unwrap();
             let mut strings = Vec::new();
             walk(&value, "#".into(), &mut strings);

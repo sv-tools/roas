@@ -2,7 +2,7 @@
 //!
 //! The typed models are built from a [`serde_json::Value`] and keep no
 //! text, so locations live beside them in a [`SourceMap`]: built from the
-//! original JSON or YAML text with [`SourceMap::parse`] (feature
+//! original JSON or YAML text with `SourceMap::parse` (feature
 //! `source-map`), and queried with the same model-style paths that
 //! [`ValidationError::path`](crate::validation::ValidationError) and the
 //! executor's diagnostics carry, such as
@@ -192,7 +192,7 @@ impl std::error::Error for SourceMapError {}
 
 /// The locations of a document's members and values.
 ///
-/// Built from text with [`SourceMap::parse`] (feature `source-map`).
+/// Built from text with `SourceMap::parse` (feature `source-map`).
 pub struct SourceMap {
     text: String,
     index: LineIndex,
@@ -551,6 +551,9 @@ fn walk<'n>(
                 };
                 for (member, child) in named {
                     walk(child, &tokens[taken..], Some(member), cache, found);
+                    if found.len() >= 2 {
+                        return;
+                    }
                 }
             }
         }
@@ -925,5 +928,37 @@ mod tests {
         };
         assert_eq!(error.message(), "bad");
         assert_eq!(error.to_string(), "bad");
+    }
+
+    #[test]
+    fn deeply_ambiguous_dotted_tree_short_circuits_without_backtracking() {
+        // 24 levels of `{ a: next, "a.a": next_next }` would have Fibonacci(25)
+        // paths without short-circuiting at 2 matches.
+        let mut leaf = scalar(0, 1, "v");
+        let mut next = Node {
+            start: 0,
+            end: 1,
+            text_end: 1,
+            kind: Kind::Map(vec![(key("a", 0), leaf.clone())]),
+        };
+        for _ in 0..24 {
+            let parent = Node {
+                start: 0,
+                end: 1,
+                text_end: 1,
+                kind: Kind::Map(vec![
+                    (key("a", 0), next.clone()),
+                    (key("a.a", 0), leaf.clone()),
+                ]),
+            };
+            leaf = next;
+            next = parent;
+        }
+        let map = SourceMap::new("v".into(), next);
+        let mut path = String::from("#");
+        for _ in 0..25 {
+            path.push_str(".a");
+        }
+        assert_eq!(map.locate(&path), None);
     }
 }

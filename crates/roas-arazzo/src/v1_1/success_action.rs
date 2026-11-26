@@ -57,12 +57,26 @@ pub struct SuccessAction {
 impl ValidateWithContext for SuccessAction {
     fn validate_with_context(&self, ctx: &mut Context) {
         ctx.require_non_empty("name", &self.name);
+        if let Some(wf) = &self.workflow_id {
+            ctx.require_non_empty("workflowId", wf);
+        }
+        if let Some(step) = &self.step_id {
+            ctx.require_non_empty("stepId", step);
+        }
         validate_goto_target(
             self.type_ == SuccessActionType::Goto,
             self.workflow_id.is_some(),
             self.step_id.is_some(),
             ctx,
         );
+        if self.type_ == SuccessActionType::End {
+            if self.workflow_id.is_some() {
+                ctx.error_field("workflowId", "is only valid when `type` is `goto`");
+            }
+            if self.step_id.is_some() {
+                ctx.error_field("stepId", "is only valid when `type` is `goto`");
+            }
+        }
         if !self.parameters.is_empty() && self.workflow_id.is_none() {
             ctx.error_field("parameters", "are only valid when `workflowId` is set");
         }
@@ -155,6 +169,31 @@ mod tests {
             validate(&a)
                 .iter()
                 .any(|e| e == "#.a.criteria[0].condition: must not be empty")
+        );
+    }
+
+    #[test]
+    fn end_action_rejects_goto_targets_and_empty_targets() {
+        let a = SuccessAction {
+            name: "n".into(),
+            type_: SuccessActionType::End,
+            workflow_id: Some(String::new()),
+            step_id: Some(String::new()),
+            ..Default::default()
+        };
+        let errs = validate(&a);
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.a.workflowId: must not be empty")
+        );
+        assert!(errs.iter().any(|e| e == "#.a.stepId: must not be empty"));
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.a.workflowId: is only valid when `type` is `goto`")
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.a.stepId: is only valid when `type` is `goto`")
         );
     }
 }

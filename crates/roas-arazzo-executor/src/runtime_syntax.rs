@@ -143,9 +143,17 @@ pub(crate) fn prefix(text: &str) -> Result<(Expression<'_>, usize), ExpressionEr
                 parser.exchange(field)?
             }
         }
-        Root::Request | Root::Response | Root::Message => {
+        Root::Request => {
             parser.required_dot()?;
-            parser.source()?
+            parser.source(SourceKind::Request)?
+        }
+        Root::Response => {
+            parser.required_dot()?;
+            parser.source(SourceKind::Response)?
+        }
+        Root::Message => {
+            parser.required_dot()?;
+            parser.source(SourceKind::Message)?
         }
         Root::Url | Root::Method | Root::StatusCode | Root::Self_ => false,
     };
@@ -276,9 +284,17 @@ impl<'a> Parser<'a> {
     fn exchange(&mut self, field: &str) -> Result<bool, ExpressionError> {
         match field {
             "url" | "method" | "statusCode" => Ok(false),
-            "request" | "response" | "message" => {
+            "request" => {
                 self.required_dot()?;
-                self.source()
+                self.source(SourceKind::Request)
+            }
+            "response" => {
+                self.required_dot()?;
+                self.source(SourceKind::Response)
+            }
+            "message" => {
+                self.required_dot()?;
+                self.source(SourceKind::Message)
             }
             _ => Err(syntax(
                 self.text,
@@ -288,11 +304,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn source(&mut self) -> Result<bool, ExpressionError> {
+    fn source(&mut self, kind: SourceKind) -> Result<bool, ExpressionError> {
         let field = self.identifier(false)?;
-        match field {
-            "body" | "payload" => Ok(true),
-            "header" => {
+        match (kind, field) {
+            (SourceKind::Request | SourceKind::Response, "body")
+            | (SourceKind::Message, "payload") => Ok(true),
+            (_, "header") => {
                 self.required_dot()?;
                 let start = self.at;
                 self.at += self
@@ -306,7 +323,7 @@ impl<'a> Parser<'a> {
                 self.parts.push(&self.text[start..self.at]);
                 Ok(false)
             }
-            "query" | "path" => {
+            (SourceKind::Request, "query" | "path") => {
                 self.required_dot()?;
                 self.unrestricted()?;
                 Ok(false)
@@ -314,10 +331,21 @@ impl<'a> Parser<'a> {
             _ => Err(syntax(
                 self.text,
                 self.at - field.len(),
-                "unknown request/response source",
+                match kind {
+                    SourceKind::Request => "unknown request source",
+                    SourceKind::Response => "unknown response source",
+                    SourceKind::Message => "unknown message source",
+                },
             )),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum SourceKind {
+    Request,
+    Response,
+    Message,
 }
 
 fn validate_pointer(text: &str, start: usize) -> Result<(), ExpressionError> {
@@ -452,6 +480,16 @@ mod tests {
             "$steps.id.request.bad",
             "$request.unknown",
             "$response.unknown",
+            "$response.query.x",
+            "$response.path.x",
+            "$response.payload",
+            "$request.payload",
+            "$message.body",
+            "$message.query.x",
+            "$message.path.x",
+            "$steps.id.response.query.x",
+            "$steps.id.request.payload",
+            "$steps.id.message.body",
         ] {
             let error = parse(text).unwrap_err();
             assert!(

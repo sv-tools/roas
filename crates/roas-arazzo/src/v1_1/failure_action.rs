@@ -67,12 +67,42 @@ pub struct FailureAction {
 impl ValidateWithContext for FailureAction {
     fn validate_with_context(&self, ctx: &mut Context) {
         ctx.require_non_empty("name", &self.name);
+        if let Some(wf) = &self.workflow_id {
+            ctx.require_non_empty("workflowId", wf);
+        }
+        if let Some(step) = &self.step_id {
+            ctx.require_non_empty("stepId", step);
+        }
         validate_goto_target(
             self.type_ == FailureActionType::Goto,
             self.workflow_id.is_some(),
             self.step_id.is_some(),
             ctx,
         );
+        match self.type_ {
+            FailureActionType::End => {
+                if self.workflow_id.is_some() {
+                    ctx.error_field("workflowId", "is not valid when `type` is `end`");
+                }
+                if self.step_id.is_some() {
+                    ctx.error_field("stepId", "is not valid when `type` is `end`");
+                }
+            }
+            FailureActionType::Retry => {
+                if self.workflow_id.is_some() && self.step_id.is_some() {
+                    ctx.error("`workflowId` and `stepId` are mutually exclusive");
+                }
+            }
+            FailureActionType::Goto => {}
+        }
+        if self.type_ != FailureActionType::Retry {
+            if self.retry_after.is_some() {
+                ctx.error_field("retryAfter", "is only valid when `type` is `retry`");
+            }
+            if self.retry_limit.is_some() {
+                ctx.error_field("retryLimit", "is only valid when `type` is `retry`");
+            }
+        }
         if !self.parameters.is_empty() && self.workflow_id.is_none() {
             ctx.error_field("parameters", "are only valid when `workflowId` is set");
         }
@@ -187,6 +217,54 @@ mod tests {
             validate(&a)
                 .iter()
                 .any(|e| e == "#.a.criteria[0].condition: must not be empty")
+        );
+    }
+
+    #[test]
+    fn cross_type_fields_and_empty_targets_are_rejected() {
+        let end_bad = FailureAction {
+            name: "n".into(),
+            type_: FailureActionType::End,
+            workflow_id: Some(String::new()),
+            step_id: Some(String::new()),
+            retry_after: Some(1.0),
+            retry_limit: Some(2),
+            ..Default::default()
+        };
+        let errs = validate(&end_bad);
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.a.workflowId: must not be empty")
+        );
+        assert!(errs.iter().any(|e| e == "#.a.stepId: must not be empty"));
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.a.workflowId: is not valid when `type` is `end`")
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.a.stepId: is not valid when `type` is `end`")
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.a.retryAfter: is only valid when `type` is `retry`")
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.a.retryLimit: is only valid when `type` is `retry`")
+        );
+
+        let retry_both = FailureAction {
+            name: "n".into(),
+            type_: FailureActionType::Retry,
+            workflow_id: Some("w".into()),
+            step_id: Some("s".into()),
+            ..Default::default()
+        };
+        assert!(
+            validate(&retry_both)
+                .iter()
+                .any(|e| e == "#.a: `workflowId` and `stepId` are mutually exclusive")
         );
     }
 }
