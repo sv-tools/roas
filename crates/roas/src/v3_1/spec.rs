@@ -308,10 +308,8 @@ pub struct TagGroup {
     /// **Required** The tags included in the group.
     pub tags: Vec<String>,
 
-    /// Allows extensions on the tag group extension object.
-    ///
-    /// Any other key the object does not define is kept here too, so the document round-trips;
-    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
+    /// Additional fields on the `x-tagGroups` vendor-extension payload.
+    /// Kept verbatim so the document round-trips; not reported as unknown OpenAPI fields.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1120,7 +1118,8 @@ impl Validate for Spec {
 
 impl ValidateWithContext<Spec> for TagGroup {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        // `x-tagGroups` is a vendor-extension payload, so additional keys are
+        // preserved without unknown-field errors.
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         if self.tags.is_empty() {
             ctx.error(format!("{path}.tags"), "must contain at least one tag");

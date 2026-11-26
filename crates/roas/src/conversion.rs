@@ -6,11 +6,21 @@
 //! model cannot hold — a gap in the conversion, not in the input — fails with a
 //! [`ConversionError`] instead of panicking.
 //!
-//! An object other than a schema carries only its `x-` extensions to the next version: a key it
-//! does not define is left out, as it has no meaning the target can take on, and validating the
-//! input reports it ([`crate::validation::Options::IgnoreUnknownFields`]). A schema of v3.0 or later
-//! carries every keyword, since JSON Schema allows keywords a model does not know.
+//! An object other than a schema carries only its `x-` extensions to the next version: keys that
+//! the source version does not define on that object are stripped before serializing, because they
+//! have no meaning the target can take on (and the target may define a typed field with the same
+//! name). Because stripping is silent during `TryFrom`, callers that want unknown keys reported
+//! should validate the source document before converting
+//! ([`crate::validation::Options::IgnoreUnknownFields`]). Schemas of v3.0 and later keep all of
+//! their keywords (`common::schema_keywords`), and vendor-extension payload objects (`x-logo`,
+//! `x-codeSamples`, `x-badges`, `x-tagGroups`, `x-servers`) keep all of their fields.
 
+#[cfg(any(
+    all(feature = "v2", feature = "v3_0"),
+    all(feature = "v3_0", feature = "v3_1"),
+    all(feature = "v3_1", feature = "v3_2"),
+))]
+use crate::strip_unknown::StripUnknownFields;
 use thiserror::Error;
 
 /// A description could not be converted from one OpenAPI version to the next.
@@ -44,14 +54,15 @@ pub(crate) struct Conversion {
     all(feature = "v3_1", feature = "v3_2"),
 ))]
 impl Conversion {
-    /// `spec` as JSON, to be rewritten for the target version. Objects other than schemas
-    /// keep only their `x-` extensions (see the module documentation).
-    pub(crate) fn to_json<S: serde::Serialize>(
+    /// `spec` as JSON, to be rewritten for the target version. Unknown
+    /// (non-`x-`) keys on non-schema objects are stripped explicitly before
+    /// serializing (see the module documentation).
+    pub(crate) fn to_json<S: serde::Serialize + StripUnknownFields>(
         self,
-        spec: S,
+        mut spec: S,
     ) -> Result<serde_json::Value, ConversionError> {
-        crate::common::extensions::with_extensions_only(|| serde_json::to_value(spec))
-            .map_err(|source| self.error(source))
+        spec.strip_unknown_fields();
+        serde_json::to_value(spec).map_err(|source| self.error(source))
     }
 
     /// The rewritten JSON as the target version's model.

@@ -114,6 +114,9 @@ impl ValidateWithContext<Spec> for Header {
             (false, false) => ctx.error(path.clone(), "must define either `schema` or `content`"),
             _ => {}
         }
+        if let Some(schema) = &self.schema {
+            schema.validate_with_context(ctx, format!("{path}.schema"));
+        }
         if let Some(examples) = &self.examples {
             for (k, v) in examples {
                 v.validate_with_context(ctx, format!("{path}.examples[{k}]"));

@@ -122,14 +122,28 @@ pub fn validate_unknown_fields<T>(
     ctx: &mut Context<T>,
     path: &str,
 ) {
+    validate_unknown_fields_allowing(extensions, &[], ctx, path);
+}
+
+/// Like [`validate_unknown_fields`], but also permits any key listed in `allowed`
+/// (used for OAS 2.0 object types whose Rust model splits one specification object across
+/// per-type structs).
+pub fn validate_unknown_fields_allowing<T>(
+    extensions: &Option<BTreeMap<String, serde_json::Value>>,
+    allowed: &[&str],
+    ctx: &mut Context<T>,
+    path: &str,
+) {
     if ctx.is_option(Options::IgnoreUnknownFields) {
         return;
     }
     for key in crate::common::extensions::unknown_fields(extensions) {
-        ctx.error(
-            format!("{path}.{key}"),
-            "not a field of this object; only `x-` extensions may be added",
-        );
+        if !allowed.contains(&key) {
+            ctx.error(
+                format!("{path}.{key}"),
+                "not a field of this object; only `x-` extensions may be added",
+            );
+        }
     }
 }
 

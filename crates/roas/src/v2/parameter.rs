@@ -1,7 +1,10 @@
 //! Parameter Object
 
 use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{validate_pattern, validate_required_string, validate_unknown_fields};
+use crate::common::helpers::{
+    validate_pattern, validate_required_string, validate_unknown_fields,
+    validate_unknown_fields_allowing,
+};
 use crate::common::reference::RefOr;
 use crate::v2::items::Items;
 use crate::v2::schema::Schema;
@@ -660,16 +663,43 @@ impl ValidateWithContext<Spec> for InFormData {
     }
 }
 
+/// Fixed fields defined on OAS 2.0 non-body Parameter Objects (`in: query`,
+/// `header`, `path`, `formData`).
+pub(crate) const NON_BODY_PARAMETER_KEYWORDS: &[&str] = &[
+    "allowEmptyValue",
+    "collectionFormat",
+    "default",
+    "description",
+    "enum",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "format",
+    "in",
+    "items",
+    "maxItems",
+    "maxLength",
+    "maximum",
+    "minItems",
+    "minLength",
+    "minimum",
+    "multipleOf",
+    "name",
+    "pattern",
+    "required",
+    "type",
+    "uniqueItems",
+];
+
 impl ValidateWithContext<Spec> for StringParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, NON_BODY_PARAMETER_KEYWORDS, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }
 
 impl ValidateWithContext<Spec> for IntegerParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, NON_BODY_PARAMETER_KEYWORDS, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path);
     }
@@ -677,7 +707,7 @@ impl ValidateWithContext<Spec> for IntegerParameter {
 
 impl ValidateWithContext<Spec> for NumberParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, NON_BODY_PARAMETER_KEYWORDS, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path);
     }
@@ -685,14 +715,14 @@ impl ValidateWithContext<Spec> for NumberParameter {
 
 impl ValidateWithContext<Spec> for BooleanParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, NON_BODY_PARAMETER_KEYWORDS, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }
 
 impl ValidateWithContext<Spec> for ArrayParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, NON_BODY_PARAMETER_KEYWORDS, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         self.items
             .validate_with_context(ctx, format!("{path}.items"));
@@ -701,7 +731,7 @@ impl ValidateWithContext<Spec> for ArrayParameter {
 
 impl ValidateWithContext<Spec> for FileParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, NON_BODY_PARAMETER_KEYWORDS, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }

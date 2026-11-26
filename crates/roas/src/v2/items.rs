@@ -1,7 +1,7 @@
 //! Item Object
 
 use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{validate_pattern, validate_unknown_fields};
+use crate::common::helpers::{validate_pattern, validate_unknown_fields_allowing};
 use crate::v2::spec::Spec;
 use crate::validation::{Context, PushError, ValidateWithContext};
 use serde::{Deserialize, Serialize};
@@ -282,9 +282,30 @@ impl ValidateWithContext<Spec> for Items {
     }
 }
 
+/// Fixed fields defined on the OAS 2.0 Items Object.
+pub(crate) const ITEMS_KEYWORDS: &[&str] = &[
+    "collectionFormat",
+    "default",
+    "enum",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "format",
+    "items",
+    "maxItems",
+    "maxLength",
+    "maximum",
+    "minItems",
+    "minLength",
+    "minimum",
+    "multipleOf",
+    "pattern",
+    "type",
+    "uniqueItems",
+];
+
 impl ValidateWithContext<Spec> for StringItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, ITEMS_KEYWORDS, ctx, &path);
         if let Some(pattern) = &self.pattern {
             validate_pattern(pattern, ctx, format!("{path}.pattern"));
         }
@@ -293,27 +314,27 @@ impl ValidateWithContext<Spec> for StringItem {
 
 impl ValidateWithContext<Spec> for IntegerItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, ITEMS_KEYWORDS, ctx, &path);
         crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path);
     }
 }
 
 impl ValidateWithContext<Spec> for NumberItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, ITEMS_KEYWORDS, ctx, &path);
         crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path);
     }
 }
 
 impl ValidateWithContext<Spec> for BooleanItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, ITEMS_KEYWORDS, ctx, &path);
     }
 }
 
 impl ValidateWithContext<Spec> for ArrayItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, ITEMS_KEYWORDS, ctx, &path);
         // Per the OAS 2.0 schema, nested `items` use the `collectionFormat`
         // enum (csv/ssv/tsv/pipes) — `multi` is reserved for top-level
         // `query` / `formData` array parameters.

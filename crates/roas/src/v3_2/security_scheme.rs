@@ -538,7 +538,7 @@ impl ValidateWithContext<Spec> for OAuth2SecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         validate_unknown_fields(&self.extensions, ctx, &path);
         self.flows
-            .validate_with_context(ctx, format!("{path}.flow"));
+            .validate_with_context(ctx, format!("{path}.flows"));
         validate_optional_uri(
             &self.oauth2_metadata_url,
             ctx,

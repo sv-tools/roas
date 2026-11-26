@@ -448,6 +448,7 @@ impl ValidateWithContext<Spec> for InPath {
         must_be_required(&Some(self.required), ctx, path.clone(), self.name.clone());
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
+        walk_schema_examples_content(ctx, &self.schema, &self.examples, &self.content, &path);
     }
 }
 
@@ -457,6 +458,7 @@ impl ValidateWithContext<Spec> for InQuery {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
+        walk_schema_examples_content(ctx, &self.schema, &self.examples, &self.content, &path);
     }
 }
 
@@ -466,6 +468,7 @@ impl ValidateWithContext<Spec> for InHeader {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
+        walk_schema_examples_content(ctx, &self.schema, &self.examples, &self.content, &path);
     }
 }
 
@@ -475,6 +478,29 @@ impl ValidateWithContext<Spec> for InCookie {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
+        walk_schema_examples_content(ctx, &self.schema, &self.examples, &self.content, &path);
+    }
+}
+
+fn walk_schema_examples_content(
+    ctx: &mut Context<Spec>,
+    schema: &Option<RefOr<Schema>>,
+    examples: &Option<BTreeMap<String, RefOr<Example>>>,
+    content: &Option<BTreeMap<String, MediaType>>,
+    path: &str,
+) {
+    if let Some(schema) = schema {
+        schema.validate_with_context(ctx, format!("{path}.schema"));
+    }
+    if let Some(examples) = examples {
+        for (k, v) in examples {
+            v.validate_with_context(ctx, format!("{path}.examples[{k}]"));
+        }
+    }
+    if let Some(content) = content {
+        for (k, v) in content {
+            v.validate_with_context(ctx, format!("{path}.content[{k}]"));
+        }
     }
 }
 

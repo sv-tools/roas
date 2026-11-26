@@ -134,10 +134,8 @@ pub struct CodeSample {
     /// **Required** Code sample source code.
     pub source: String,
 
-    /// Allows extensions on the code sample extension object.
-    ///
-    /// Any other key the object does not define is kept here too, so the document round-trips;
-    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
+    /// Additional fields on the `x-codeSamples` vendor-extension payload.
+    /// Kept verbatim so the document round-trips; not reported as unknown OpenAPI fields.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,10 +156,8 @@ pub struct Badge {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
 
-    /// Allows extensions on the badge extension object.
-    ///
-    /// Any other key the object does not define is kept here too, so the document round-trips;
-    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
+    /// Additional fields on the `x-badges` vendor-extension payload.
+    /// Kept verbatim so the document round-trips; not reported as unknown OpenAPI fields.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -249,7 +245,8 @@ impl ValidateWithContext<Spec> for Operation {
 
 impl ValidateWithContext<Spec> for CodeSample {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        // `x-codeSamples` is a vendor-extension payload, so additional keys
+        // are preserved without unknown-field errors.
         validate_required_string(&self.lang, ctx, format!("{path}.lang"));
         validate_required_string(&self.source, ctx, format!("{path}.source"));
     }
@@ -257,7 +254,8 @@ impl ValidateWithContext<Spec> for CodeSample {
 
 impl ValidateWithContext<Spec> for Badge {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        // `x-badges` is a vendor-extension payload, so additional keys are
+        // preserved without unknown-field errors.
         validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }

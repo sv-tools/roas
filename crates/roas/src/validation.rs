@@ -309,8 +309,15 @@ pub enum Options {
     IgnoreEmptyExternalDocumentationUrl,
 
     /// Ignore keys an object does not define: neither one of its fields nor an `x-`
-    /// Specification Extension. Schemas of v3.0 and later are exempt, as JSON Schema allows
-    /// keywords a model does not know.
+    /// Specification Extension.
+    ///
+    /// Schemas of v3.0 and later are exempt (their keywords are preserved via
+    /// `common::schema_keywords` — OAS 3.1/3.2 allow arbitrary JSON Schema keywords, and
+    /// v3.0 schemas share the same keyword-preservation policy). Vendor-extension payload
+    /// objects (`x-servers`, `x-tagGroups`, `x-logo`, `x-codeSamples`, `x-badges`) are also
+    /// exempt because any JSON shape is allowed inside an `x-*` extension. Note that
+    /// `PathItem`, `Responses`, and `Ref` reject unknown keys during deserialization rather
+    /// than validation, so this option does not apply to them.
     /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreUnknownFields,
 }

@@ -2,7 +2,7 @@
 
 use crate::common::bool_or::BoolOr;
 use crate::common::formats::{IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{validate_pattern, validate_unknown_fields};
+use crate::common::helpers::{validate_pattern, validate_unknown_fields_allowing};
 use crate::common::reference::RefOr;
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::spec::Spec;
@@ -814,9 +814,45 @@ impl ValidateWithContext<Spec> for Schema {
     }
 }
 
+/// Fixed fields defined on the OAS 2.0 Schema Object (JSON Schema Draft-04
+/// subset plus OpenAPI 2.0 additions). OAS 2.0 permits any of these keywords
+/// regardless of `type`, so per-type Rust structs allow cross-type keywords
+/// that land in `extensions`.
+pub(crate) const SCHEMA_KEYWORDS: &[&str] = &[
+    "additionalProperties",
+    "allOf",
+    "default",
+    "description",
+    "discriminator",
+    "enum",
+    "example",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "externalDocs",
+    "format",
+    "items",
+    "maxItems",
+    "maxLength",
+    "maxProperties",
+    "maximum",
+    "minItems",
+    "minLength",
+    "minProperties",
+    "minimum",
+    "multipleOf",
+    "pattern",
+    "properties",
+    "readOnly",
+    "required",
+    "title",
+    "type",
+    "uniqueItems",
+    "xml",
+];
+
 impl ValidateWithContext<Spec> for AllOfSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, SCHEMA_KEYWORDS, ctx, &path);
         if self.all_of.is_empty() {
             ctx.error(path.clone(), ".allOf: must not be empty");
         }
@@ -831,7 +867,7 @@ impl ValidateWithContext<Spec> for AllOfSchema {
 
 impl ValidateWithContext<Spec> for StringSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, SCHEMA_KEYWORDS, ctx, &path);
         if let Some(docs) = &self.external_docs {
             docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
@@ -846,7 +882,7 @@ impl ValidateWithContext<Spec> for StringSchema {
 
 impl ValidateWithContext<Spec> for IntegerSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, SCHEMA_KEYWORDS, ctx, &path);
         if let Some(docs) = &self.external_docs {
             docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
@@ -859,7 +895,7 @@ impl ValidateWithContext<Spec> for IntegerSchema {
 
 impl ValidateWithContext<Spec> for NumberSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, SCHEMA_KEYWORDS, ctx, &path);
         if let Some(docs) = &self.external_docs {
             docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
@@ -872,7 +908,7 @@ impl ValidateWithContext<Spec> for NumberSchema {
 
 impl ValidateWithContext<Spec> for BooleanSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, SCHEMA_KEYWORDS, ctx, &path);
         if let Some(docs) = &self.external_docs {
             docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
@@ -884,7 +920,7 @@ impl ValidateWithContext<Spec> for BooleanSchema {
 
 impl ValidateWithContext<Spec> for ArraySchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, SCHEMA_KEYWORDS, ctx, &path);
         if let Some(docs) = &self.external_docs {
             docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
@@ -902,7 +938,7 @@ impl ValidateWithContext<Spec> for ArraySchema {
 
 impl ValidateWithContext<Spec> for ObjectSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, SCHEMA_KEYWORDS, ctx, &path);
         if let Some(docs) = &self.external_docs {
             docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
@@ -1000,7 +1036,7 @@ fn is_schema_read_only(schema: &Schema) -> bool {
 
 impl ValidateWithContext<Spec> for NullSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        validate_unknown_fields_allowing(&self.extensions, SCHEMA_KEYWORDS, ctx, &path);
         if let Some(docs) = &self.external_docs {
             docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }

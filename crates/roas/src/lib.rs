@@ -18,6 +18,7 @@ pub use loader::{
     Loader, LoaderError, ResourceFetcher,
 };
 pub mod merge;
+mod strip_unknown;
 pub mod validation;
 
 #[cfg(feature = "v2")]

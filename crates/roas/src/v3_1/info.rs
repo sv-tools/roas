@@ -171,10 +171,8 @@ pub struct Logo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub href: Option<String>,
 
-    /// Allows extensions on the logo extension object.
-    ///
-    /// Any other key the object does not define is kept here too, so the document round-trips;
-    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
+    /// Additional fields on the `x-logo` vendor-extension payload.
+    /// Kept verbatim so the document round-trips; not reported as unknown OpenAPI fields.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -234,7 +232,8 @@ impl ValidateWithContext<Spec> for License {
 
 impl ValidateWithContext<Spec> for Logo {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_unknown_fields(&self.extensions, ctx, &path);
+        // `x-logo` is a vendor-extension payload, so additional keys are
+        // preserved without unknown-field errors.
         // `x-logo` is a Redoc extension, not part of the OAS 3.1 JSON
         // Schema. Redoc consumes real http(s) URLs, so keep URL-only
         // validation here (don't lift to uri-reference).

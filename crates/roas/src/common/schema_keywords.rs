@@ -1,8 +1,9 @@
 //! A schema's catch-all for the keywords its typed fields do not claim.
 //!
-//! JSON Schema allows keywords a model does not know, so a schema keeps every unclaimed key, not
-//! only `x-` extensions as [`crate::common::extensions`] does for the other objects: the document
-//! round-trips without loss, and a conversion carries the keywords forward.
+//! JSON Schema allows keywords a model does not know, so a v3.x schema keeps every unclaimed key
+//! across parsing, validation, and version conversions. By contrast, [`crate::common::extensions`]
+//! also keeps unclaimed keys on parse for lossless round-tripping, but reports non-`x-` keys
+//! during validation and strips them during version conversions.
 
 use std::collections::BTreeMap;
 use std::fmt;
