@@ -2216,7 +2216,7 @@ mod tests {
         let spec = dir.0.join("api.json");
         std::fs::write(&spec, PET).unwrap();
         let config = dir.0.join("roas.toml");
-        std::fs::write(&config, "[rust]\nlayout = \"file_per_type\"\n").unwrap();
+        std::fs::write(&config, "layout = \"file_per_type\"\n").unwrap();
         let out = dir.0.join("out");
         let dump = dir.0.join("dump");
         std::fs::create_dir_all(&out).unwrap();
