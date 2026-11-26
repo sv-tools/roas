@@ -242,17 +242,35 @@ impl Route {
     }
 
     /// Whether this route is more specific than `other`, comparing
-    /// segment by segment: the first position where one is literal and
-    /// the other is templated decides it.
+    /// segment by segment: a literal segment outranks a templated one, and
+    /// among two templated segments the one with more literal characters wins.
     fn outranks(&self, other: &Route) -> bool {
         for (mine, theirs) in self.segments.iter().zip(&other.segments) {
-            let mine_literal = matches!(mine, Segment::Literal(_));
-            let theirs_literal = matches!(theirs, Segment::Literal(_));
-            if mine_literal != theirs_literal {
-                return mine_literal;
+            let mine_rank = segment_specificity(mine);
+            let theirs_rank = segment_specificity(theirs);
+            if mine_rank != theirs_rank {
+                return mine_rank > theirs_rank;
             }
         }
         false
+    }
+}
+
+/// Specificity key for one segment: full literal beats partial template, which
+/// beats a bare `{param}` segment.
+fn segment_specificity(segment: &Segment) -> (u8, usize) {
+    match segment {
+        Segment::Literal(_) => (2, 0),
+        Segment::Parts(parts) => {
+            let literal_len = parts
+                .iter()
+                .map(|part| match part {
+                    Part::Literal(lit) => lit.len(),
+                    Part::Parameter(_) => 0,
+                })
+                .sum();
+            (u8::from(literal_len > 0), literal_len)
+        }
     }
 }
 
@@ -360,12 +378,12 @@ fn base_paths_of(servers: Option<&[Server]>) -> Vec<String> {
 /// stripped in.
 fn tidy(mut bases: Vec<String>) -> Vec<String> {
     bases.retain(|base| !base.is_empty());
-    bases.sort_by_key(|base| std::cmp::Reverse(base.len()));
+    bases.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     bases.dedup();
     bases
 }
 
-/// The path component of a Server Object's URL/// The path component of a Server Object's URL, with any server
+/// The path component of a Server Object's URL, with any server
 /// variables replaced by their defaults.
 fn server_base_path(server: &Server) -> Option<String> {
     let url = resolve_server_variables(server)?;
@@ -743,5 +761,23 @@ mod tests {
     fn an_unclosed_brace_is_a_literal() {
         let router = router(&["/pets/{petId"]);
         assert_eq!(matched(&router, "/pets/{petId").0, "/pets/{petId");
+    }
+
+    #[test]
+    fn a_partial_template_outranks_a_bare_parameter_segment() {
+        let router = router(&["/{id}", "/report.{format}"]);
+        assert_eq!(matched(&router, "/report.json").0, "/report.{format}");
+        assert_eq!(matched(&router, "/plain").0, "/{id}");
+    }
+
+    #[test]
+    fn tidy_deduplicates_non_adjacent_equal_length_bases() {
+        let bases = tidy(vec![
+            "/v1".to_owned(),
+            "/v2".to_owned(),
+            "/v1".to_owned(),
+            "/v10".to_owned(),
+        ]);
+        assert_eq!(bases, ["/v10", "/v1", "/v2"]);
     }
 }

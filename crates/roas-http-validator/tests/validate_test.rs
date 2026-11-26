@@ -309,7 +309,8 @@ fn a_form_object_that_does_not_explode_is_a_flat_pair_list() {
 #[test]
 fn label_and_matrix_paths_carry_their_decoration() {
     for (style, path, exploded) in [
-        ("label", "/x/.3.4", false),
+        ("label", "/x/.3,4", false),
+        ("label", "/x/.3.4", true),
         ("matrix", "/x/;id=3,4", false),
         ("matrix", "/x/;id=3;id=4", true),
     ] {
@@ -2207,4 +2208,789 @@ fn a_yaml_fractional_bound_past_a_double_is_rounded_before_the_crate_sees_it() {
         errors(&from_yaml, &posted(b"9007199254740994")).is_empty(),
         "known limit: the YAML parser rounded the bound",
     );
+}
+
+// ── Track 3A regressions: subschema $refs, styles, querystring, HPP ──
+
+#[test]
+fn subschema_and_escaped_json_pointer_refs_resolve_cleanly() {
+    let spec: roas::v3_2::spec::Spec = serde_json::from_value(json!({
+        "openapi": "3.2.0",
+        "info": { "title": "t", "version": "1" },
+        "components": {
+            "schemas": {
+                "Pet": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "minLength": 2 },
+                        "age": { "type": "integer", "minimum": 0 },
+                        "tags": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+                    },
+                    "patternProperties": {
+                        "^x-": { "type": "integer" }
+                    },
+                    "propertyNames": { "type": "string", "minLength": 1 },
+                    "additionalProperties": false,
+                    "$defs": {
+                        "Positive": { "type": "integer", "minimum": 1 }
+                    }
+                },
+                "A/B": {
+                    "type": "object",
+                    "properties": {
+                        "foo~bar": { "type": "string", "pattern": "^[a-z]+$" }
+                    }
+                },
+                "AliasPet": { "$ref": "#/components/schemas/Pet" },
+                "Composed": {
+                    "allOf": [{ "type": "string", "maxLength": 4 }]
+                },
+                "AnyComp": {
+                    "anyOf": [{ "type": "integer", "maximum": 5 }]
+                },
+                "OneComp": {
+                    "oneOf": [{ "type": "boolean" }]
+                },
+                "NotComp": {
+                    "not": { "type": "null" }
+                },
+                "ClosedItems": {
+                    "type": "array",
+                    "items": false
+                },
+                "UnevalFalse": {
+                    "type": "object",
+                    "unevaluatedProperties": false
+                },
+                "OpenAddl": {
+                    "type": "object",
+                    "additionalProperties": { "type": "integer" },
+                    "unevaluatedProperties": { "type": "string" }
+                }
+            }
+        },
+        "paths": {
+            "/sub": {
+                "get": {
+                    "parameters": [
+                        { "name": "age", "in": "query", "schema": { "$ref": "#/components/schemas/Pet/properties/age" } },
+                        { "name": "pos", "in": "query", "schema": { "$ref": "#/components/schemas/Pet/$defs/Positive" } }
+                    ]
+                },
+                "post": {
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": { "$ref": "#/components/schemas/AliasPet/properties/name" },
+                                        "escaped": { "$ref": "#/components/schemas/A~1B/properties/foo~0bar" },
+                                        "tag": { "$ref": "#/components/schemas/Pet/properties/tags/items" },
+                                        "pat": { "$ref": "#/components/schemas/Pet/patternProperties/^x-" },
+                                        "propName": { "$ref": "#/components/schemas/Pet/propertyNames" },
+                                        "comp": { "$ref": "#/components/schemas/Composed/allOf/0" },
+                                        "any": { "$ref": "#/components/schemas/AnyComp/anyOf/0" },
+                                        "one": { "$ref": "#/components/schemas/OneComp/oneOf/0" },
+                                        "notNull": { "$ref": "#/components/schemas/NotComp/not" },
+                                        "pos": { "$ref": "#/components/schemas/Pet/$defs/Positive" },
+                                        "addlInt": { "$ref": "#/components/schemas/OpenAddl/additionalProperties" },
+                                        "unevalStr": { "$ref": "#/components/schemas/OpenAddl/unevaluatedProperties" },
+                                        "forbidden": { "$ref": "#/components/schemas/Pet/additionalProperties" },
+                                        "closedItem": { "$ref": "#/components/schemas/ClosedItems/items" },
+                                        "unevalClosed": { "$ref": "#/components/schemas/UnevalFalse/unevaluatedProperties" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }))
+    .expect("spec parses");
+    let v = Validator::new(spec);
+
+    // Query parameter coerces via subschema `$ref` and `$defs` `$ref`.
+    assert!(
+        errors(
+            &v,
+            &RequestView::new("GET", "/sub").with_query("age=3&pos=2")
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        errors(
+            &v,
+            &RequestView::new("GET", "/sub").with_query("age=-1&pos=0")
+        )
+        .len(),
+        2
+    );
+
+    // Valid body against all resolved subschema pointers.
+    let ok_body = br#"{"name":"Al","escaped":"abc","tag":"x","pat":1,"propName":"k","comp":"abcd","any":5,"one":true,"notNull":null,"pos":1,"addlInt":7,"unevalStr":"hi"}"#;
+    let ok_req = RequestView::new("POST", "/sub")
+        .with_header("content-type", "application/json")
+        .with_body(ok_body.as_slice());
+    assert!(errors(&v, &ok_req).is_empty(), "{:?}", errors(&v, &ok_req));
+
+    // Violations through subschema pointers, RFC 6901 escapes, and `BoolOr::Bool(false)` targets.
+    let bad_body = br#"{"name":"A","escaped":"123","comp":"toolong","pos":0,"forbidden":1,"closedItem":1,"unevalClosed":1}"#;
+    let bad_req = RequestView::new("POST", "/sub")
+        .with_header("content-type", "application/json")
+        .with_body(bad_body.as_slice());
+    let found = errors(&v, &bad_req);
+    assert_eq!(found.len(), 7, "{found:?}");
+}
+
+#[test]
+fn invalid_tilde_escape_in_schema_ref_is_reported_unresolved() {
+    let spec: roas::v3_2::spec::Spec = serde_json::from_value(json!({
+        "openapi": "3.2.0",
+        "info": { "title": "t", "version": "1" },
+        "paths": {
+            "/x": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/Bad~2Escape" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }))
+    .expect("spec parses");
+    let v = Validator::new(spec);
+    let report = v
+        .validate(
+            &RequestView::new("POST", "/x")
+                .with_header("content-type", "application/json")
+                .with_body(b"{}".as_slice()),
+        )
+        .unwrap();
+    assert!(!report.is_valid());
+    assert_eq!(report.unchecked().count(), 1);
+}
+
+#[test]
+fn optional_and_required_querystring_when_query_is_absent() {
+    let optional_v = validator(json!({
+        "/x": { "get": { "parameters": [
+            { "name": "q", "in": "querystring", "required": false, "content": {
+                "application/json": { "schema": { "type": "object" } }
+            } }
+        ] } }
+    }));
+    // No query string at all: optional `in: querystring` passes.
+    assert!(errors(&optional_v, &RequestView::new("GET", "/x")).is_empty());
+    // Explicit empty query (`?`) is malformed JSON.
+    let empty_err = errors(&optional_v, &RequestView::new("GET", "/x").with_query(""));
+    assert_eq!(empty_err.len(), 1, "{empty_err:?}");
+    assert!(empty_err[0].contains("cannot be read"), "{empty_err:?}");
+
+    let required_v = validator(json!({
+        "/x": { "get": { "parameters": [
+            { "name": "q", "in": "querystring", "required": true, "content": {
+                "application/json": { "schema": { "type": "object" } }
+            } }
+        ] } }
+    }));
+    assert_eq!(
+        errors(&required_v, &RequestView::new("GET", "/x")),
+        ["querystring parameter \"q\": is required and was not sent"],
+    );
+}
+
+#[test]
+fn label_and_matrix_styles_enforce_prefixes_delimiters_and_objects() {
+    // Non-exploded label array must use `,`, not `.`; missing `.` is malformed.
+    let label_arr = validator(json!({
+        "/x/{id}": { "get": { "parameters": [
+            { "name": "id", "in": "path", "required": true, "style": "label", "explode": false,
+              "schema": { "type": "array", "items": { "type": "integer" } } }
+        ] } }
+    }));
+    assert!(errors(&label_arr, &RequestView::new("GET", "/x/.3,4")).is_empty());
+    assert!(!errors(&label_arr, &RequestView::new("GET", "/x/.3.4")).is_empty());
+    assert!(!errors(&label_arr, &RequestView::new("GET", "/x/3,4")).is_empty());
+
+    // Exploded matrix object whose property has the same name as the parameter (`id`).
+    let matrix_obj = validator(json!({
+        "/x/{id}": { "get": { "parameters": [
+            { "name": "id", "in": "path", "required": true, "style": "matrix", "explode": true,
+              "schema": {
+                  "type": "object",
+                  "required": ["id", "age"],
+                  "properties": {
+                      "id": { "type": "string" },
+                      "age": { "type": "integer" }
+                  }
+              } }
+        ] } }
+    }));
+    assert!(errors(&matrix_obj, &RequestView::new("GET", "/x/;id=admin;age=42")).is_empty());
+    // Missing leading `;` is rejected.
+    assert!(!errors(&matrix_obj, &RequestView::new("GET", "/x/id=admin;age=42")).is_empty());
+    // Malformed exploded object segment without `=` is rejected (not silently `{}`).
+    assert!(!errors(&matrix_obj, &RequestView::new("GET", "/x/;garbage")).is_empty());
+
+    // Exploded matrix array rejects wrong segment name; non-exploded matrix primitive rejects missing `;name=`.
+    let matrix_arr = validator(json!({
+        "/x/{id}": { "get": { "parameters": [
+            { "name": "id", "in": "path", "required": true, "style": "matrix", "explode": true,
+              "schema": { "type": "array", "items": { "type": "integer" } } }
+        ] } }
+    }));
+    assert!(!errors(&matrix_arr, &RequestView::new("GET", "/x/;id=3;other=4")).is_empty());
+
+    let matrix_prim = validator(json!({
+        "/x/{color}": { "get": { "parameters": [
+            { "name": "color", "in": "path", "required": true, "style": "matrix", "explode": false,
+              "schema": { "type": "string" } }
+        ] } }
+    }));
+    assert!(errors(&matrix_prim, &RequestView::new("GET", "/x/;color=blue")).is_empty());
+    assert!(errors(&matrix_prim, &RequestView::new("GET", "/x/;color")).is_empty());
+    assert!(!errors(&matrix_prim, &RequestView::new("GET", "/x/;other=blue")).is_empty());
+    assert!(!errors(&matrix_prim, &RequestView::new("GET", "/x/color=blue")).is_empty());
+
+    // Non-exploded object with odd element count is malformed (not silently truncated).
+    let odd_obj = validator(json!({
+        "/x": { "get": { "parameters": [
+            { "name": "id", "in": "query", "style": "form", "explode": false,
+              "schema": { "type": "object", "properties": { "role": { "type": "string" } } } }
+        ] } }
+    }));
+    assert!(
+        !errors(
+            &odd_obj,
+            &RequestView::new("GET", "/x").with_query("id=role,admin,orphan")
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn duplicate_query_and_object_parameters_are_rejected() {
+    let v = validator(json!({
+        "/x": { "get": { "parameters": [
+            { "name": "limit", "in": "query", "schema": { "type": "integer", "maximum": 100 } },
+            { "name": "filter", "in": "query", "style": "deepObject", "explode": true,
+              "schema": { "type": "object", "properties": { "role": { "type": "string" } } } }
+        ] } }
+    }));
+    let dup_scalar = errors(
+        &v,
+        &RequestView::new("GET", "/x").with_query("limit=10&limit=999"),
+    );
+    assert_eq!(dup_scalar.len(), 1, "{dup_scalar:?}");
+    assert!(
+        dup_scalar[0].contains("expected at most once"),
+        "{dup_scalar:?}"
+    );
+
+    let dup_obj = errors(
+        &v,
+        &RequestView::new("GET", "/x").with_query("filter[role]=user&filter[role]=admin"),
+    );
+    assert_eq!(dup_obj.len(), 1, "{dup_obj:?}");
+    assert!(dup_obj[0].contains("duplicate key"), "{dup_obj:?}");
+}
+
+#[test]
+fn cookie_parameters_support_explode_arrays_and_objects() {
+    let v = validator(json!({
+        "/x": { "get": { "parameters": [
+            { "name": "tags", "in": "cookie",
+              "schema": { "type": "array", "items": { "type": "integer" } } },
+            { "name": "prefs", "in": "cookie",
+              "schema": {
+                  "type": "object",
+                  "required": ["role"],
+                  "properties": { "role": { "type": "string" }, "age": { "type": "integer" } }
+              } }
+        ] } }
+    }));
+    let req =
+        RequestView::new("GET", "/x").with_header("cookie", "tags=1; tags=2; role=admin; age=42");
+    assert!(errors(&v, &req).is_empty(), "{:?}", errors(&v, &req));
+
+    let bad = RequestView::new("GET", "/x").with_header("cookie", "tags=1; tags=nope");
+    assert_eq!(errors(&v, &bad).len(), 1);
+}
+
+#[test]
+fn normalized_content_media_types_and_item_schema_unsupported() {
+    let v = validator(json!({
+        "/x": {
+            "get": {
+                "parameters": [
+                    { "name": "q", "in": "querystring", "content": {
+                        "Application/Problem+JSON; charset=utf-8": {
+                            "schema": { "type": "object", "required": ["code"] }
+                        }
+                    } }
+                ]
+            },
+            "post": {
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/jsonl": {
+                            "itemSchema": { "type": "object" }
+                        }
+                    }
+                }
+            }
+        },
+        "/qs-stream": {
+            "get": {
+                "parameters": [
+                    { "name": "q", "in": "querystring", "content": {
+                        "application/jsonl": {
+                            "itemSchema": { "type": "object" }
+                        }
+                    } }
+                ]
+            }
+        }
+    }));
+
+    assert!(
+        errors(
+            &v,
+            &RequestView::new("GET", "/x").with_query(r#"{"code":1}"#)
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        errors(&v, &RequestView::new("GET", "/x").with_query(r#"{}"#)),
+        ["querystring parameter \"q\" at /code: is required and was not sent"]
+    );
+
+    let post_report = v
+        .validate(
+            &RequestView::new("POST", "/x")
+                .with_header("content-type", "application/jsonl")
+                .with_body(b"{}\n".as_slice()),
+        )
+        .unwrap();
+    assert!(!post_report.is_valid());
+    assert_eq!(post_report.unchecked().count(), 1);
+
+    let qs_report = v
+        .validate(&RequestView::new("GET", "/qs-stream").with_query("x"))
+        .unwrap();
+    assert!(!qs_report.is_valid());
+    assert_eq!(qs_report.unchecked().count(), 1);
+}
+
+#[test]
+fn case_insensitive_header_parameter_override_from_operation() {
+    let v = validator(json!({
+        "/x": {
+            "parameters": [
+                { "name": "X-Request-Id", "in": "header", "required": true, "schema": { "type": "string" } }
+            ],
+            "get": {
+                "parameters": [
+                    { "name": "x-request-id", "in": "header", "required": false, "schema": { "type": "string" } }
+                ]
+            }
+        }
+    }));
+    // Operation overrode Path Item's required header to optional with different casing.
+    assert!(errors(&v, &RequestView::new("GET", "/x")).is_empty());
+}
+
+#[test]
+fn uncompilable_pattern_properties_does_not_emit_false_additional_properties_violation() {
+    let v = body_schema(json!({
+        "type": "object",
+        "patternProperties": { "(": { "type": "string" } },
+        "additionalProperties": false,
+        "unevaluatedProperties": false
+    }));
+    let report = v
+        .validate(&posted(br#"{"foo":"bar"}"#))
+        .expect("route matches");
+    assert_eq!(report.violations().count(), 0);
+    assert_eq!(report.unchecked().count(), 1);
+}
+
+#[test]
+fn zero_or_negative_multiple_of_is_reported_unchecked() {
+    for step in [json!(0), json!(-2)] {
+        let v = body_schema(json!({ "type": "number", "multipleOf": step }));
+        let report = v.validate(&posted(b"4")).expect("route matches");
+        assert!(!report.is_valid());
+        assert_eq!(report.violations().count(), 0);
+        assert_eq!(report.unchecked().count(), 1);
+    }
+}
+
+#[test]
+fn unique_items_handles_exact_duplicates_objects_and_unreadable_numbers() {
+    let v = body_schema(json!({ "type": "array", "uniqueItems": true }));
+    assert!(errors(&v, &posted(br#"[1, 2, {"a":1,"b":[true,null]}]"#)).is_empty());
+    // Numeric equivalence (`1`, `1.0`, `10e-1`) and key-order-independent object equality.
+    assert_eq!(
+        errors(&v, &posted(br#"[1, 1.0, {"a":1,"b":2}, {"b":2.0,"a":1}]"#)).len(),
+        2
+    );
+    // Unreadable number followed by exact number (and vice versa) reports unchecked, not valid.
+    let huge_first = v
+        .validate(&posted(
+            b"[1e40, 99999999999999999999999999999999999999999]",
+        ))
+        .unwrap();
+    assert_eq!(huge_first.unchecked().count(), 1);
+    let exact_after_huge = v
+        .validate(&posted(b"[99999999999999999999999999999999999999999, 1]"))
+        .unwrap();
+    assert_eq!(exact_after_huge.unchecked().count(), 1);
+}
+
+#[test]
+fn precompiled_regex_cache_covers_extensions_and_siblings() {
+    let spec: roas::v3_2::spec::Spec = serde_json::from_value(json!({
+        "openapi": "3.2.0",
+        "info": { "title": "t", "version": "1" },
+        "components": {
+            "schemas": {
+                "Base": { "type": "string" },
+                "NullableCode": { "type": ["string", "null"], "pattern": "^[A-Z]{2}$" }
+            }
+        },
+        "paths": {
+            "/x": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "a": { "$ref": "#/components/schemas/Base", "pattern": "^[0-9]+$" },
+                                        "b": { "$ref": "#/components/schemas/NullableCode" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }))
+    .expect("spec parses");
+    let v = Validator::new(spec);
+    assert!(
+        errors(
+            &v,
+            &RequestView::new("POST", "/x")
+                .with_header("content-type", "application/json")
+                .with_body(br#"{"a":"123","b":"US"}"#.as_slice())
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        errors(
+            &v,
+            &RequestView::new("POST", "/x")
+                .with_header("content-type", "application/json")
+                .with_body(br#"{"a":"abc","b":"us"}"#.as_slice())
+        )
+        .len(),
+        2
+    );
+}
+
+#[test]
+fn cyclic_subschema_and_defs_refs_terminate_cleanly_without_duplicate_siblings() {
+    let spec: roas::v3_2::spec::Spec = serde_json::from_value(json!({
+        "openapi": "3.2.0",
+        "info": { "title": "t", "version": "1" },
+        "components": {
+            "schemas": {
+                "SelfSub": { "$ref": "#/components/schemas/SelfSub/properties/foo" },
+                "DirectWithSibling": {
+                    "$ref": "#/components/schemas/DirectWithSibling",
+                    "type": "string",
+                    "minLength": 5
+                },
+                "Pet": {
+                    "type": "object",
+                    "$defs": {
+                        "LoopA": {
+                            "$ref": "#/components/schemas/Pet/$defs/LoopB",
+                            "type": "string",
+                            "minLength": 5
+                        },
+                        "LoopB": { "$ref": "#/components/schemas/Pet/$defs/LoopA" }
+                    }
+                }
+            }
+        },
+        "paths": {
+            "/self-sub": { "post": { "requestBody": { "content": { "application/json": {
+                "schema": { "$ref": "#/components/schemas/SelfSub" }
+            } } } } },
+            "/direct-sib": { "post": { "requestBody": { "content": { "application/json": {
+                "schema": { "$ref": "#/components/schemas/DirectWithSibling" }
+            } } } } },
+            "/defs-loop": { "post": { "requestBody": { "content": { "application/json": {
+                "schema": { "$ref": "#/components/schemas/Pet/$defs/LoopA" }
+            } } } } }
+        }
+    }))
+    .expect("spec parses");
+    let v = Validator::new(spec);
+
+    let sub_report = v
+        .validate(
+            &RequestView::new("POST", "/self-sub")
+                .with_header("content-type", "application/json")
+                .with_body(b"{}".as_slice()),
+        )
+        .unwrap();
+    assert!(!sub_report.is_valid());
+    assert_eq!(sub_report.unchecked().count(), 1);
+
+    // Direct self-cycle with sibling: reports cycle once without double-evaluating sibling.
+    let direct_report = v
+        .validate(
+            &RequestView::new("POST", "/direct-sib")
+                .with_header("content-type", "application/json")
+                .with_body(br#""x""#.as_slice()),
+        )
+        .unwrap();
+    assert_eq!(direct_report.violations().count(), 0);
+    assert_eq!(direct_report.unchecked().count(), 1);
+    assert!(
+        direct_report
+            .errors
+            .iter()
+            .any(|e| e.to_string().contains("part of a cycle")),
+        "{:?}",
+        direct_report.errors
+    );
+
+    // `$defs` cycle: caught on hop 2 as cycle, not depth-64 exhaustion.
+    let defs_report = v
+        .validate(
+            &RequestView::new("POST", "/defs-loop")
+                .with_header("content-type", "application/json")
+                .with_body(br#""x""#.as_slice()),
+        )
+        .unwrap();
+    assert_eq!(defs_report.violations().count(), 1);
+    assert_eq!(defs_report.unchecked().count(), 1);
+    assert!(
+        defs_report
+            .errors
+            .iter()
+            .any(|e| e.to_string().contains("part of a cycle")),
+        "{:?}",
+        defs_report.errors
+    );
+}
+
+#[test]
+fn defs_array_object_and_sibling_type_coerce_parameters_and_form_bodies() {
+    let spec: roas::v3_2::spec::Spec = serde_json::from_value(json!({
+        "openapi": "3.2.0",
+        "info": { "title": "t", "version": "1" },
+        "components": {
+            "schemas": {
+                "Anything": {},
+                "Holder": {
+                    "type": "object",
+                    "$defs": {
+                        "IntArray": { "type": "array", "items": { "type": "integer" } },
+                        "FilterObj": {
+                            "type": "object",
+                            "required": ["age"],
+                            "properties": {
+                                "role": { "type": "string" },
+                                "age": { "type": "integer", "minimum": 1 }
+                            }
+                        },
+                        "IntAlias": { "$ref": "#/components/schemas/Anything", "type": "integer" },
+                        "Pair": {
+                            "allOf": [{ "type": "string", "pattern": "^[a-z]+$" }],
+                            "patternProperties": { "^x-": { "type": "integer" } }
+                        }
+                    }
+                },
+                "AliasBox": { "$ref": "#/components/schemas/Holder/$defs/FilterObj" },
+                "RefWithSiblingDefs": {
+                    "$ref": "#/components/schemas/Holder",
+                    "$defs": {
+                        "Code": { "type": "integer", "minimum": 10 }
+                    }
+                }
+            },
+            "requestBodies": {
+                "FormBody": {
+                    "required": true,
+                    "content": {
+                        "application/x-www-form-urlencoded": {
+                            "schema": { "$ref": "#/components/schemas/Holder/$defs/FilterObj" }
+                        }
+                    }
+                }
+            },
+            "mediaTypes": {
+                "JsonCode": {
+                    "schema": {
+                        "type": "string",
+                        "pattern": "^[A-Z]+$"
+                    }
+                }
+            }
+        },
+        "paths": {
+            "/q": {
+                "get": {
+                    "parameters": [
+                        { "name": "ids", "in": "query", "schema": { "$ref": "#/components/schemas/Holder/$defs/IntArray" } },
+                        { "name": "filter", "in": "query", "style": "form", "explode": true,
+                          "schema": { "$ref": "#/components/schemas/Holder/$defs/FilterObj" } },
+                        { "name": "n", "in": "query", "schema": { "$ref": "#/components/schemas/Holder/$defs/IntAlias" } },
+                        { "name": "pipe", "in": "query", "style": "pipeDelimited", "explode": false,
+                          "schema": { "type": "array", "items": { "type": "integer" } } }
+                    ]
+                },
+                "post": {
+                    "requestBody": { "$ref": "#/components/requestBodies/FormBody" }
+                }
+            },
+            "/pointers": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "viaAlias": { "$ref": "#/components/schemas/AliasBox/properties/age" },
+                                        "viaSiblingDef": { "$ref": "#/components/schemas/RefWithSiblingDefs/$defs/Code" },
+                                        "viaPctSlash": { "$ref": "#/components/schemas/AliasBox%2Fproperties%2Fage" },
+                                        "viaDefsArr": { "$ref": "#/components/schemas/Holder/$defs/Pair/allOf/0" },
+                                        "badLeadingZero": { "$ref": "#/components/schemas/Holder/$defs/Pair/allOf/01" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }))
+    .expect("spec parses");
+
+    let v = Validator::with_options(spec, Options::new().reject_undescribed_query_parameters());
+
+    // `$defs` array, exploded object (including stray accounting), sibling `type` narrowing, and `%7C` pipeDelimited.
+    let ok =
+        RequestView::new("GET", "/q").with_query("ids=1&ids=2&role=admin&age=5&n=9&pipe=3%7C4%7C5");
+    assert!(errors(&v, &ok).is_empty(), "{:?}", errors(&v, &ok));
+
+    // Form body referencing `$defs` object coerces `age` to integer and rejects duplicate undescribed field.
+    let ok_form = RequestView::new("POST", "/q")
+        .with_header("content-type", "application/x-www-form-urlencoded")
+        .with_body(b"role=admin&age=5".as_slice());
+    assert!(
+        errors(&v, &ok_form).is_empty(),
+        "{:?}",
+        errors(&v, &ok_form)
+    );
+    let dup_extra_form = RequestView::new("POST", "/q")
+        .with_header("content-type", "application/x-www-form-urlencoded")
+        .with_body(b"age=5&extra=a&extra=b".as_slice());
+    let dup_errs = errors(&v, &dup_extra_form);
+    assert_eq!(dup_errs.len(), 1, "{dup_errs:?}");
+    assert!(dup_errs[0].contains("duplicate form field"), "{dup_errs:?}");
+
+    // Intermediate `$defs` `$ref` + sibling `$defs` + RFC 6901 `%2F` + `$defs` array index + strict `01` rejection.
+    let ptr_ok = RequestView::new("POST", "/pointers")
+        .with_header("content-type", "application/json")
+        .with_body(
+            br#"{"viaAlias":2,"viaSiblingDef":12,"viaPctSlash":3,"viaDefsArr":"abc"}"#.as_slice(),
+        );
+    assert!(errors(&v, &ptr_ok).is_empty(), "{:?}", errors(&v, &ptr_ok));
+
+    let ptr_bad_idx = RequestView::new("POST", "/pointers")
+        .with_header("content-type", "application/json")
+        .with_body(br#"{"badLeadingZero":"abc"}"#.as_slice());
+    let idx_report = v.validate(&ptr_bad_idx).unwrap();
+    assert_eq!(idx_report.unchecked().count(), 1);
+}
+
+#[test]
+fn duplicate_content_parameters_and_combined_schema_item_schema_are_reported() {
+    let v = validator(json!({
+        "/x": {
+            "get": {
+                "parameters": [
+                    { "name": "q", "in": "query", "content": {
+                        "application/json": { "schema": { "type": "object" } }
+                    } },
+                    { "name": "X-Json", "in": "header", "content": {
+                        "application/json": { "schema": { "type": "object" } }
+                    } },
+                    { "name": "c", "in": "cookie", "content": {
+                        "application/json": { "schema": { "type": "object" } }
+                    } }
+                ]
+            },
+            "post": {
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": { "type": "object", "required": ["a"] },
+                            "itemSchema": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        }
+    }));
+
+    let dup_q = errors(&v, &RequestView::new("GET", "/x").with_query("q={}&q={}"));
+    assert_eq!(dup_q.len(), 1, "{dup_q:?}");
+    assert!(dup_q[0].contains("expected at most once"), "{dup_q:?}");
+
+    let dup_h = errors(
+        &v,
+        &RequestView::new("GET", "/x")
+            .with_header("X-Json", "{}")
+            .with_header("x-json", "{}"),
+    );
+    assert_eq!(dup_h.len(), 1, "{dup_h:?}");
+    assert!(dup_h[0].contains("expected at most once"), "{dup_h:?}");
+
+    let dup_c = errors(
+        &v,
+        &RequestView::new("GET", "/x").with_header("cookie", "c={}; c={}"),
+    );
+    assert_eq!(dup_c.len(), 1, "{dup_c:?}");
+    assert!(dup_c[0].contains("expected at most once"), "{dup_c:?}");
+
+    // Both `schema` and `itemSchema` set: validates `schema` AND reports `itemSchema` unsupported.
+    let combined = v
+        .validate(
+            &RequestView::new("POST", "/x")
+                .with_header("content-type", "application/json")
+                .with_body(br#"{"b":1}"#.as_slice()),
+        )
+        .unwrap();
+    assert_eq!(combined.violations().count(), 1);
+    assert_eq!(combined.unchecked().count(), 1);
 }

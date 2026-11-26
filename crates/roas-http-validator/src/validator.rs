@@ -1,7 +1,7 @@
 //! The validator itself: a description, prepared once, judging many
 //! requests.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use roas::v3_2::operation::Operation;
@@ -16,6 +16,7 @@ use crate::paths;
 use crate::report::{ErrorKind, Location, RoutingError, ValidationError, ValidationReport};
 use crate::request::{RequestView, decode_path_segment};
 use crate::router::Router;
+use crate::schema::RegexCache;
 
 /// What to check, and where the description's paths start.
 ///
@@ -162,6 +163,7 @@ pub struct Validator {
     /// resolved once here rather than on every request.
     path_items: BTreeMap<String, PathItem>,
     router: Router,
+    regexes: RegexCache,
     options: Options,
 }
 
@@ -181,10 +183,12 @@ impl Validator {
             spec.servers.as_deref(),
             options.base_path.as_deref(),
         );
+        let regexes = RegexCache::from_spec(&spec, &path_items);
         Self {
             spec,
             path_items,
             router,
+            regexes,
             options,
         }
     }
@@ -269,6 +273,7 @@ impl Validator {
                 &extracted,
                 &self.spec,
                 &self.options.decoders,
+                &self.regexes,
                 &mut errors,
             );
         }
@@ -287,6 +292,7 @@ impl Validator {
                         request,
                         &self.spec,
                         &self.options.decoders,
+                        &self.regexes,
                         &mut errors,
                     );
                 }
@@ -354,7 +360,8 @@ impl Validator {
         operation: &Operation,
         errors: &mut Vec<ValidationError>,
     ) -> Vec<Parameter> {
-        let mut merged: BTreeMap<(String, Location), Parameter> = BTreeMap::new();
+        let mut merged: Vec<Parameter> = Vec::new();
+        let mut index_by_id: HashMap<(String, Location), usize> = HashMap::new();
         let inherited = path_item.and_then(|item| item.parameters.as_deref());
         let declared = operation.parameters.as_deref();
 
@@ -362,7 +369,13 @@ impl Validator {
             for parameter in source {
                 match parameter.get_item(&self.spec) {
                     Ok(parameter) => {
-                        merged.insert(identity(parameter), parameter.clone());
+                        let id = identity(parameter);
+                        if let Some(&slot) = index_by_id.get(&id) {
+                            merged[slot] = parameter.clone();
+                        } else {
+                            index_by_id.insert(id, merged.len());
+                            merged.push(parameter.clone());
+                        }
                     }
                     // The parameter cannot be read, so it cannot be
                     // checked — which is the description's fault, not
@@ -376,7 +389,7 @@ impl Validator {
                 }
             }
         }
-        merged.into_values().collect()
+        merged
     }
 }
 
@@ -428,12 +441,13 @@ fn allowed_methods(path_item: &PathItem) -> Vec<String> {
 }
 
 /// What makes a parameter unique: its name and its location.
+/// Header names are compared case-insensitively per RFC 9110 §5.1.
 fn identity(parameter: &Parameter) -> (String, Location) {
     match parameter {
         Parameter::Path(path) => (path.name.clone(), Location::Path),
         Parameter::Query(query) => (query.name.clone(), Location::Query),
         Parameter::Querystring(querystring) => (querystring.name.clone(), Location::Querystring),
-        Parameter::Header(header) => (header.name.clone(), Location::Header),
+        Parameter::Header(header) => (header.name.to_ascii_lowercase(), Location::Header),
         Parameter::Cookie(cookie) => (cookie.name.clone(), Location::Cookie),
     }
 }

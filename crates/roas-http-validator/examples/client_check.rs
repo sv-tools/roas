@@ -44,10 +44,10 @@ paths:
               properties:
                 name: { type: string, minLength: 1 }
                 age: { type: integer, minimum: 0 }
-                # `roas` models `multipleOf` as an `f64`, so the step
-                # stands for any decimal that rounds to it — enough to
-                # disprove divisibility, never enough to prove it.
                 weight: { type: number, multipleOf: 0.5 }
+                # An uncompilable pattern cannot be checked, so any request
+                # carrying `code` surfaces as `Verdict::Undetermined`.
+                code: { type: string, pattern: "(" }
 "#;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let calls = [
         (
             "a call that matches the description",
-            r#"{"name":"Rex","age":4}"#,
+            r#"{"name":"Rex","age":4,"weight":2.5}"#,
             true,
         ),
         ("a body missing a required field", r#"{"age":4}"#, true),
@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         (
             "a call carrying a value nothing here can decide",
-            r#"{"name":"Rex","weight":2.5}"#,
+            r#"{"name":"Rex","code":"abc"}"#,
             true,
         ),
     ];
