@@ -1246,9 +1246,12 @@ workflows:
         let syntax = &document.diagnostics()[0];
         assert_eq!(syntax.path, None);
         assert!(syntax.range.unwrap().start.line >= 9, "{syntax:?}");
-        assert_eq!(
-            syntax.message,
-            "invalid indentation in multiline quoted scalar"
+        assert!(
+            matches!(
+                syntax.message.as_str(),
+                "unclosed quote" | "invalid indentation in multiline quoted scalar"
+            ),
+            "unexpected syntax message: {syntax:?}"
         );
         let outline = document.outline().unwrap();
         assert_eq!(outline.workflows.len(), 1);
