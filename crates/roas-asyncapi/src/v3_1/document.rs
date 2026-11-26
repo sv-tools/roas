@@ -422,6 +422,9 @@ impl Document {
     /// channel is allowed to name.
     fn validate_channel_servers(&self, ctx: &mut Context, channel: &Channel, origin: Origin) {
         for (i, server) in channel.servers.iter().enumerate() {
+            if server.reference.is_empty() {
+                continue;
+            }
             let problem = Self::check_location(server, "servers", origin).or_else(|| {
                 let (_, resolution) = self.resolve(
                     server,
@@ -453,6 +456,9 @@ impl Document {
             // A reusable reply is wired where it is declared, so here
             // there is only the alias itself to check.
             RefOr::Reference(reference) => {
+                if reference.reference.is_empty() {
+                    return;
+                }
                 let (_, resolution) = self.resolve(
                     reference,
                     "replies",
@@ -503,6 +509,9 @@ impl Document {
         reference: &Reference,
         origin: Origin,
     ) -> Option<ResolvedChannel<'a>> {
+        if reference.reference.is_empty() {
+            return None;
+        }
         let mut report = |problem: &str| {
             ctx.in_field(field, |ctx| {
                 ctx.error_field(
@@ -1535,15 +1544,38 @@ mod tests {
 
     #[test]
     fn unresolvable_reference_shapes_are_each_reported() {
-        // An empty `$ref` is neither local nor external, so it is not
-        // a usable pointer.
+        // An empty `$ref` is reported once as empty (not duplicated with a
+        // pointer error), across channel, server, and reply references.
         let mut empty = wired();
         empty["operations"]["receiveSignups"]["channel"] = json!({ "$ref": "" });
-        let errors = errors_for(empty);
-        assert!(
-            errors
+        empty["operations"]["receiveSignups"]["reply"] = json!({ "$ref": "" });
+        empty["channels"]["userSignedUp"]["servers"] = json!([{ "$ref": "" }]);
+        let empty_errors = errors_for(empty);
+        for prefix in [
+            "#.operations.receiveSignups.channel.$ref:",
+            "#.operations.receiveSignups.reply.$ref:",
+            "#.channels.userSignedUp.servers[0].$ref:",
+        ] {
+            let matching: Vec<_> = empty_errors
                 .iter()
-                .any(|e| e.contains("is not a usable JSON Pointer"))
+                .filter(|e| e.starts_with(prefix))
+                .collect();
+            assert_eq!(matching, vec![&format!("{prefix} must not be empty")]);
+        }
+
+        // A local fragment that is not a JSON Pointer is reported once.
+        let mut malformed = wired();
+        malformed["operations"]["receiveSignups"]["channel"] = json!({ "$ref": "#bad" });
+        let malformed_errors = errors_for(malformed);
+        let malformed_ref_errors: Vec<_> = malformed_errors
+            .iter()
+            .filter(|e| e.starts_with("#.operations.receiveSignups.channel.$ref:"))
+            .collect();
+        assert_eq!(
+            malformed_ref_errors,
+            vec![
+                "#.operations.receiveSignups.channel.$ref: channel `#bad` is not a usable JSON Pointer"
+            ]
         );
 
         // The same for a reference into another document whose

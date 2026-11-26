@@ -1,24 +1,22 @@
 //! Regression tests for `x-` extension handling on real documents.
 //!
-//! The extensions visitor skips non-`x-` keys without consuming their
-//! values, which would desync a raw `MapAccess`. It is only ever
-//! reached through `#[serde(flatten)]`, and serde's flatten buffers
-//! every leftover entry (key *and* value) before handing them over — so
-//! the skip is safe. These tests pin that down against both a streaming
-//! JSON deserializer and a YAML one, with unknown keys placed before,
-//! inside, and after typed fields.
+//! Unknown non-`x-` keys are ignored via `serde::de::IgnoredAny` while
+//! `x-`-prefixed keys are collected into `extensions`. These tests pin
+//! that behavior down against both a streaming JSON deserializer and a
+//! YAML one, with unknown keys placed before, inside, and after typed
+//! fields.
 
-#![cfg(feature = "v3_0")]
+#![cfg(feature = "v3_1")]
 
 #[path = "../src/test_yaml.rs"]
 mod yaml;
 
-use roas_asyncapi::v3_0::Document;
+use roas_asyncapi::v3_1::Document;
 
 #[test]
 fn unknown_non_x_keys_do_not_desync_a_streaming_json_deserializer() {
     let json = r#"{
-        "asyncapi": "3.0.0",
+        "asyncapi": "3.1.0",
         "unknownBefore": { "nested": [1, 2, { "deep": true }] },
         "info": { "title": "T", "unknownInside": "v", "version": "1" },
         "unknownAfter": [1, 2, 3],
@@ -43,7 +41,7 @@ fn unknown_non_x_keys_do_not_desync_a_streaming_json_deserializer() {
 #[test]
 fn unknown_non_x_keys_do_not_desync_a_yaml_deserializer() {
     let yaml = "\
-asyncapi: 3.0.0
+asyncapi: 3.1.0
 unknownBefore:
   nested: [1, 2]
 info:

@@ -48,7 +48,9 @@ pub mod server;
 pub mod tag;
 pub mod version;
 
-pub use crate::common::bindings::Bindings;
+pub use crate::common::bindings::{
+    Bindings, ChannelBindings, MessageBindings, OperationBindings, ServerBindings,
+};
 pub use crate::common::reference::{RefOr, Reference, ResolveReference};
 pub use crate::common::resolve::Resolution;
 pub use channel_item::ChannelItem;

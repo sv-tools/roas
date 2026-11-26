@@ -475,6 +475,9 @@ pub struct MessageTrait {
 
 impl ValidateWithContext for MessageTrait {
     fn validate_with_context(&self, ctx: &mut Context) {
+        if let Some(id) = &self.message_id {
+            ctx.require_non_empty("messageId", id);
+        }
         if let Some(format) = &self.schema_format {
             ctx.require_non_empty("schemaFormat", format);
         }
@@ -896,6 +899,7 @@ mod tests {
     #[test]
     fn trait_validates_its_own_nested_objects() {
         let message_trait: MessageTrait = serde_json::from_value(json!({
+            "messageId": "",
             "schemaFormat": "",
             "headers": { "minLength": 5, "maxLength": 1 },
             "correlationId": { "location": "bad" },
@@ -909,6 +913,7 @@ mod tests {
         message_trait.validate_with_context(&mut ctx);
         let msgs: Vec<_> = ctx.errors.iter().map(ToString::to_string).collect();
         for needle in [
+            ".messageId",
             ".schemaFormat",
             ".headers.minLength",
             ".correlationId.location",

@@ -31,7 +31,9 @@ pub mod version;
 #[cfg(feature = "v2_6")]
 pub mod from_v2_6;
 
-pub use crate::common::bindings::Bindings;
+pub use crate::common::bindings::{
+    Bindings, ChannelBindings, MessageBindings, OperationBindings, ServerBindings,
+};
 pub use crate::common::reference::{RefOr, Reference, ResolveReference};
 pub use crate::common::resolve::Resolution;
 pub use channel::Channel;

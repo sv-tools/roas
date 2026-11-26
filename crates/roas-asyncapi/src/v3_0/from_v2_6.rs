@@ -1,7 +1,7 @@
 //! Conversion from AsyncAPI v2.6 to v3.0.
 //!
 //! v3 reorganized the document rather than extending it, so this is not
-//! the field-for-field remap that [v3.0 → v3.1](crate::v3_1) is. A
+//! the field-for-field remap that v3.0 → v3.1 is. A
 //! channel no longer *is* its address, operations left the channel to
 //! stand on their own, and the point of view flipped: what 2.6 called
 //! `publish` is what the application *receives*.
@@ -18,6 +18,7 @@ use crate::common::reference::{RefOr, Reference};
 use crate::{v2_6, v3_0};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -471,20 +472,26 @@ impl Conversion {
             )
             // A channel this conversion cannot follow stays a Reference
             // Object, parameters and all, so there is nothing of its to
-            // keep anywhere.
-            .filter(|(_, _, item)| item.reference.is_none() || merged(item, &reusable).is_some())
-            .map(|(source, key, item)| (source, key, &item.parameters))
+            // keep anywhere. For one that is inlined, include inherited
+            // parameters from the referenced chain alongside its own.
+            .filter_map(|(source, key, item)| {
+                if item.reference.is_none() {
+                    Some((source, key, Cow::Borrowed(&item.parameters)))
+                } else {
+                    merged(item, &reusable).map(|named| (source, key, Cow::Owned(named.parameters)))
+                }
+            })
             // A reusable parameter has a schema a pointer can name just
             // as much as a channel's does.
             .chain(document.components.as_ref().map(|components| {
                 (
                     "#/components".to_owned(),
                     "parameter".to_owned(),
-                    &components.parameters,
+                    Cow::Borrowed(&components.parameters),
                 )
             }))
         {
-            for (name, parameter) in parameters {
+            for (name, parameter) in parameters.as_ref() {
                 // A Reference Object holds no schema, and neither does a
                 // parameter that describes nothing: in 2.6 a pointer at
                 // either named nothing to begin with.
@@ -678,10 +685,10 @@ impl Conversion {
             terms_of_service: info.terms_of_service,
             contact: info
                 .contact
-                .and_then(|contact| self.reinterpret("info.contact", &contact)),
+                .and_then(|contact| self.reinterpret("#.info.contact", &contact)),
             license: info
                 .license
-                .and_then(|license| self.reinterpret("info.license", &license)),
+                .and_then(|license| self.reinterpret("#.info.license", &license)),
             tags: tags
                 .into_iter()
                 .map(|tag| RefOr::Item(self.tag(tag)))
@@ -1445,10 +1452,38 @@ impl Conversion {
                     (name, self.ref_or(&at, message_trait, Self::message_trait))
                 })
                 .collect(),
-            server_bindings: components.server_bindings,
-            channel_bindings: components.channel_bindings,
-            operation_bindings: components.operation_bindings,
-            message_bindings: components.message_bindings,
+            server_bindings: components
+                .server_bindings
+                .into_iter()
+                .map(|(name, bindings)| {
+                    let at = format!("{at}.serverBindings.{name}");
+                    (name, self.ref_or(&at, bindings, |_, _, b| b))
+                })
+                .collect(),
+            channel_bindings: components
+                .channel_bindings
+                .into_iter()
+                .map(|(name, bindings)| {
+                    let at = format!("{at}.channelBindings.{name}");
+                    (name, self.ref_or(&at, bindings, |_, _, b| b))
+                })
+                .collect(),
+            operation_bindings: components
+                .operation_bindings
+                .into_iter()
+                .map(|(name, bindings)| {
+                    let at = format!("{at}.operationBindings.{name}");
+                    (name, self.ref_or(&at, bindings, |_, _, b| b))
+                })
+                .collect(),
+            message_bindings: components
+                .message_bindings
+                .into_iter()
+                .map(|(name, bindings)| {
+                    let at = format!("{at}.messageBindings.{name}");
+                    (name, self.ref_or(&at, bindings, |_, _, b| b))
+                })
+                .collect(),
             extensions: components.extensions,
         }
     }
@@ -1718,9 +1753,43 @@ fn external_documentation(docs: v2_6::ExternalDocumentation) -> v3_0::ExternalDo
 fn split_url(url: &str) -> (String, Option<String>) {
     let authority = url.split_once("://").map_or(url, |(_, rest)| rest);
     match authority.split_once('/') {
-        Some((host, path)) => (host.to_owned(), Some(format!("/{path}"))),
-        None => (authority.to_owned(), None),
+        Some((host, path)) if !host.is_empty() => (host.to_owned(), Some(format!("/{path}"))),
+        _ => (authority.to_owned(), None),
     }
+}
+
+/// Overlay `top`'s declared fields onto `base`, taking `top` where both speak.
+fn overlay_channel(mut base: v2_6::ChannelItem, top: &v2_6::ChannelItem) -> v2_6::ChannelItem {
+    if top.description.is_some() {
+        base.description = top.description.clone();
+    }
+    if !top.servers.is_empty() {
+        base.servers = top.servers.clone();
+    }
+    if top.publish.is_some() {
+        base.publish = top.publish.clone();
+    }
+    if top.subscribe.is_some() {
+        base.subscribe = top.subscribe.clone();
+    }
+    if top.deprecated.is_some() {
+        base.deprecated = top.deprecated;
+    }
+    if top.bindings.is_some() {
+        base.bindings = top.bindings.clone();
+    }
+    base.parameters.extend(
+        top.parameters
+            .iter()
+            .map(|(name, parameter)| (name.clone(), parameter.clone())),
+    );
+    if let Some(extensions) = &top.extensions {
+        base.extensions
+            .get_or_insert_with(BTreeMap::new)
+            .extend(extensions.clone());
+    }
+    base.reference = None;
+    base
 }
 
 /// A channel that names another, as the two of them together.
@@ -1734,47 +1803,19 @@ fn merged(
     item: &v2_6::ChannelItem,
     reusable: &BTreeMap<String, v2_6::ChannelItem>,
 ) -> Option<v2_6::ChannelItem> {
-    let mut named = named_channel(item.reference.as_deref()?, reusable)?;
-    if item.description.is_some() {
-        named.description = item.description.clone();
-    }
-    if !item.servers.is_empty() {
-        named.servers = item.servers.clone();
-    }
-    if item.publish.is_some() {
-        named.publish = item.publish.clone();
-    }
-    if item.subscribe.is_some() {
-        named.subscribe = item.subscribe.clone();
-    }
-    if item.deprecated.is_some() {
-        named.deprecated = item.deprecated;
-    }
-    if item.bindings.is_some() {
-        named.bindings = item.bindings.clone();
-    }
-    named.parameters.extend(
-        item.parameters
-            .iter()
-            .map(|(name, parameter)| (name.clone(), parameter.clone())),
-    );
-    if let Some(extensions) = &item.extensions {
-        named
-            .extensions
-            .get_or_insert_with(BTreeMap::new)
-            .extend(extensions.clone());
-    }
-    named.reference = None;
-    Some(named)
+    let named = named_channel(item.reference.as_deref()?, reusable)?;
+    Some(overlay_channel(named, item))
 }
 
 /// The reusable channel a pointer names, following one that names
-/// another. `None` for a pointer this conversion cannot follow.
+/// another and preserving siblings declared at every hop along the
+/// chain. `None` for a pointer this conversion cannot follow.
 fn named_channel(
     reference: &str,
     reusable: &BTreeMap<String, v2_6::ChannelItem>,
 ) -> Option<v2_6::ChannelItem> {
     let mut seen = BTreeSet::new();
+    let mut chain = Vec::new();
     let mut reference = reference.to_owned();
     loop {
         let tokens = pointer::tokens(reference.strip_prefix('#')?)?;
@@ -1785,11 +1826,15 @@ fn named_channel(
             return None;
         }
         let named = reusable.get(name)?;
+        chain.push(named);
         match &named.reference {
             Some(next) => reference = next.clone(),
-            None => return Some(named.clone()),
+            None => break,
         }
     }
+    let mut iter = chain.into_iter().rev();
+    let base = iter.next()?.clone();
+    Some(iter.fold(base, overlay_channel))
 }
 
 /// What a message offers to be called.
@@ -3631,5 +3676,201 @@ mod tests {
         // Only the point of view, which every 2.6 operation changes.
         assert_eq!(notes.len(), 1);
         assert!(notes[0].contains("`publish` is what the application does not do"));
+    }
+
+    #[test]
+    fn multi_hop_channel_ref_preserves_intermediate_siblings() {
+        let (document, _) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": {
+                "prod": { "url": "amqp://broker.example.com", "protocol": "amqp" }
+            },
+            "channels": {
+                "orders/{a}/{b}": {
+                    "$ref": "#/components/channels/mid",
+                    "description": "leaf desc",
+                    "parameters": {
+                        "a": { "description": "from leaf" }
+                    },
+                    "x-leaf": true
+                }
+            },
+            "components": {
+                "channels": {
+                    "mid": {
+                        "$ref": "#/components/channels/base",
+                        "servers": ["prod"],
+                        "description": "mid desc",
+                        "publish": {
+                            "operationId": "midOp",
+                            "message": { "name": "MidMsg" }
+                        },
+                        "parameters": {
+                            "b": { "description": "from mid" }
+                        },
+                        "x-mid": true
+                    },
+                    "base": {
+                        "subscribe": {
+                            "operationId": "baseOp",
+                            "message": { "name": "BaseMsg" }
+                        },
+                        "bindings": { "amqp": { "is": "queue" } },
+                        "x-base": true
+                    }
+                }
+            }
+        }));
+        let channel = document.channels["orders__a___b_"]
+            .item()
+            .expect("inlined channel");
+        assert_eq!(channel.description.as_deref(), Some("leaf desc"));
+        assert_eq!(channel.servers.len(), 1);
+        assert_eq!(channel.servers[0].reference, "#/servers/prod");
+        assert!(channel.parameters.contains_key("a"));
+        assert!(channel.parameters.contains_key("b"));
+        assert!(channel.bindings.is_some());
+        let ext = channel.extensions.as_ref().expect("extensions merged");
+        assert_eq!(ext.get("x-leaf"), Some(&json!(true)));
+        assert_eq!(ext.get("x-mid"), Some(&json!(true)));
+        assert_eq!(ext.get("x-base"), Some(&json!(true)));
+        assert!(document.operations.contains_key("midOp"));
+        assert!(document.operations.contains_key("baseOp"));
+        document_is_valid(&document);
+    }
+
+    #[test]
+    fn inherited_parameter_schema_is_kept_when_referenced() {
+        let (document, _) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "orders/{p}": {
+                    "$ref": "#/components/channels/shared",
+                    "publish": {
+                        "message": {
+                            "name": "M",
+                            "payload": {
+                                "$ref": "#/channels/orders~1{p}/parameters/p/schema"
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {
+                "channels": {
+                    "shared": {
+                        "parameters": {
+                            "p": { "schema": { "type": "string", "minLength": 2 } }
+                        }
+                    }
+                }
+            }
+        }));
+        let value = serde_json::to_value(&document).expect("serializable");
+        assert_eq!(
+            value["channels"]["orders__p_"]["messages"]["M"]["payload"]["$ref"],
+            json!("#/components/schemas/orders__p__p"),
+        );
+        assert!(
+            document
+                .components
+                .as_ref()
+                .is_some_and(|c| c.schemas.contains_key("orders__p__p"))
+        );
+        document_is_valid(&document);
+    }
+
+    #[test]
+    fn component_bindings_rewrite_moved_channel_and_operation_refs() {
+        let (document, _) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": {
+                "prod": {
+                    "url": "amqp://broker.example.com",
+                    "protocol": "amqp",
+                    "bindings": { "amqp": { "bindingVersion": "0.3.0" } }
+                }
+            },
+            "channels": {
+                "a/b": {
+                    "bindings": { "amqp": { "is": "queue" } },
+                    "publish": {
+                        "operationId": "recvAB",
+                        "bindings": { "amqp": { "ack": true } },
+                        "message": {
+                            "name": "M",
+                            "bindings": { "amqp": { "contentEncoding": "gzip" } }
+                        }
+                    }
+                }
+            },
+            "components": {
+                "serverBindings": {
+                    "sb": { "$ref": "#/servers/prod/bindings" }
+                },
+                "channelBindings": {
+                    "cb": { "$ref": "#/channels/a~1b/bindings" }
+                },
+                "operationBindings": {
+                    "ob": { "$ref": "#/channels/a~1b/publish/bindings" }
+                },
+                "messageBindings": {
+                    "mb": { "$ref": "#/channels/a~1b/publish/message/bindings" }
+                }
+            }
+        }));
+        let components = document.components.as_ref().expect("components");
+        assert_eq!(
+            components.server_bindings["sb"]
+                .reference()
+                .map(|r| r.reference.as_str()),
+            Some("#/servers/prod/bindings")
+        );
+        assert_eq!(
+            components.channel_bindings["cb"]
+                .reference()
+                .map(|r| r.reference.as_str()),
+            Some("#/channels/a_b/bindings")
+        );
+        assert_eq!(
+            components.operation_bindings["ob"]
+                .reference()
+                .map(|r| r.reference.as_str()),
+            Some("#/operations/recvAB/bindings")
+        );
+        assert_eq!(
+            components.message_bindings["mb"]
+                .reference()
+                .map(|r| r.reference.as_str()),
+            Some("#/channels/a_b/messages/M/bindings")
+        );
+        document_is_valid(&document);
+    }
+
+    #[test]
+    fn relative_and_empty_authority_server_urls_remain_valid() {
+        let (document, notes) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": {
+                "rel": { "url": "/ws", "protocol": "ws" },
+                "sock": { "url": "unix:///var/run/broker.sock", "protocol": "unix" }
+            },
+            "channels": {}
+        }));
+        let rel = document.servers["rel"].item().expect("rel");
+        assert_eq!(rel.host, "/ws");
+        assert_eq!(rel.pathname, None);
+        let sock = document.servers["sock"].item().expect("sock");
+        assert_eq!(sock.host, "/var/run/broker.sock");
+        assert_eq!(sock.pathname, None);
+        assert!(
+            notes.iter().any(|n| n.contains("#.servers.sock")),
+            "expected note for stripped scheme: {notes:?}"
+        );
+        document_is_valid(&document);
     }
 }

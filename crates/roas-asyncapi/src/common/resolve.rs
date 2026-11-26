@@ -332,7 +332,6 @@ const MEMBERS: &[(&str, Role<'static>)] = &[
     ("correlationId", Role::Object(Some("correlationIds"))),
     ("externalDocs", Role::Object(Some("externalDocs"))),
     ("reply", Role::Object(Some("replies"))),
-    ("address", Role::Object(Some("replyAddresses"))),
 ];
 
 /// The members whose meaning depends on what holds them.
@@ -350,6 +349,9 @@ fn member_within<'a>(parent: Option<&str>, member: &str) -> Option<Role<'a>> {
         ("channels", "bindings") => Role::Object(Some("channelBindings")),
         ("operations" | "operationTraits", "bindings") => Role::Object(Some("operationBindings")),
         ("messages" | "messageTraits", "bindings") => Role::Object(Some("messageBindings")),
+        ("replies", "address") => Role::Object(Some("replyAddresses")),
+        // v3 MultiFormatSchema.schema and v2.6 Parameter.schema both carry a schema.
+        ("schemas" | "parameters", "schema") => Role::Object(Some("schemas")),
         // v2.6 keeps a channel's two operations under the names of what
         // they do, and lets an operation carry several messages.
         ("channels", "publish" | "subscribe") => Role::Object(Some("operations")),
@@ -804,6 +806,7 @@ fn normalize_percent_encoding(reference: &str) -> String {
         let escape = (bytes[i] == b'%')
             .then(|| reference.get(i + 1..i + 3))
             .flatten()
+            .filter(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()))
             .and_then(|hex| u8::from_str_radix(hex, 16).ok().map(|byte| (hex, byte)));
         match escape {
             Some((_, byte))
@@ -818,12 +821,26 @@ fn normalize_percent_encoding(reference: &str) -> String {
                 i += 3;
             }
             None => {
-                out.push(char::from(bytes[i]));
-                i += 1;
+                let ch = reference[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
             }
         }
     }
     out
+}
+
+/// Length of a leading RFC 3986 §3.1 scheme including its `:`, if present.
+fn scheme_len(input: &str) -> Option<usize> {
+    let colon = input.find(':')?;
+    let scheme = &input[..colon];
+    let mut bytes = scheme.bytes();
+    if !bytes.next()?.is_ascii_alphabetic() {
+        return None;
+    }
+    bytes
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+        .then_some(colon + 1)
 }
 
 /// Lower-case the parts of a reference that are case-insensitive, per
@@ -867,12 +884,15 @@ fn remove_dot_segments(reference: &str) -> String {
         Some(cut) => reference.split_at(cut),
         None => (reference, ""),
     };
-    let path_start = match before_query.find("//") {
-        Some(slashes) if slashes == 0 || before_query[..slashes].ends_with(':') => before_query
-            [slashes + 2..]
+    let scheme_end = scheme_len(before_query).unwrap_or(0);
+    let after_scheme = &before_query[scheme_end..];
+    let path_start = if let Some(authority_and_path) = after_scheme.strip_prefix("//") {
+        let authority_start = scheme_end + 2;
+        authority_and_path
             .find('/')
-            .map_or(before_query.len(), |offset| slashes + 2 + offset),
-        _ => before_query.find(':').map_or(0, |colon| colon + 1),
+            .map_or(before_query.len(), |offset| authority_start + offset)
+    } else {
+        scheme_end
     };
     let (prefix, path) = before_query.split_at(path_start);
     let prefix = normalize_case(prefix);
@@ -1382,5 +1402,122 @@ mod tests {
             classify_unresolved::<_, Demo>(&doc, "/servers/prod", "channels"),
             Resolution::WrongKind
         ));
+    }
+
+    #[test]
+    fn normalize_preserves_utf8_and_rfc3986_schemes() {
+        // Multi-byte UTF-8 characters must not be corrupted into Latin-1.
+        assert_eq!(
+            Terminus::parse("./café/a/../spec.yaml#/c")
+                .expect("a terminus")
+                .resource,
+            "café/spec.yaml",
+        );
+        assert_eq!(
+            Terminus::parse("./日本語/%61/../spec.yaml#/c")
+                .expect("a terminus")
+                .resource,
+            "日本語/spec.yaml",
+        );
+        // `%+a` is not a valid percent-escape and stays untouched.
+        assert_eq!(
+            Terminus::parse("./a%+a.yaml#/c")
+                .expect("a terminus")
+                .resource,
+            "a%+a.yaml",
+        );
+        // A colon inside a relative path segment is not a URI scheme.
+        assert_eq!(
+            Terminus::parse("Dir/A:b/../c.yaml#/m")
+                .expect("a terminus")
+                .resource,
+            "Dir/c.yaml",
+        );
+        assert_eq!(
+            Terminus::parse("Dir/A:b://x/../c.yaml#/m")
+                .expect("a terminus")
+                .resource,
+            "Dir/A:b://c.yaml",
+        );
+        // Non-alpha / empty scheme prefixes before `:` are not schemes.
+        assert_eq!(
+            Terminus::parse("./a:b/../c.yaml#/m")
+                .expect("a terminus")
+                .resource,
+            "c.yaml",
+        );
+        assert_eq!(
+            Terminus::parse("1a:b/../c.yaml#/m")
+                .expect("a terminus")
+                .resource,
+            "c.yaml",
+        );
+        assert_eq!(
+            Terminus::parse(":a/../c.yaml#/m")
+                .expect("a terminus")
+                .resource,
+            "c.yaml",
+        );
+        // Scheme-relative authority lowercases host and resolves dot-segments.
+        assert_eq!(
+            Terminus::parse("//Example.COM:8080/a/../B.yaml#/m")
+                .expect("a terminus")
+                .resource,
+            "//example.com:8080/B.yaml",
+        );
+        // Real RFC 3986 schemes still lowercase their scheme/host.
+        assert_eq!(
+            Terminus::parse("HTTPS://Example.COM/a/../B.yaml#/m")
+                .expect("a terminus")
+                .resource,
+            "https://example.com/B.yaml",
+        );
+        assert_eq!(
+            Terminus::parse("URN:Example:a/b/../C#/m")
+                .expect("a terminus")
+                .resource,
+            "urn:Example:a/C",
+        );
+    }
+
+    #[test]
+    fn object_kind_distinguishes_reply_address_and_nested_schemas() {
+        let path = |p: &str| pointer::tokens(p).expect("pointer");
+        // Channel.address is a string, not a replyAddresses object, so it is
+        // opaque to kind inference (judged by JSON shape instead).
+        assert!(!names_something_else(
+            &path("/channels/c/address"),
+            "schemas"
+        ));
+        assert!(!names_something_else(
+            &path("/channels/c/address"),
+            "replyAddresses"
+        ));
+        // OperationReply.address IS a replyAddresses object.
+        assert!(!names_something_else(
+            &path("/operations/op/reply/address"),
+            "replyAddresses"
+        ));
+        assert!(names_something_else(
+            &path("/operations/op/reply/address"),
+            "schemas"
+        ));
+        assert!(!names_something_else(
+            &path("/components/replies/r/address"),
+            "replyAddresses"
+        ));
+        assert!(names_something_else(
+            &path("/components/replies/r/address"),
+            "messages"
+        ));
+        // MultiFormatSchema.schema and Parameter.schema ARE schemas.
+        for schema_path in [
+            "/components/schemas/mf/schema",
+            "/components/schemas/mf/schema/properties/id",
+            "/components/parameters/p/schema",
+        ] {
+            assert!(!names_something_else(&path(schema_path), "schemas"));
+            assert!(names_something_else(&path(schema_path), "messages"));
+        }
     }
 }
