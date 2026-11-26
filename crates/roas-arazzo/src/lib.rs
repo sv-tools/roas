@@ -14,8 +14,8 @@
 //! - [`validation`] — [`Validate`](validation::Validate) trait,
 //!   [`ValidationOptions`](validation::ValidationOptions) flag set,
 //!   `Context` / `ValidationError` types.
-//! - [`v1_0`] — Arazzo v1.0 document model + `Validate` impls.
-//! - [`v1_1`] — Arazzo v1.1 document model + `Validate` impls.
+//! - `v1_0` (feature `v1_0`) — Arazzo v1.0 document model + `Validate` impls.
+//! - `v1_1` (feature `v1_1`, default) — Arazzo v1.1 document model + `Validate` impls.
 //! - [`source_map`] — where a path is written in the JSON or YAML text a
 //!   description was read from (`SourceMap::parse` behind the
 //!   `source-map` feature).
@@ -63,11 +63,11 @@
 //! ```
 //!
 //! YAML descriptions work the same way — parse with `serde-saphyr` (or
-//! any other YAML crate) into [`v1_1::Description`].
+//! any other YAML crate) into `v1_1::Description`.
 //!
 //! ## Versions
 //!
-//! v1.0.x ([`v1_0`]) and v1.1.x ([`v1_1`], default feature) are both
+//! v1.0.x (`v1_0`) and v1.1.x (`v1_1`, default feature) are both
 //! implemented; enable whichever you need. With both features enabled,
 //! an `impl From<v1_0::Description> for v1_1::Description` is available
 //! for upconverting an existing v1.0 description.

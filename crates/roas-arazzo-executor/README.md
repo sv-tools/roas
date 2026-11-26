@@ -9,6 +9,8 @@ An Arazzo description is a program: ordered steps that call API operations, asse
 
 ## Quick start
 
+Enable the `reqwest` feature to use the built-in `Client` (without it, pass your own `HttpClient` or `testing::Fake`):
+
 ```rust
 use roas_arazzo::v1_1::Description;
 use roas_arazzo_executor::{Client, Options, execute};

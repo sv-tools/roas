@@ -383,10 +383,7 @@ fn screened(expression: &str) -> Result<(), SelectError> {
                 }
                 let name = &expression[start..index];
                 let local = name.rsplit_once(':').map_or(name, |(_, local)| local);
-                let mut next = index;
-                while next < bytes.len() && bytes[next].is_ascii_whitespace() {
-                    next += 1;
-                }
+                let next = skip_ws_and_comments(bytes, index);
                 if REFUSED_FUNCTIONS.contains(&local)
                     && matches!(bytes.get(next), Some(b'(' | b'#'))
                 {
@@ -399,6 +396,33 @@ fn screened(expression: &str) -> Result<(), SelectError> {
         index += 1;
     }
     Ok(())
+}
+
+/// Skip ASCII whitespace and nested XPath `(: ... :)` comments starting at
+/// `index` so lookahead after a name neither mistakes a trailing comment for a
+/// function call nor lets a comment hide a refused function call.
+fn skip_ws_and_comments(bytes: &[u8], mut index: usize) -> usize {
+    loop {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if bytes[index..].starts_with(b"(:") {
+            let mut comments = 1;
+            index += 2;
+            while index < bytes.len() && comments > 0 {
+                if bytes[index..].starts_with(b"(:") {
+                    comments += 1;
+                    index += 1;
+                } else if bytes[index..].starts_with(b":)") {
+                    comments -= 1;
+                    index += 1;
+                }
+                index += 1;
+            }
+            continue;
+        }
+        return index;
+    }
 }
 
 /// Whether `byte` can be part of an XPath name, so that a `Q` after it

@@ -4,9 +4,9 @@
 //! for a Reusable Object, `x-`-prefixed extensions. Deserializing keeps
 //! those and drops anything else without a word, so a misspelt
 //! `sucessCriteria` simply vanishes.
-//! [`v1_0::Description::unknown_members`](crate::v1_0::Description::unknown_members)
+//! `v1_0::Description::unknown_members`
 //! and
-//! [`v1_1::Description::unknown_members`](crate::v1_1::Description::unknown_members)
+//! `v1_1::Description::unknown_members`
 //! list what was dropped, by comparing the value a description was
 //! deserialized from with the description serialized again.
 //!

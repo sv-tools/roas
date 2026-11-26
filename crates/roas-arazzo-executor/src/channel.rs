@@ -273,17 +273,24 @@ fn finish(
         Some(named) if !named.is_empty() => named
             .iter()
             .filter_map(|server| {
-                // 3.x references a server; 2.6 names one.
-                let name = match server.get("$ref").and_then(Value::as_str) {
-                    Some(reference) => reference
-                        .rsplit('/')
-                        .next()?
-                        .replace("~1", "/")
-                        .replace("~0", "~"),
-                    None => server.as_str()?.to_owned(),
-                };
-                let object = follow(document, all.get(&name), &name).ok()?.clone();
-                Some((name, object))
+                // 3.x references a server (under `#/servers/...` or
+                // `#/components/servers/...`); 2.6 names one in root `servers`.
+                match server.get("$ref").and_then(Value::as_str) {
+                    Some(reference) => {
+                        let name = reference
+                            .rsplit('/')
+                            .next()?
+                            .replace("~1", "/")
+                            .replace("~0", "~");
+                        let object = follow(document, Some(server), reference).ok()?.clone();
+                        Some((name, object))
+                    }
+                    None => {
+                        let name = server.as_str()?.to_owned();
+                        let object = follow(document, all.get(&name), &name).ok()?.clone();
+                        Some((name, object))
+                    }
+                }
             })
             .collect(),
         _ => all
@@ -310,14 +317,16 @@ fn finish(
         .iter()
         .flat_map(|message| alternatives(document, message))
     {
-        // A field the message does not set may come from one of its
-        // traits; the message's own wins.
+        // A field the message does not set may come from one of its traits;
+        // the message's own wins, and per AsyncAPI's sequential merge order
+        // later traits override earlier ones.
         let field = |name: &str| {
             message.get(name).or_else(|| {
                 message
                     .get("traits")
                     .and_then(Value::as_array)?
                     .iter()
+                    .rev()
                     .filter_map(|item| follow(document, Some(item), "traits").ok())
                     .find_map(|item| item.get(name))
             })

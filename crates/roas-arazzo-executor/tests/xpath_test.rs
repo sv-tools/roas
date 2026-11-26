@@ -226,3 +226,29 @@ fn a_lazy_run_refuses_an_unknown_xpath_version_and_an_xpath_replacement_target()
     let error = prepare(&replacing, &options()).unwrap_err();
     assert!(error.to_string().contains("targetSelectorType"), "{error}");
 }
+
+#[test]
+fn xpath_trailing_comment_after_refused_name_is_allowed_and_comment_before_call_is_refused() {
+    // A path step named `matches` followed by a comment is NOT a function call.
+    let allowed = reading(json!([{
+        "context": "$response.body",
+        "condition": "/order/matches (: note :)",
+        "type": "xpath"
+    }]));
+    let mut client = Fake::new().reply_with(xml(
+        r#"<order id="1"><item>a</item><matches>yes</matches><total>1</total></order>"#,
+    ));
+    let report = execute(&allowed, &options(), &mut client).unwrap();
+    assert!(report.is_success(), "{report}");
+    assert!(prepare(&allowed, &options()).is_ok());
+
+    // A refused function call with a comment between name and `(` is still refused.
+    let refused = reading(json!([{
+        "context": "$response.body",
+        "condition": "matches (: a (: nested :) b :) ('x', 'x')",
+        "type": "xpath"
+    }]));
+    assert!(prepare(&refused, &options()).is_err());
+    let mut client = Fake::new().reply_with(xml("<order><total>1</total></order>"));
+    assert!(execute(&refused, &options(), &mut client).is_err());
+}

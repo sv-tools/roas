@@ -93,32 +93,40 @@ impl From<v1_0::Parameter> for v1_1::Parameter {
 
 impl From<v1_0::Criterion> for v1_1::Criterion {
     fn from(c: v1_0::Criterion) -> Self {
-        use v1_0::CriterionType as V0;
+        use v1_0::{CriterionExpressionKind as V0Expr, CriterionType as V0};
         use v1_1::{CriterionKind, CriterionType, ExpressionKind, ExpressionType};
 
-        // v1.0 carried a flat `type` + `version`. When a jsonpath/xpath
-        // type had a version, fold it into a v1.1 ExpressionType;
-        // otherwise it becomes a plain string kind.
-        let type_ = c.type_.map(|kind| {
-            let simple = match kind {
-                V0::Simple => CriterionKind::Simple,
-                V0::Regex => CriterionKind::Regex,
-                V0::Jsonpath => CriterionKind::Jsonpath,
-                V0::Xpath => CriterionKind::Xpath,
-            };
-            match (kind, c.version.clone()) {
-                (V0::Jsonpath, Some(version)) => CriterionType::Expression(ExpressionType {
+        // v1.0 carried either a nested Criterion Expression Type Object or
+        // the schema's flat `type` + `version`. Fold either form into a v1.1
+        // ExpressionType when a version is present; otherwise keep the plain
+        // string kind.
+        let type_ = c.type_.map(|kind| match kind {
+            V0::Expression(et) => CriterionType::Expression(ExpressionType {
+                type_: match et.type_ {
+                    V0Expr::Jsonpath => ExpressionKind::Jsonpath,
+                    V0Expr::Xpath => ExpressionKind::Xpath,
+                },
+                version: et.version,
+                extensions: et.extensions,
+            }),
+            V0::Jsonpath => match c.version {
+                Some(version) => CriterionType::Expression(ExpressionType {
                     type_: ExpressionKind::Jsonpath,
                     version,
                     extensions: None,
                 }),
-                (V0::Xpath, Some(version)) => CriterionType::Expression(ExpressionType {
+                None => CriterionType::Simple(CriterionKind::Jsonpath),
+            },
+            V0::Xpath => match c.version {
+                Some(version) => CriterionType::Expression(ExpressionType {
                     type_: ExpressionKind::Xpath,
                     version,
                     extensions: None,
                 }),
-                _ => CriterionType::Simple(simple),
-            }
+                None => CriterionType::Simple(CriterionKind::Xpath),
+            },
+            V0::Simple => CriterionType::Simple(CriterionKind::Simple),
+            V0::Regex => CriterionType::Simple(CriterionKind::Regex),
         });
 
         v1_1::Criterion {
@@ -350,6 +358,74 @@ mod tests {
         assert_eq!(
             v1.type_,
             Some(v1_1::CriterionType::Simple(v1_1::CriterionKind::Regex))
+        );
+
+        let v0_nested_jp: v1_0::Criterion = serde_json::from_value(json!({
+            "condition": "$.x",
+            "context": "$response.body",
+            "type": {
+                "type": "jsonpath",
+                "version": "draft-goessner-dispatch-jsonpath-00",
+                "x-note": true
+            }
+        }))
+        .unwrap();
+        let v1_jp: v1_1::Criterion = v0_nested_jp.into();
+        match v1_jp.type_ {
+            Some(v1_1::CriterionType::Expression(et)) => {
+                assert_eq!(et.type_, v1_1::ExpressionKind::Jsonpath);
+                assert_eq!(et.version, "draft-goessner-dispatch-jsonpath-00");
+                assert_eq!(et.extensions.unwrap().get("x-note"), Some(&json!(true)));
+            }
+            other => panic!("expected jsonpath ExpressionType, got {other:?}"),
+        }
+
+        let v0_nested_xp: v1_0::Criterion = serde_json::from_value(json!({
+            "condition": "//x",
+            "context": "$response.body",
+            "type": { "type": "xpath", "version": "xpath-20" }
+        }))
+        .unwrap();
+        let v1_xp: v1_1::Criterion = v0_nested_xp.into();
+        match v1_xp.type_ {
+            Some(v1_1::CriterionType::Expression(et)) => {
+                assert_eq!(et.type_, v1_1::ExpressionKind::Xpath);
+                assert_eq!(et.version, "xpath-20");
+            }
+            other => panic!("expected xpath ExpressionType, got {other:?}"),
+        }
+
+        let v0_bare_jp: v1_0::Criterion = serde_json::from_value(json!({
+            "condition": "$.x",
+            "context": "$response.body",
+            "type": "jsonpath"
+        }))
+        .unwrap();
+        assert_eq!(
+            v1_1::Criterion::from(v0_bare_jp).type_,
+            Some(v1_1::CriterionType::Simple(v1_1::CriterionKind::Jsonpath))
+        );
+
+        let v0_bare_xp: v1_0::Criterion = serde_json::from_value(json!({
+            "condition": "//x",
+            "context": "$response.body",
+            "type": "xpath"
+        }))
+        .unwrap();
+        assert_eq!(
+            v1_1::Criterion::from(v0_bare_xp).type_,
+            Some(v1_1::CriterionType::Simple(v1_1::CriterionKind::Xpath))
+        );
+
+        let v0_simple: v1_0::Criterion = serde_json::from_value(json!({
+            "condition": "$statusCode == 200",
+            "context": "$statusCode",
+            "type": "simple"
+        }))
+        .unwrap();
+        assert_eq!(
+            v1_1::Criterion::from(v0_simple).type_,
+            Some(v1_1::CriterionType::Simple(v1_1::CriterionKind::Simple))
         );
     }
 

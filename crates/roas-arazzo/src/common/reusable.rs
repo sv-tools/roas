@@ -200,13 +200,18 @@ where
     {
         let value = serde_json::Value::deserialize(deserializer)?;
         if value.get("reference").is_some() {
-            serde_json::from_value(value)
-                .map(ReusableOr::Reusable)
+            #[cfg(feature = "editor")]
+            let res = crate::editor::deserialize_nested::<Reusable>(value);
+            #[cfg(not(feature = "editor"))]
+            let res = serde_json::from_value::<Reusable>(value);
+            res.map(ReusableOr::Reusable)
                 .map_err(serde::de::Error::custom)
         } else {
-            serde_json::from_value(value)
-                .map(ReusableOr::Item)
-                .map_err(serde::de::Error::custom)
+            #[cfg(feature = "editor")]
+            let res = crate::editor::deserialize_nested::<T>(value);
+            #[cfg(not(feature = "editor"))]
+            let res = serde_json::from_value::<T>(value);
+            res.map(ReusableOr::Item).map_err(serde::de::Error::custom)
         }
     }
 }

@@ -85,6 +85,15 @@ impl Step {
 impl ValidateWithContext for Step {
     fn validate_with_context(&self, ctx: &mut Context) {
         ctx.require_non_empty("stepId", &self.step_id);
+        if let Some(op_id) = &self.operation_id {
+            ctx.require_non_empty("operationId", op_id);
+        }
+        if let Some(op_path) = &self.operation_path {
+            ctx.require_non_empty("operationPath", op_path);
+        }
+        if let Some(wf_id) = &self.workflow_id {
+            ctx.require_non_empty("workflowId", wf_id);
+        }
 
         // Exactly one of operationId / operationPath / workflowId.
         let targets = [
@@ -238,5 +247,41 @@ mod tests {
         }))
         .unwrap();
         assert!(validate(&step).iter().any(|e| e.contains("key must match")));
+    }
+
+    #[test]
+    fn empty_target_strings_are_rejected() {
+        let op_id = Step {
+            step_id: "s".into(),
+            operation_id: Some(String::new()),
+            ..Default::default()
+        };
+        assert!(
+            validate(&op_id)
+                .iter()
+                .any(|e| e == "#.steps[0].operationId: must not be empty")
+        );
+
+        let op_path = Step {
+            step_id: "s".into(),
+            operation_path: Some(String::new()),
+            ..Default::default()
+        };
+        assert!(
+            validate(&op_path)
+                .iter()
+                .any(|e| e == "#.steps[0].operationPath: must not be empty")
+        );
+
+        let wf_id = Step {
+            step_id: "s".into(),
+            workflow_id: Some(String::new()),
+            ..Default::default()
+        };
+        assert!(
+            validate(&wf_id)
+                .iter()
+                .any(|e| e == "#.steps[0].workflowId: must not be empty")
+        );
     }
 }

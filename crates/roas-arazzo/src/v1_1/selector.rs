@@ -6,8 +6,13 @@
 
 use crate::v1_1::expression_type::ExpressionType;
 use crate::validation::{Context, ValidateWithContext};
+use serde::de::{
+    MapAccess, Visitor,
+    value::{MapAccessDeserializer, StrDeserializer},
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 
 /// The plain (string) selector expression languages.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
@@ -45,16 +50,26 @@ impl<'de> Deserialize<'de> for SelectorType {
     where
         D: Deserializer<'de>,
     {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        if value.is_string() {
-            serde_json::from_value(value)
-                .map(SelectorType::Simple)
-                .map_err(serde::de::Error::custom)
-        } else {
-            serde_json::from_value(value)
-                .map(SelectorType::Expression)
-                .map_err(serde::de::Error::custom)
+        struct SelectorTypeVisitor;
+
+        impl<'de> Visitor<'de> for SelectorTypeVisitor {
+            type Value = SelectorType;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a selector type string or expression type object")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                SelectorKind::deserialize(StrDeserializer::new(v)).map(SelectorType::Simple)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                ExpressionType::deserialize(MapAccessDeserializer::new(map))
+                    .map(SelectorType::Expression)
+            }
         }
+
+        deserializer.deserialize_any(SelectorTypeVisitor)
     }
 }
 
@@ -99,9 +114,12 @@ impl ValidateWithContext for Selector {
 /// `PayloadReplacement.value`, and workflow / step `outputs` values,
 /// all of which became `value | selector` in v1.1.
 ///
-/// Deserialization is hand-written: an object carrying a `selector` key
-/// becomes [`ValueOrSelector::Selector`] (with precise errors), anything
-/// else a literal.
+/// Deserialization is hand-written: an object that carries `selector` and
+/// either has all required selector keys (`context`, `selector`, `type`) or
+/// only selector keys and `x-` extensions becomes [`ValueOrSelector::Selector`]
+/// (surfacing inner schema errors); anything else — including literal JSON
+/// objects that happen to have a `selector` field alongside other keys —
+/// becomes [`ValueOrSelector::Literal`].
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum ValueOrSelector {
@@ -122,15 +140,33 @@ impl ValueOrSelector {
     }
 }
 
+/// Whether a JSON object looks like a [`Selector`] (either complete, or a
+/// malformed attempt containing only `Selector` keys and `x-` extensions)
+/// rather than a literal JSON object that happens to include a `"selector"` key.
+fn looks_like_selector(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
+    if !obj.contains_key("selector") {
+        return false;
+    }
+    let has_all_required = obj.contains_key("context") && obj.contains_key("type");
+    if has_all_required {
+        return true;
+    }
+    obj.keys()
+        .all(|k| matches!(k.as_str(), "context" | "selector" | "type") || k.starts_with("x-"))
+}
+
 impl<'de> Deserialize<'de> for ValueOrSelector {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
-        if value.get("selector").is_some() {
-            serde_json::from_value(value)
-                .map(ValueOrSelector::Selector)
+        if value.as_object().is_some_and(looks_like_selector) {
+            #[cfg(feature = "editor")]
+            let res = crate::editor::deserialize_nested::<Selector>(value);
+            #[cfg(not(feature = "editor"))]
+            let res = serde_json::from_value::<Selector>(value);
+            res.map(ValueOrSelector::Selector)
                 .map_err(serde::de::Error::custom)
         } else {
             Ok(ValueOrSelector::Literal(value))
@@ -221,10 +257,30 @@ mod tests {
 
     #[test]
     fn value_or_selector_malformed_selector_surfaces_inner_error() {
-        // Has a `selector` key so it dispatches to Selector, then fails
-        // on the missing required `context`/`type` with a real error.
+        // Has a `selector` key with only Selector keys so it dispatches to
+        // Selector, then fails on the missing required `context`/`type`.
         let err =
             serde_json::from_value::<ValueOrSelector>(json!({ "selector": "$.id" })).unwrap_err();
         assert!(err.to_string().contains("missing field"), "got: {err}");
+    }
+
+    #[test]
+    fn value_or_selector_keeps_literal_object_with_selector_and_foreign_keys() {
+        let raw = json!({ "selector": ".btn-primary", "action": "click" });
+        let v: ValueOrSelector = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(v, ValueOrSelector::Literal(raw));
+
+        // A complete selector object with an extra stray key still parses as
+        // a Selector so `unknown_members` can report the stray key.
+        let with_stray: ValueOrSelector = serde_json::from_value(json!({
+            "context": "$response.body",
+            "selector": "$.id",
+            "type": "jsonpath",
+            "stray": 1
+        }))
+        .unwrap();
+        assert!(matches!(with_stray, ValueOrSelector::Selector(_)));
+
+        assert!(serde_json::from_value::<SelectorType>(json!(42)).is_err());
     }
 }

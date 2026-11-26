@@ -44,5 +44,5 @@ pub use selector::{Selector, SelectorKind, SelectorType, ValueOrSelector};
 pub use source_description::{SourceDescription, SourceType};
 pub use step::{Step, StepAction};
 pub use success_action::{SuccessAction, SuccessActionType};
-pub use version::Version;
+pub use version::{InvalidVersion, Version};
 pub use workflow::Workflow;

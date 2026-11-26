@@ -114,6 +114,28 @@ pub struct Step {
 impl ValidateWithContext for Step {
     fn validate_with_context(&self, ctx: &mut Context) {
         ctx.require_non_empty("stepId", &self.step_id);
+        if let Some(timeout) = self.timeout
+            && timeout < 0
+        {
+            ctx.error_field("timeout", "must not be negative");
+        }
+        for (i, dep) in self.depends_on.iter().enumerate() {
+            if dep.is_empty() {
+                ctx.in_index("dependsOn", i, |ctx| ctx.error("must not be empty"));
+            }
+        }
+        if let Some(op_id) = &self.operation_id {
+            ctx.require_non_empty("operationId", op_id);
+        }
+        if let Some(op_path) = &self.operation_path {
+            ctx.require_non_empty("operationPath", op_path);
+        }
+        if let Some(channel_path) = &self.channel_path {
+            ctx.require_non_empty("channelPath", channel_path);
+        }
+        if let Some(wf_id) = &self.workflow_id {
+            ctx.require_non_empty("workflowId", wf_id);
+        }
 
         let has_op_id = self.operation_id.is_some();
         let has_op_path = self.operation_path.is_some();
@@ -125,9 +147,14 @@ impl ValidateWithContext for Step {
         // operation step (OpenAPI/AsyncAPI) requires `in` on each
         // operation parameter; a workflow step does not.
         let is_operation = if has_workflow {
-            if has_op_id || has_op_path || has_channel || self.action.is_some() {
+            if has_op_id
+                || has_op_path
+                || has_channel
+                || self.action.is_some()
+                || self.correlation_id.is_some()
+            {
                 ctx.error(
-                    "a workflow step (`workflowId`) must not set `operationId`, `operationPath`, `channelPath`, or `action`",
+                    "a workflow step (`workflowId`) must not set `operationId`, `operationPath`, `channelPath`, `action`, or `correlationId`",
                 );
             }
             false
@@ -394,6 +421,60 @@ mod tests {
             validate(&step)
                 .iter()
                 .any(|e| e == "#.steps[0].outputs.id.selector: must not be empty")
+        );
+    }
+
+    #[test]
+    fn workflow_step_rejects_correlation_id_and_negative_timeout_and_empty_targets() {
+        let step = Step {
+            step_id: "s".into(),
+            workflow_id: Some(String::new()),
+            operation_id: Some(String::new()),
+            operation_path: Some(String::new()),
+            channel_path: Some(String::new()),
+            correlation_id: Some(json!("c")),
+            timeout: Some(-5),
+            depends_on: vec![String::new()],
+            ..Default::default()
+        };
+        let errs = validate(&step);
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.steps[0].timeout: must not be negative")
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.steps[0].dependsOn[0]: must not be empty")
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.steps[0].operationId: must not be empty")
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.steps[0].operationPath: must not be empty")
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.steps[0].channelPath: must not be empty")
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.steps[0].workflowId: must not be empty")
+        );
+        assert!(errs.iter().any(|e| e.contains("correlationId")));
+
+        // Workflow step with ONLY correlationId set must still be rejected.
+        let wf_corr = Step {
+            step_id: "s".into(),
+            workflow_id: Some("wf".into()),
+            correlation_id: Some(json!("$message.header.id")),
+            ..Default::default()
+        };
+        assert!(
+            validate(&wf_corr)
+                .iter()
+                .any(|e| e.contains("correlationId"))
         );
     }
 }

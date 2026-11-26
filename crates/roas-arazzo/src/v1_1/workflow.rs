@@ -74,6 +74,11 @@ pub struct Workflow {
 impl ValidateWithContext for Workflow {
     fn validate_with_context(&self, ctx: &mut Context) {
         ctx.require_non_empty("workflowId", &self.workflow_id);
+        for (i, dep) in self.depends_on.iter().enumerate() {
+            if dep.is_empty() {
+                ctx.in_index("dependsOn", i, |ctx| ctx.error("must not be empty"));
+            }
+        }
 
         if self.steps.is_empty() {
             ctx.error_field("steps", "must contain at least one entry");
@@ -185,5 +190,24 @@ mod tests {
         .unwrap();
         assert!(matches!(wf.outputs["token"], ValueOrSelector::Literal(_)));
         assert!(validate(&wf).is_empty());
+    }
+
+    #[test]
+    fn empty_depends_on_entry_is_rejected() {
+        let wf = Workflow {
+            workflow_id: "w".into(),
+            depends_on: vec![String::new()],
+            steps: vec![Step {
+                step_id: "s".into(),
+                workflow_id: Some("x".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(
+            validate(&wf)
+                .iter()
+                .any(|e| e == "#.workflows[0].dependsOn[0]: must not be empty")
+        );
     }
 }

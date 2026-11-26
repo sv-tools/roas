@@ -124,11 +124,11 @@ impl HttpResponse {
 /// A body or payload as a value: JSON when it parses, its UTF-8 text
 /// otherwise, nothing when it is empty or not UTF-8.
 pub(crate) fn bytes_value(bytes: &[u8]) -> Option<serde_json::Value> {
+    // A byte-order mark is no part of either.
+    let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
     if bytes.is_empty() {
         return None;
     }
-    // A byte-order mark is no part of either.
-    let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
     serde_json::from_slice(bytes).ok().or_else(|| {
         let text = std::str::from_utf8(bytes).ok()?;
         Some(serde_json::Value::String(text.to_owned()))
@@ -246,6 +246,7 @@ mod tests {
         // ISO-8859-1 `café` is not UTF-8, and is not guessed at.
         assert_eq!(body(b"<a>caf\xe9</a>"), None);
         assert_eq!(body(b""), None);
+        assert_eq!(body(b"\xef\xbb\xbf"), None);
     }
 
     #[test]

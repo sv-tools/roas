@@ -1002,3 +1002,159 @@ fn a_dependency_on_a_workflow_running_as_an_ordinary_call_is_a_cycle() {
     );
     assert_eq!(client.sent().len(), 1);
 }
+
+#[test]
+fn nested_retry_detours_unwind_back_to_each_outer_step() {
+    // `a` fails and detours to `b`; `b` fails and detours to `c`;
+    // `c` succeeds -> returns to `b`; `b` succeeds -> returns to `a`;
+    // `a` succeeds -> advances to `d`.
+    let description = one(json!([
+        {
+            "stepId": "a",
+            "operationId": "listPets",
+            "successCriteria": [{ "condition": "$statusCode == 200" }],
+            "onFailure": [{ "name": "detourB", "type": "retry", "stepId": "b", "retryLimit": 1 }]
+        },
+        {
+            "stepId": "d",
+            "operationId": "placeOrder"
+        },
+        {
+            "stepId": "b",
+            "operationId": "listPets",
+            "successCriteria": [{ "condition": "$statusCode == 200" }],
+            "onFailure": [{ "name": "detourC", "type": "retry", "stepId": "c", "retryLimit": 1 }]
+        },
+        {
+            "stepId": "c",
+            "operationId": "listPets",
+            "successCriteria": [{ "condition": "$statusCode == 200" }]
+        }
+    ]));
+    // Order of requests: a(500) -> b(500) -> c(200) -> b(200) -> a(200) -> d(201) -> b(200) -> c(200)
+    // End after `d` so `b`/`c` don't run again sequentially.
+    let mut description = description;
+    description.workflows[0].steps[1].on_success = vec![roas_arazzo::v1_1::ReusableOr::Item(
+        roas_arazzo::v1_1::SuccessAction {
+            name: "done".into(),
+            type_: roas_arazzo::v1_1::SuccessActionType::End,
+            ..Default::default()
+        },
+    )];
+    let mut client = Fake::new()
+        .reply(500, &json!({})) // a fails -> detour b
+        .reply(500, &json!({})) // b fails -> detour c
+        .reply(200, &json!({})) // c passes -> back to b
+        .reply(200, &json!({})) // b passes -> back to a
+        .reply(200, &json!({})) // a passes -> advance to d
+        .reply(201, &json!({})); // d passes -> end
+    let report = execute(&description, &options(), &mut client).unwrap();
+    assert!(report.is_success(), "{report}");
+    let ran: Vec<&str> = report.steps.iter().map(|s| s.step_id.as_str()).collect();
+    assert_eq!(ran, ["a", "b", "c", "b", "a", "d"]);
+}
+
+#[test]
+fn self_targeting_retry_does_not_stack_extra_executions() {
+    let description = one(json!([
+        {
+            "stepId": "a",
+            "operationId": "listPets",
+            "successCriteria": [{ "condition": "$statusCode == 200" }],
+            "onFailure": [{ "name": "retrySelf", "type": "retry", "stepId": "a", "retryLimit": 2 }]
+        },
+        {
+            "stepId": "done",
+            "operationId": "placeOrder"
+        }
+    ]));
+    let mut client = Fake::new()
+        .reply(500, &json!({}))
+        .reply(500, &json!({}))
+        .reply(200, &json!({}))
+        .reply(201, &json!({}));
+    let report = execute(&description, &options(), &mut client).unwrap();
+    assert!(report.is_success(), "{report}");
+    let ran: Vec<&str> = report.steps.iter().map(|s| s.step_id.as_str()).collect();
+    assert_eq!(ran, ["a", "a", "a", "done"]);
+}
+
+#[test]
+fn goto_to_workflow_preserves_triggering_step_state_and_exchange() {
+    let description = description(
+        json!([
+            {
+                "workflowId": "first",
+                "steps": [{
+                    "stepId": "trigger",
+                    "operationId": "listPets",
+                    "outputs": { "fromTrigger": "$response.body#/id" },
+                    "onSuccess": [{
+                        "name": "handOver",
+                        "type": "goto",
+                        "workflowId": "second"
+                    }]
+                }],
+                "outputs": {
+                    "triggerOutput": "$steps.trigger.outputs.fromTrigger",
+                    "triggerStatus": "$steps.trigger.statusCode",
+                    "targetOutput": "$workflows.second.outputs.done"
+                }
+            },
+            {
+                "workflowId": "second",
+                "steps": [{
+                    "stepId": "finish",
+                    "operationId": "placeOrder",
+                    "outputs": { "done": "$response.body#/ok" }
+                }],
+                "outputs": { "done": "$steps.finish.outputs.done" }
+            }
+        ]),
+        None,
+    );
+    let mut client = Fake::new()
+        .reply(200, &json!({ "id": 7 }))
+        .reply(201, &json!({ "ok": true }));
+    let report = execute(&description, &options().workflow("first"), &mut client).unwrap();
+    assert!(report.is_success(), "{report}");
+    assert_eq!(report.outputs["triggerOutput"], json!(7));
+    assert_eq!(report.outputs["triggerStatus"], json!(200));
+    assert_eq!(report.outputs["targetOutput"], json!(true));
+}
+
+#[test]
+fn duplicate_option_headers_and_uppercase_json_content_type_are_handled() {
+    let description = one(json!([{
+        "stepId": "send",
+        "operationId": "placeOrder",
+        "parameters": [{ "name": "X-Step", "in": "header", "value": "from-step" }],
+        "requestBody": {
+            "contentType": "Application/JSON",
+            "payload": "hello"
+        }
+    }]));
+    let opts = options()
+        .header("X-Tag", "a")
+        .header("X-Tag", "b")
+        .header("X-Step", "from-options");
+    let mut client = Fake::new().reply(201, &json!({}));
+    let report = execute(&description, &opts, &mut client).unwrap();
+    assert!(report.is_success(), "{report}");
+    let sent = &client.sent()[0];
+    let tags: Vec<&str> = sent
+        .headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("x-tag"))
+        .map(|(_, v)| v.as_str())
+        .collect();
+    assert_eq!(tags, ["a", "b"]);
+    let step_vals: Vec<&str> = sent
+        .headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("x-step"))
+        .map(|(_, v)| v.as_str())
+        .collect();
+    assert_eq!(step_vals, ["from-step"]);
+    assert_eq!(sent.body.as_deref(), Some(&b"\"hello\""[..]));
+}

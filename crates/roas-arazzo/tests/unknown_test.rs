@@ -3,6 +3,9 @@
 //! to each of its objects in turn.
 #![cfg(all(feature = "v1_0", feature = "v1_1"))]
 
+#[path = "../src/test_yaml.rs"]
+mod yaml;
+
 use roas_arazzo::unknown::UnknownMembers;
 use serde_json::Value;
 use std::path::Path;
@@ -28,7 +31,7 @@ fn fixtures() -> Vec<(String, Value)> {
                 continue;
             }
             let text = std::fs::read_to_string(&path).unwrap();
-            let Ok(value) = serde_saphyr::from_str::<Value>(&text) else {
+            let Ok(value) = yaml::from_str::<Value>(&text) else {
                 continue;
             };
             if value.get("arazzo").is_some() {
