@@ -61,7 +61,7 @@ pub type HttpFetcher = Fetcher<Client>;
 pub type AsyncHttpFetcher = Fetcher<AsyncClient>;
 
 impl Fetcher<Client> {
-    /// Build a blocking HTTP fetcher with a default `rustls-tls` client and a
+    /// Build a blocking HTTP fetcher with a default `native-tls` client and a
     /// 30-second request timeout.
     ///
     /// Panics if the default `reqwest::blocking::Client` cannot be built.
@@ -104,7 +104,7 @@ impl Default for Fetcher<Client> {
 }
 
 impl Fetcher<AsyncClient> {
-    /// Build an async HTTP fetcher with a default `rustls-tls` client and a
+    /// Build an async HTTP fetcher with a default `native-tls` client and a
     /// 30-second request timeout.
     ///
     /// Panics if the default `reqwest::Client` cannot be built. See

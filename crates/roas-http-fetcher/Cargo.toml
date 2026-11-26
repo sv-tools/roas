@@ -20,8 +20,8 @@ default = []
 yaml = ["dep:serde-saphyr"]
 
 [dependencies]
-roas = { workspace = true, features = ["v3_2"] }
-reqwest.workspace = true
+roas.workspace = true
+reqwest = { workspace = true, features = ["blocking", "native-tls"] }
 serde.workspace = true
 serde_json.workspace = true
 serde-saphyr = { workspace = true, optional = true }
@@ -29,4 +29,4 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }
+tokio = { workspace = true, features = ["macros", "rt"] }

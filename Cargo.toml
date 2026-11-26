@@ -10,8 +10,13 @@ repository = "https://github.com/sv-tools/roas"
 
 [workspace.dependencies]
 roas = { version = "0.23.0", path = "crates/roas", default-features = false }
+roas-arazzo = { version = "0.4.0", path = "crates/roas-arazzo", default-features = false }
+roas-arazzo-executor = { version = "0.3", path = "crates/roas-arazzo-executor", default-features = false }
 roas-asyncapi = { version = "0.5", path = "crates/roas-asyncapi", default-features = false }
-roas-codegen = { version = "0.1", path = "crates/roas-codegen" }
+roas-codegen = { version = "0.1", path = "crates/roas-codegen", default-features = false }
+roas-file-fetcher = { version = "0.3.0", path = "crates/roas-file-fetcher", default-features = false }
+roas-http-fetcher = { version = "0.4.0", path = "crates/roas-http-fetcher", default-features = false }
+roas-overlay = { version = "0.4.0", path = "crates/roas-overlay", default-features = false }
 actix-web = { version = "4.15", default-features = false }
 anyhow = "1.0.99"
 axum = "0.8"
@@ -26,7 +31,7 @@ monostate = "1.0.0"
 oxixml-infoset = "0.1.2"
 oxixml-xpath = "0.1.2"
 regex = "1.11.2"
-reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "native-tls"] }
+reqwest = { version = "0.13.4", default-features = false }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.150"
 serde_path_to_error = "0.1.20"
@@ -42,7 +47,7 @@ minijinja = { version = "~2.24", features = ["loader", "multi_template", "preser
 include_dir = "0.7"
 syn = { version = "3", features = ["full", "parsing"] }
 # ECMAScript's own regex grammar, for a schema's `pattern`. The two oxc
-# crates move in lockstep, and 0.146 is the newest that builds on Rust 1.95.
+# crates move in lockstep.
 oxc_regular_expression = "0.159"
 oxc_allocator = "0.159"
 tower = { version = "0.5", default-features = false }

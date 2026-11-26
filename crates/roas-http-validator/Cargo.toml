@@ -54,7 +54,7 @@ thiserror.workspace = true
 actix-web = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
 poem = { workspace = true, optional = true }
-reqwest = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true, features = ["blocking"] }
 rocket = { workspace = true, optional = true }
 salvo_core = { workspace = true, optional = true }
 

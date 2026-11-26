@@ -43,10 +43,9 @@ by `meta.json`) for every embedded Schema Object.
 | 1.1.x   | `overlay/1.1/schema.json`  | <https://spec.openapis.org/overlay/1.1/schema/2026-04-01>  |
 | 1.2.x   | `overlay/1.2/schema.json`  | <https://spec.openapis.org/overlay/1.2/schema/2026-08-08>  |
 
-## AsyncAPI
+## AsyncAPI (`roas-asyncapi`)
 
-Reference material for the AsyncAPI documents that Arazzo v1.1 workflows can point at (AsyncAPI source
-descriptions and channel steps); no crate here parses AsyncAPI itself.
+Reference material for the `roas-asyncapi` crate (and the AsyncAPI documents that Arazzo v1.1 workflows can point at).
 
 | Version | File                        | Source                                                              |
 |---------|-----------------------------|----------------------------------------------------------------------|
