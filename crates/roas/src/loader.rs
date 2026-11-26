@@ -639,6 +639,22 @@ fn visit_refs(value: &mut Value, visitor: &mut impl FnMut(&mut String)) {
     }
 }
 
+/// Normalise an external `$ref` string the same way [`Loader`] keys its
+/// resource cache and rewrites nested references, so equivalent spellings
+/// (`shared.json#/Node` and `relative:shared.json#/Node`, or host-case
+/// differences) produce the same key.
+pub(crate) fn canonical_reference(reference: &str) -> String {
+    match parse_reference(reference) {
+        Ok((mut url, fragment)) => {
+            if !fragment.is_empty() {
+                url.set_fragment(Some(&fragment));
+            }
+            url.into()
+        }
+        Err(_) => reference.to_owned(),
+    }
+}
+
 fn parse_reference(reference: &str) -> Result<(Url, String), LoaderError> {
     match Url::parse(reference) {
         Ok(url) => Ok(split_url_fragment(url)),

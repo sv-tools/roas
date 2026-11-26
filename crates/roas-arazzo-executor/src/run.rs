@@ -1615,7 +1615,16 @@ impl<'d> Run<'d> {
 
             // Criteria, where a step states them, are the whole
             // judgement: a step that says `$statusCode == 404` means it.
-            let mut passed = if done.failed {
+            // A failed child workflow still records its caller's criteria
+            // for diagnostics, but cannot pass.
+            let child_failed = matches!(
+                self.records[record].performed,
+                Performed::Workflow {
+                    outcome: Outcome::Failed,
+                    ..
+                }
+            );
+            let mut passed = if done.failed || child_failed {
                 false
             } else if step.success_criteria.is_empty() {
                 done.default_pass
@@ -1991,7 +2000,7 @@ impl<'d> Run<'d> {
                         exchange: None,
                         given: outputs,
                         default_pass: frame.outcome != Outcome::Failed && !timed_out,
-                        failed: false,
+                        failed: timed_out,
                         alongside: false,
                         attempt,
                         performed: Performed::Workflow {
@@ -2354,6 +2363,18 @@ impl<'d> Run<'d> {
                 workflow,
                 parameters: arguments,
             } => {
+                let delay = match after {
+                    Some(after) => Some(Duration::try_from_secs_f64(after).map_err(|_| {
+                        locate(
+                            &self.documents,
+                            here,
+                            ExecutionError::Unsupported(
+                                "retry delay cannot be represented as a duration".into(),
+                            ),
+                        )
+                    })?),
+                    None => None,
+                };
                 // `decide` has already refused a retry whose limit is
                 // used up, so reaching here means another attempt is
                 // owed. Count it before anything else.
@@ -2361,8 +2382,8 @@ impl<'d> Run<'d> {
                 let step_id = frame.workflow.steps[index].step_id.clone();
                 *frame.attempts.entry(step_id.clone()).or_insert(0) += 1;
                 *frame.retries.entry((step_id.clone(), at)).or_insert(0) += 1;
-                if let Some(after) = after.filter(|after| *after > 0.0) {
-                    self.wait = Some(Duration::from_secs_f64(after));
+                if let Some(delay) = delay.filter(|delay| !delay.is_zero()) {
+                    self.wait = Some(delay);
                 }
                 match (target, workflow) {
                     // "When used with `retry`, context transfers back

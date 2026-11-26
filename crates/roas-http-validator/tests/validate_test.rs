@@ -1881,16 +1881,21 @@ fn an_extreme_exponent_is_reported_rather_than_overflowing() {
     // Valid JSON literals, every one of which used to run the scale
     // past `i32` — a panic in a checked build.
     let validator = body_schema(json!({ "type": "number", "multipleOf": 1 }));
-    for spelling in [b"10e2147483647".as_slice(), b"1e-2147483648".as_slice()] {
-        let found = errors(&validator, &posted(spelling));
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(
-            found[0].contains("could NOT be checked")
-                || found[0].contains("could NOT be established"),
-            "{}: {found:?}",
-            String::from_utf8_lossy(spelling),
-        );
-    }
+    let overflow = errors(&validator, &posted(b"10e2147483647"));
+    assert_eq!(overflow.len(), 1, "{overflow:?}");
+    assert!(overflow[0].contains("could NOT be checked"), "{overflow:?}");
+
+    // `1e-2147483648` fits `Decimal` and is strictly smaller than `1`, so
+    // it is definitely not a multiple of `1` without overflowing `-i32::MIN`.
+    let tiny = errors(&validator, &posted(b"1e-2147483648"));
+    assert_eq!(tiny, ["body: 1e-2147483648 is not a multiple of 1"]);
+
+    // `1e2147483647` fits `Decimal` and is larger than `3`, so divisibility
+    // cannot fit `i128` and is reported as unchecked without overflowing.
+    let by_three = body_schema(json!({ "type": "number", "multipleOf": 3 }));
+    let huge = errors(&by_three, &posted(b"1e2147483647"));
+    assert_eq!(huge.len(), 1, "{huge:?}");
+    assert!(huge[0].contains("could NOT be established"), "{huge:?}");
 }
 
 #[test]
@@ -2074,22 +2079,23 @@ fn a_yaml_description_keeps_integer_bounds_well_past_a_double() {
 
     // Between `u64::MAX` and `i128::MAX` a YAML bound is rounded; see
     // `a_yaml_integer_bound_past_64_bits_is_rounded_before_the_crate_sees_it`.
-    // Past what this crate can hold at all, it is reported rather than
-    // decided — by either route, though for different reasons. YAML
-    // turns 39 nines into `1e39`,
-    // which is holdable but cannot be scaled against a small number;
-    // JSON keeps the digits, which are more than can be held. Both say
-    // so rather than comparing against something else.
+    // Past `i128::MAX`, JSON keeps all 39 digits (which do not fit `Decimal`,
+    // so the check is reported as unchecked), whereas YAML rounds 39 nines
+    // through `f64` to `1e39` (which *does* fit `Decimal` and compares
+    // exactly against both small and large values).
     let from_yaml = body_schema_yaml(&format!("{{ type: integer, maximum: {} }}", "9".repeat(39)));
     let from_json = body_schema_text(&format!(
         r#"{{"type":"integer","maximum":{}}}"#,
         "9".repeat(39)
     ));
-    for validator in [&from_yaml, &from_json] {
-        let found = errors(validator, &posted(b"1"));
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].contains("was NOT checked"), "{found:?}");
-    }
+    let found = errors(&from_json, &posted(b"1"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
+
+    assert!(errors(&from_yaml, &posted(b"1")).is_empty());
+    let over = errors(&from_yaml, &posted(b"2e39"));
+    assert_eq!(over.len(), 1, "{over:?}");
+    assert!(!over[0].contains("was NOT checked"), "{over:?}");
 }
 
 #[test]

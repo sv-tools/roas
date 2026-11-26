@@ -3,7 +3,9 @@
 //! rule (an array merge value concatenates, anything else is appended).
 
 use crate::apply::{ActionOutcome, ApplyError, ApplyErrorKind, ApplyOptions, Operation};
-use crate::common::apply::{compile_path, locate, merge_json, remove_at};
+use crate::common::apply::{
+    compile_path, dedup_pointers, locate, merge_json, remove_at, sort_for_remove,
+};
 use enumset::EnumSet;
 use serde_json::Value;
 
@@ -86,7 +88,7 @@ pub(crate) fn apply_action(
 
     let path =
         compile_path(action.target).map_err(|msg| err(ApplyErrorKind::InvalidJsonPath(msg)))?;
-    let pointers = locate(doc, &path);
+    let mut pointers = dedup_pointers(locate(doc, &path));
 
     if pointers.is_empty() {
         if options.contains(ApplyOptions::ErrorOnZeroMatch) {
@@ -106,11 +108,13 @@ pub(crate) fn apply_action(
     }
 
     if action.remove {
-        // Process in reverse to preserve earlier pointer validity
-        // when siblings live in the same array. Count only successful
-        // removes.
+        // Sort deepest-first and descending by numeric array index so
+        // removing one node never shifts or invalidates a pending
+        // pointer (even for reverse slices or out-of-order unions).
+        // Count only successful removes.
+        sort_for_remove(&mut pointers);
         let mut removed = 0;
-        for ptr in pointers.iter().rev() {
+        for ptr in &pointers {
             if remove_at(doc, ptr) {
                 removed += 1;
             }
@@ -158,22 +162,23 @@ pub(crate) fn apply_action(
     // target the merge value either concatenates (when it is itself an
     // array) or is appended as a single entry (object / primitive),
     // per Overlay v1.1 §3.3. Object targets recurse per §4.4.3.1.
-    for (ptr, kind) in pointers.iter().zip(kinds.iter()) {
+    for ptr in &pointers {
         if let Some(node) = doc.pointer_mut(ptr) {
-            match kind {
-                NodeKind::Array => {
-                    if let Value::Array(arr) = node {
-                        match effective_update {
-                            Value::Array(items) => arr.extend(items.iter().cloned()),
-                            other => arr.push(other.clone()),
-                        }
-                    }
+            match node {
+                Value::Array(arr) => match effective_update {
+                    Value::Array(items) => arr.extend(items.iter().cloned()),
+                    other => arr.push(other.clone()),
+                },
+                Value::Object(_) => merge_json(node, effective_update),
+                // Only replace a primitive when primitive targets are allowed
+                // and the merge payload is primitive (guards against an
+                // ancestor update replacing a descendant with a primitive).
+                _ if !primitives.are_rejected()
+                    && !matches!(effective_update, Value::Object(_) | Value::Array(_)) =>
+                {
+                    *node = effective_update.clone();
                 }
-                NodeKind::Object => merge_json(node, effective_update),
-                // Only reached under `PrimitiveTargets::Replace`.
-                NodeKind::Primitive => *node = effective_update.clone(),
-                // Can't occur: the pointers were just located.
-                NodeKind::Missing => {}
+                _ => {}
             }
         }
     }
