@@ -88,14 +88,14 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Work with OpenAPI descriptions: validate, convert, or preview.
+    /// Work with OpenAPI descriptions: validate, convert, generate, or preview.
     #[command(subcommand)]
     Openapi(OpenApiCommand),
     /// Work with OpenAPI Overlay documents: validate, convert, or apply.
     #[command(subcommand)]
     Overlay(OverlayCommand),
-    /// Work with OpenAPI Arazzo descriptions: validate, convert, run, or
-    /// list the workflows one offers.
+    /// Work with OpenAPI Arazzo descriptions: validate, check, convert, run,
+    /// or list the workflows one offers.
     #[command(subcommand)]
     Arazzo(ArazzoCommand),
     /// Work with AsyncAPI documents: validate or convert.

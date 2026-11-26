@@ -64,10 +64,12 @@ pub struct Overlay {
 /// [`url::ParseError`] when `$self` cannot be resolved against
 /// `retrieval`.
 pub fn document_uri(self_uri: Option<&str>, retrieval: &Url) -> Result<Url, url::ParseError> {
-    match self_uri {
-        Some(self_uri) => retrieval.join(self_uri),
-        None => Ok(retrieval.clone()),
-    }
+    let mut url = match self_uri {
+        Some(self_uri) => retrieval.join(self_uri)?,
+        None => retrieval.clone(),
+    };
+    url.set_fragment(None);
+    Ok(url)
 }
 
 impl Overlay {
@@ -98,11 +100,11 @@ impl Overlay {
         let mut ctx = Context::new(options);
 
         if let Some(self_uri) = &self.self_uri {
-            reject_fragment(&mut ctx, "$self", self_uri);
+            validate_uri_reference(&mut ctx, "$self", self_uri);
         }
         ctx.in_field("info", |ctx| self.info.validate_with_context(ctx));
         if let Some(extends) = &self.extends {
-            reject_fragment(&mut ctx, "extends", extends);
+            validate_uri_reference(&mut ctx, "extends", extends);
         }
 
         if self.actions.is_empty() {
@@ -139,11 +141,26 @@ impl Overlay {
     }
 }
 
-/// The schema's `$comment` for `$self` and `extends`: "MUST NOT contain
-/// a fragment".
-fn reject_fragment(ctx: &mut Context, field: &str, uri: &str) {
+/// Validate an RFC 3986 URI reference for `$self` / `extends` and enforce
+/// the schema's `$comment`: "MUST NOT contain a fragment".
+fn validate_uri_reference(ctx: &mut Context, field: &str, uri: &str) {
     if uri.contains('#') {
         ctx.error_field(field, "must not contain a fragment (`#…`)");
+    }
+    if uri.is_empty() {
+        ctx.error_field(field, "must not be empty");
+        return;
+    }
+    if uri.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        ctx.error_field(
+            field,
+            "must be a valid RFC 3986 URI reference (no whitespace or control characters)",
+        );
+        return;
+    }
+    let base = Url::parse("https://example.invalid/").expect("static base URL is valid");
+    if let Err(err) = base.join(uri) {
+        ctx.error_field(field, format!("invalid URI reference: {err}"));
     }
 }
 
@@ -321,7 +338,7 @@ mod tests {
         .unwrap();
         assert_eq!(extends, target);
         assert_eq!(
-            document_uri(None, &url("file:///elsewhere/copy.yaml")).unwrap(),
+            document_uri(None, &url("file:///elsewhere/copy.yaml#frag")).unwrap(),
             url("file:///elsewhere/copy.yaml"),
         );
     }
@@ -379,6 +396,20 @@ mod tests {
                 "#.$self: must not contain a fragment (`#…`)",
                 "#.extends: must not contain a fragment (`#…`)",
             ],
+        );
+
+        o.self_uri = Some(String::new());
+        o.extends = Some("bad uri with spaces".into());
+        let errs = validation_errors(&o);
+        assert!(errs.iter().any(|e| e == "#.$self: must not be empty"));
+        assert!(errs.iter().any(|e| e.contains("RFC 3986")));
+
+        o.self_uri = Some("http://[::1".into());
+        o.extends = None;
+        assert!(
+            validation_errors(&o)
+                .iter()
+                .any(|e| e.contains("invalid URI reference"))
         );
     }
 

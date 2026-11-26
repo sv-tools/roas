@@ -469,7 +469,7 @@ pub(crate) struct ArazzoRunArgs {
     /// workflow with none, and does not depend on or read a step still in
     /// flight; the workflows the one asked for depends on run together
     /// where none can tell which ran first. One at a time by default.
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", value_parser = parse_positive_usize)]
     parallel: Option<usize>,
 
     /// Do not print the report to stderr.
@@ -491,6 +491,16 @@ pub(crate) struct ArazzoRunArgs {
     /// format.
     #[arg(long, value_enum)]
     output_format: Option<InputFormat>,
+}
+
+fn parse_positive_usize(raw: &str) -> Result<usize, String> {
+    let n: usize = raw
+        .parse()
+        .map_err(|_| format!("invalid positive integer `{raw}`"))?;
+    if n == 0 {
+        return Err("value must be at least 1".to_string());
+    }
+    Ok(n)
 }
 
 pub(crate) fn run_arazzo(cmd: ArazzoCommand) -> Result<()> {
@@ -4475,5 +4485,17 @@ workflows:
             err.to_string().contains("does not validate"),
             "expected validation error, got: {err}"
         );
+    }
+
+    #[test]
+    fn cli_rejects_parallel_zero() {
+        use clap::Parser as _;
+        let err =
+            crate::Cli::try_parse_from(["roas", "arazzo", "run", "--parallel", "0", "wf.yaml"])
+                .err()
+                .expect("--parallel 0 must be rejected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        assert_eq!(parse_positive_usize("2").unwrap(), 2);
+        assert!(parse_positive_usize("abc").is_err());
     }
 }

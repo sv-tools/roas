@@ -19,8 +19,13 @@ pub struct Action {
     pub description: Option<String>,
 
     /// Value (object, array, or primitive) merged into the selected
-    /// nodes. Has no effect when `remove` is `true`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// nodes. Has no effect when `remove` is `true`. An explicit
+    /// `update: null` is kept as `Some(Value::Null)`.
+    #[serde(
+        default,
+        deserialize_with = "crate::common::apply::present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub update: Option<serde_json::Value>,
 
     /// When `true`, removes the selected nodes from their container.
@@ -93,6 +98,15 @@ mod tests {
             v,
             json!({ "target": "$.info", "update": { "description": "patched" } })
         );
+    }
+
+    #[test]
+    fn deserialize_keeps_explicit_null_update() {
+        let wire = json!({ "target": "$.info", "update": null });
+        let a: Action = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(a.update, Some(serde_json::Value::Null));
+        assert!(validate(&a).is_empty());
+        assert_eq!(serde_json::to_value(&a).unwrap(), wire);
     }
 
     #[test]

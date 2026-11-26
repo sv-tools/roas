@@ -119,7 +119,7 @@ roas openapi convert --to v3_1 --from v2 spec.yaml
 
 Output goes to stdout. The format matches the input by default (YAML in → YAML out, JSON in → JSON out); pass `--output-format json|yaml` to override.
 
-`--merge <FILE>` (repeatable) layers additional specs on top after conversion. Each merge source is loaded with the same format-detection rules as the base, upconverted to the target version, then merged in incoming-order via `roas::merge`. The merge runs *after* the version conversion and *before* `--collapse`. By default the merge is incoming-wins on scalar conflicts, base keeps its `info` / `openapi`, refs replace silently, and schemas are leaf-replaced. `--merge-option` (repeatable) tunes that:
+`--merge <FILE>` (repeatable) layers additional specs on top after conversion. Each merge source uses extension-based format detection (`.yaml`/`.yml` → YAML, otherwise JSON), auto-detects its own OpenAPI version, upconverts to the target version, then merges in incoming-order via `roas::merge`. The merge runs *after* the version conversion and *before* `--apply` / `--collapse`. By default the merge is incoming-wins on scalar conflicts, base keeps its `info` / `openapi`, refs replace silently, and schemas are leaf-replaced. `--merge-option` (repeatable) tunes that:
 
 ```shell
 roas openapi convert --to v3_2 --merge errors.yaml --merge auth.yaml base.json
@@ -138,6 +138,8 @@ roas openapi convert --to v3_2 --apply patch.yaml spec.json
 roas openapi convert --to v3_2 --merge layer.yaml --apply patch.yaml --collapse spec.json
 roas openapi convert --to v3_2 --apply patch.yaml --apply-option error-on-zero-match spec.json
 ```
+
+`--collapse` lifts inline components into the root component bags (`components.*` on v3.x, `definitions` / `parameters` / `responses` on v2) and replaces call sites with `$ref`s, deduplicating structurally identical components. Pass `--load file` and/or `--load http` alongside `--collapse` to also resolve external `$ref`s during collapse.
 
 ### `openapi generate`
 
@@ -201,7 +203,6 @@ cat workflow.json | roas arazzo validate       # description on stdin
 - **`arazzo validate`** — checks structure: required / non-empty fields, source-name and component/output-key patterns, uniqueness of source names / workflow ids / step ids, the step shape rules (OpenAPI / AsyncAPI / Workflow), criterion type / context / version constraints, and `goto` action targets. `--ignore <CHECK>` skips a check (`empty-info-title`, `empty-info-version`); `--print` echoes the parsed description. Findings name the line and column of the field (`#.info.title at line 3, column 10: must not be empty`), and a description that does not fit the model names the field that does not, and where it is (`#.workflows[0].workflowId at line 11, column 17: invalid type: sequence, expected a string`). A member that is neither a field of the declared version nor an `x-` extension (a Reusable Object allows none), which the model drops, is a located warning (`warning: #.info.summery at line 4, column 3: …`) that does not fail validation; `arazzo run` refuses it, since the run would ignore it.
 - **`arazzo convert --to <v1_0|v1_1>`** — upconverts a description. Only upconversion is supported (v1.0 → v1.1 adds `$self`, AsyncAPI steps, selectors, expression types, and action `parameters`); downconversion errors.
 - **`arazzo list`** — prints each workflow's id, summary, `dependsOn`, inputs (with types, and which are required) and steps. What to pass to `arazzo run --workflow`, and what inputs it wants.
-- **`arazzo check`** — reads a description the way an editor does and prints its findings with their line and column, on stdout. A syntax error is located and reported on its own. Text that parses is checked part by part (`info`, each source, each workflow, `components`), so one part that does not fit the model does not hide another; only once every part fits is the description validated and unknown members reported as warnings, so fixing the first findings can bring out more. The format is detected as for `validate` (the file extension, JSON on stdin) and read as strictly, so a file `validate` refuses is not passed here; `--format json|yaml` overrides it, and `--ignore <CHECK>` works as for `validate`. `--output-format text` (the default) prints one line per finding (`error: #.info.title at line 3, column 10: …`); `json` and `yaml` print a document for tools — linter plugins, CI annotations — with `arazzo` (the version the text declares, or null), `complete` (whether the whole text was read) and `diagnostics`, each with `severity` (`error` or `warning`), `path` (null for a finding about the text itself, such as a syntax error), `message` and `range` (null when the finding cannot be located). A range's `start` and `end` give the one-based `line` and `column` (in characters), `utf16Column` (one-based too: an LSP `character` is one less) and the byte `offset`. It exits non-zero when any finding is an error, never on warnings alone.
 
 ```text
 buyPet
@@ -210,6 +211,8 @@ buyPet
   inputs: petId (string, required), token (string)
   steps: 2 (findPet, orderPet)
 ```
+
+- **`arazzo check`** — reads a description the way an editor does and prints its findings with their line and column, on stdout. A syntax error is located and reported on its own. Text that parses is checked part by part (`info`, each source, each workflow, `components`), so one part that does not fit the model does not hide another; only once every part fits is the description validated and unknown members reported as warnings, so fixing the first findings can bring out more. The format is detected as for `validate` (the file extension, JSON on stdin) and read as strictly, so a file `validate` refuses is not passed here; `--format json|yaml` overrides it, and `--ignore <CHECK>` works as for `validate`. `--output-format text` (the default) prints one line per finding (`error: #.info.title at line 3, column 10: …`); `json` and `yaml` print a document for tools — linter plugins, CI annotations — with `arazzo` (the version the text declares, or null), `complete` (whether the whole text was read) and `diagnostics`, each with `severity` (`error` or `warning`), `path` (null for a finding about the text itself, such as a syntax error), `message` and `range` (null when the finding cannot be located). A range's `start` and `end` give the one-based `line` and `column` (in characters), `utf16Column` (one-based too: an LSP `character` is one less) and the byte `offset`. It exits non-zero when any finding is an error, never on warnings alone.
 
 - **`arazzo run`** — runs a workflow via [`roas-arazzo-executor`](https://crates.io/crates/roas-arazzo-executor): every step's request, its criteria, its `retry` / `goto` / `end` actions, and the workflows it calls. This is the one command that talks to an API rather than reading a document. What it parses, resolves, validates and runs, what it refuses (AsyncAPI steps, which need a message client the CLI does not have — the library's `execute_with_messages` runs them — and XPath unless the binary is built with the `xpath` feature: `cargo install roas-cli --features xpath`), and how `dependsOn` is scheduled — one at a time, each dependency once, is the executor's [support matrix](https://crates.io/crates/roas-arazzo-executor#support-matrix).
 
@@ -290,8 +293,8 @@ An unavailable unrelated source is a located warning, not necessarily a failed r
 Checked preparation still rejects missing required sources and an unprovable bare
 operation ID before sending API requests. Canonical `$self` identities are used by
 default; `--allow-source-retrieval-aliases` explicitly permits noncanonical Arazzo
-retrieval URLs as a compatibility extension. Loading linked Arazzo/AsyncAPI documents
-does not add external workflow calls or broker execution.
+retrieval URLs as a compatibility extension. Loading linked AsyncAPI documents
+does not add broker execution.
 
 The report goes to **stderr** and the workflow's outputs to **stdout**, so the outputs pipe onward; `--quiet` silences the report. The exit status follows the workflow: non-zero when it failed.
 

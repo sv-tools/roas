@@ -5,8 +5,16 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use serde_json_path::JsonPath;
+
+/// Deserialize a field that is present as `Some`, `null` included, so an
+/// explicit `update: null` is told apart from a missing `update`; pair with
+/// `#[serde(default)]` for the missing case.
+pub(crate) fn present_value<'de, D: Deserializer<'de>>(de: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(de).map(Some)
+}
 
 /// Compile a JSONPath query string into a typed [`JsonPath`]. Returns
 /// the underlying parser error as a string so callers can surface it

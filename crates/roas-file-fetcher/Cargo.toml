@@ -14,8 +14,8 @@ publish = true
 
 [features]
 default = []
-# Enable the `AsyncFileFetcher` (and the `tokio::fs::read` runtime
-# dep that backs it). With this feature off, the crate is sync-only
+# Enable the `AsyncFileFetcher` (and the `tokio::task::spawn_blocking`
+# runtime dep that backs it). With this feature off, the crate is sync-only
 # and does not depend on tokio.
 async = ["dep:tokio"]
 # Parse YAML file bodies in addition to JSON. Selection is by file path
@@ -27,7 +27,7 @@ roas.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde-saphyr = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true, features = ["fs", "rt"] }
+tokio = { workspace = true, optional = true, features = ["rt"] }
 url.workspace = true
 
 [dev-dependencies]

@@ -5,8 +5,8 @@
 //! and [Reusable Action Object](https://spec.openapis.org/overlay/v1.2.0.html#reusable-action-object).
 
 use crate::apply::ActionReferenceError;
-use crate::common::apply::unescape_pointer_segment;
-use crate::v1_2::action::{present_value, validate_operation_fields};
+use crate::common::apply::{present_value, unescape_pointer_segment};
+use crate::v1_2::action::validate_operation_fields;
 use crate::validation::{Context, ValidateWithContext};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};

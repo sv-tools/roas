@@ -98,15 +98,12 @@ fn apply_action(
         kind,
     };
 
-    let path =
-        compile_path(&action.target).map_err(|msg| err(ApplyErrorKind::InvalidJsonPath(msg)))?;
-    let mut pointers = dedup_pointers(locate(doc, &path));
-
     // Validate ensures every action has either `update` or `remove: true`,
     // so the only meaningful action shapes here are remove (`is_remove`)
     // and update (`update.is_some()`). The pre-validate fall-through
     // (action with neither) is treated as a true no-op at apply time:
-    // we report `matched: 0` so the report doesn't claim work that
+    // we return before JSONPath compilation/matching (matching v1.1/v1.2)
+    // and report `matched: 0` so the report doesn't claim work that
     // didn't happen.
     let operation = if action.is_remove() {
         Operation::Remove
@@ -114,6 +111,19 @@ fn apply_action(
         Operation::Update
     };
     let no_effect = !action.is_remove() && action.update.is_none();
+
+    if no_effect {
+        return Ok(ActionOutcome {
+            index,
+            target: action.target.clone(),
+            operation,
+            matched: 0,
+        });
+    }
+
+    let path =
+        compile_path(&action.target).map_err(|msg| err(ApplyErrorKind::InvalidJsonPath(msg)))?;
+    let mut pointers = dedup_pointers(locate(doc, &path));
 
     if pointers.is_empty() {
         if options.contains(ApplyOptions::ErrorOnZeroMatch) {
@@ -134,19 +144,11 @@ fn apply_action(
     if kinds.iter().any(|k| matches!(k, NodeKind::Primitive)) {
         return Err(err(ApplyErrorKind::PrimitiveActionTarget));
     }
-    if options.contains(ApplyOptions::ErrorOnMixedKindMatch) && !uniform_kinds(&kinds) {
+    if !action.is_remove()
+        && options.contains(ApplyOptions::ErrorOnMixedKindMatch)
+        && !uniform_kinds(&kinds)
+    {
         return Err(err(ApplyErrorKind::MixedKindMatch));
-    }
-
-    if no_effect {
-        // Action with neither `update` nor `remove: true` — see the
-        // comment above. Validation catches this; apply is defensive.
-        return Ok(ActionOutcome {
-            index,
-            target: action.target.clone(),
-            operation,
-            matched: 0,
-        });
     }
 
     if action.is_remove() {
@@ -626,6 +628,18 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, ApplyErrorKind::MixedKindMatch);
         assert_eq!(doc, snapshot);
+
+        // `remove` actions are allowed even when matched nodes have mixed kinds.
+        let remove_mixed = ovl(vec![Action {
+            target: "$.choices[*]".into(),
+            remove: Some(true),
+            ..Default::default()
+        }]);
+        let r = remove_mixed
+            .apply(&mut doc, ApplyOptions::ErrorOnMixedKindMatch.into())
+            .unwrap();
+        assert_eq!(r.actions[0].matched, 2);
+        assert_eq!(doc, json!({ "choices": [] }));
     }
 
     #[test]
@@ -727,5 +741,19 @@ mod tests {
         let r = o.apply(&mut doc, EnumSet::empty()).unwrap();
         assert_eq!(r.actions[0].matched, 1);
         assert_eq!(doc, json!({ "items": [1, 2] }));
+    }
+
+    #[test]
+    fn apply_noop_action_returns_before_jsonpath_compilation() {
+        let mut doc = json!({ "a": 1 });
+        let o = ovl(vec![Action {
+            target: "not-a-valid-jsonpath".into(),
+            ..Default::default()
+        }]);
+        let r = o
+            .apply(&mut doc, EnumSet::only(ApplyOptions::ErrorOnZeroMatch))
+            .unwrap();
+        assert_eq!(r.actions[0].matched, 0);
+        assert_eq!(doc, json!({ "a": 1 }));
     }
 }

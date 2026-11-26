@@ -17,6 +17,7 @@ struct TestResponse {
     reason: &'static str,
     content_type: Option<&'static str>,
     location: Option<&'static str>,
+    omit_content_length: bool,
     body: Vec<u8>,
 }
 
@@ -27,8 +28,14 @@ impl TestResponse {
             reason: "OK",
             content_type: None,
             location: None,
+            omit_content_length: false,
             body,
         }
+    }
+
+    fn without_content_length(mut self) -> Self {
+        self.omit_content_length = true;
+        self
     }
 
     #[cfg(feature = "yaml")]
@@ -114,11 +121,13 @@ fn read_request_line(stream: &TcpStream) -> String {
 
 fn write_response(mut stream: TcpStream, resp: TestResponse) {
     let mut header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Length: {len}\r\nConnection: close\r\n",
+        "HTTP/1.1 {status} {reason}\r\nConnection: close\r\n",
         status = resp.status,
         reason = resp.reason,
-        len = resp.body.len(),
     );
+    if !resp.omit_content_length {
+        header.push_str(&format!("Content-Length: {}\r\n", resp.body.len()));
+    }
     if let Some(ct) = resp.content_type {
         header.push_str(&format!("Content-Type: {ct}\r\n"));
     }
@@ -126,8 +135,8 @@ fn write_response(mut stream: TcpStream, resp: TestResponse) {
         header.push_str(&format!("Location: {location}\r\n"));
     }
     header.push_str("\r\n");
-    stream.write_all(header.as_bytes()).expect("write header");
-    stream.write_all(&resp.body).expect("write body");
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(&resp.body);
 }
 
 #[test]
@@ -145,6 +154,7 @@ fn redirect_response(request: &str) -> TestResponse {
             reason: "Found",
             content_type: None,
             location: Some("/nested/document.json"),
+            omit_content_length: false,
             body: Vec::new(),
         }
     } else {
@@ -220,6 +230,7 @@ fn yaml_blob_server(content_type: Option<&'static str>) -> TestServer {
                 reason: "Found",
                 content_type: None,
                 location: Some("/blob"),
+                omit_content_length: false,
                 body: Vec::new(),
             }
         } else {
@@ -286,6 +297,7 @@ fn http_fetcher_surfaces_non_2xx_as_loader_error_fetch_with_status() {
         reason: "Not Found",
         content_type: None,
         location: None,
+        omit_content_length: false,
         body: b"missing".to_vec(),
     });
     let mut fetcher = HttpFetcher::new();
@@ -426,6 +438,7 @@ async fn async_http_fetcher_surfaces_non_2xx_as_loader_error_fetch_with_status()
         reason: "Not Found",
         content_type: None,
         location: None,
+        omit_content_length: false,
         body: b"missing".to_vec(),
     });
     let mut fetcher = AsyncHttpFetcher::new();
@@ -532,6 +545,7 @@ fn text_response(request: &str) -> TestResponse {
             reason: "Not Found",
             content_type: None,
             location: None,
+            omit_content_length: false,
             body: Vec::new(),
         }
     } else if request.starts_with("GET /broken ") {
@@ -602,4 +616,148 @@ async fn async_http_fetcher_returns_the_body_a_document_was_parsed_from() {
         };
         assert_eq!(kind, expected, "{url}");
     }
+}
+
+#[test]
+fn http_fetcher_rejects_oversized_response_with_and_without_content_length() {
+    let payload = br#"{"hello":"world-that-is-too-large"}"#.to_vec();
+    let payload_len = payload.len();
+    let payload_for_stream = payload.clone();
+    let server = TestServer::start(move |req| {
+        if req.starts_with("GET /stream ") {
+            TestResponse::ok_body(payload_for_stream.clone()).without_content_length()
+        } else {
+            TestResponse::ok_body(payload.clone())
+        }
+    });
+
+    let mut fetcher = HttpFetcher::new().with_max_body_bytes(16);
+    for path in ["sized.json", "stream"] {
+        let err = fetcher
+            .fetch(&server.url(path))
+            .expect_err("oversized body must fail");
+        match err {
+            LoaderError::Fetch { source, .. } => {
+                let http = source
+                    .downcast_ref::<HttpFetchError>()
+                    .expect("HttpFetchError");
+                assert!(matches!(http, HttpFetchError::BodyTooLarge { limit: 16 }));
+            }
+            other => panic!("expected LoaderError::Fetch, got {other:?}"),
+        }
+    }
+
+    // Exact boundary (`body.len() == max_body_bytes`) must succeed.
+    let mut exact = HttpFetcher::new().with_max_body_bytes(payload_len);
+    assert_eq!(
+        exact.fetch(&server.url("sized.json")).unwrap(),
+        serde_json::json!({ "hello": "world-that-is-too-large" })
+    );
+    assert_eq!(
+        exact.fetch(&server.url("stream")).unwrap(),
+        serde_json::json!({ "hello": "world-that-is-too-large" })
+    );
+}
+
+#[tokio::test]
+async fn async_http_fetcher_rejects_oversized_response_with_and_without_content_length() {
+    let payload = br#"{"hello":"world-that-is-too-large"}"#.to_vec();
+    let payload_len = payload.len();
+    let payload_for_stream = payload.clone();
+    let server = TestServer::start(move |req| {
+        if req.starts_with("GET /stream ") {
+            TestResponse::ok_body(payload_for_stream.clone()).without_content_length()
+        } else {
+            TestResponse::ok_body(payload.clone())
+        }
+    });
+
+    let mut fetcher = AsyncHttpFetcher::new().with_max_body_bytes(16);
+    for path in ["sized.json", "stream"] {
+        let err = fetcher
+            .fetch(&server.url(path))
+            .await
+            .expect_err("oversized body must fail");
+        match err {
+            LoaderError::Fetch { source, .. } => {
+                let http = source
+                    .downcast_ref::<HttpFetchError>()
+                    .expect("HttpFetchError");
+                assert!(matches!(http, HttpFetchError::BodyTooLarge { limit: 16 }));
+            }
+            other => panic!("expected LoaderError::Fetch, got {other:?}"),
+        }
+    }
+
+    // Exact boundary (`body.len() == max_body_bytes`) must succeed.
+    let mut exact = AsyncHttpFetcher::new().with_max_body_bytes(payload_len);
+    assert_eq!(
+        exact.fetch(&server.url("sized.json")).await.unwrap(),
+        serde_json::json!({ "hello": "world-that-is-too-large" })
+    );
+    assert_eq!(
+        exact.fetch(&server.url("stream")).await.unwrap(),
+        serde_json::json!({ "hello": "world-that-is-too-large" })
+    );
+}
+
+#[test]
+fn http_fetcher_rejects_non_http_redirect_and_excessive_redirect_loops() {
+    let server = TestServer::start(|req| {
+        if req.starts_with("GET /to-file ") {
+            TestResponse {
+                status: 302,
+                reason: "Found",
+                content_type: None,
+                location: Some("file:///etc/passwd"),
+                omit_content_length: false,
+                body: Vec::new(),
+            }
+        } else {
+            TestResponse {
+                status: 302,
+                reason: "Found",
+                content_type: None,
+                location: Some("/loop"),
+                omit_content_length: false,
+                body: Vec::new(),
+            }
+        }
+    });
+    let mut fetcher = HttpFetcher::new();
+    assert!(matches!(
+        fetcher.fetch(&server.url("to-file")),
+        Err(LoaderError::Fetch { .. })
+    ));
+    assert!(matches!(
+        fetcher.fetch(&server.url("loop")),
+        Err(LoaderError::Fetch { .. })
+    ));
+}
+
+#[cfg(feature = "yaml")]
+#[test]
+fn http_fetcher_parses_yaml_served_as_text_plain_with_yaml_extension() {
+    let body = b"title: Petstore\n".to_vec();
+    let server = TestServer::start(move |_req| {
+        TestResponse::ok_body(body.clone()).with_content_type("text/plain; charset=utf-8")
+    });
+    let mut fetcher = HttpFetcher::new();
+    let value = fetcher.fetch(&server.url("spec.yaml")).expect("fetch ok");
+    assert_eq!(value, serde_json::json!({ "title": "Petstore" }));
+}
+
+#[cfg(feature = "yaml")]
+#[tokio::test]
+async fn async_http_fetcher_parses_yaml_served_as_text_plain_with_yaml_extension() {
+    let body = b"title: Petstore\n".to_vec();
+    let server = TestServer::start(move |_req| {
+        TestResponse::ok_body(body.clone()).with_content_type("text/plain; charset=utf-8")
+    });
+    let mut fetcher = AsyncHttpFetcher::new();
+    let value = fetcher
+        .fetch(&server.url("spec.yaml"))
+        .await
+        .expect("fetch ok");
+    assert_eq!(value, serde_json::json!({ "title": "Petstore" }));
 }

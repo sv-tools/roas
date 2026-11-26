@@ -145,11 +145,12 @@ pub(crate) struct ConvertArgs {
     output_format: Option<InputFormat>,
 
     /// Path to an additional spec to merge on top of the base after
-    /// version conversion. Each `--merge` source is loaded with the
-    /// same format-detection rules as the base, converted to the
-    /// target version, then merged in incoming-order. Repeat the
-    /// flag to layer multiple sources. The merge runs *after* the
-    /// version conversion and *before* `--collapse`.
+    /// version conversion. Each `--merge` source uses extension-based
+    /// format detection (`.yaml`/`.yml` → YAML, otherwise JSON),
+    /// auto-detects its own OpenAPI version, converts to the target
+    /// version, and merges in incoming-order. Repeat the flag to layer
+    /// multiple sources. The merge runs *after* the version conversion
+    /// and *before* `--apply` / `--collapse`.
     #[arg(long, value_name = "FILE")]
     merge: Vec<PathBuf>,
 
@@ -165,17 +166,18 @@ pub(crate) struct ConvertArgs {
     /// (`components.<bag>` for v3.x, `definitions` / `parameters` /
     /// `responses` for v2) and replace its call sites with a `$ref`.
     /// Structurally identical components collapse to a single entry.
-    /// Runs after the version conversion (and after `--merge`, if any).
+    /// Runs after the version conversion (and after `--merge` / `--apply`,
+    /// if any).
     #[arg(long)]
     collapse: bool,
 
     /// Path to an OpenAPI Overlay document to apply on top of the
-    /// converted (and merged / collapsed) spec. Each `--apply` source
-    /// is loaded with extension-based format detection, its version
-    /// detected from the `overlay` field, and applied via
-    /// `roas-overlay`. Repeat the flag to apply several overlays in
-    /// order. Apply runs *last* — after conversion, `--merge`, and
-    /// `--collapse`.
+    /// converted (and merged) spec. Each `--apply` source is loaded with
+    /// extension-based format detection, its version detected from the
+    /// `overlay` field, and applied via `roas-overlay`. Repeat the flag
+    /// to apply several overlays in order. Apply runs after conversion
+    /// and `--merge`, and before `--collapse` (so overlay-introduced
+    /// inline components get lifted into `$ref`s too).
     #[arg(long, value_name = "FILE")]
     apply: Vec<PathBuf>,
 
@@ -295,20 +297,14 @@ fn run_convert(args: ConvertArgs) -> Result<()> {
         for path in &args.merge {
             let raw =
                 fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-            // The merge source uses the *same* format-detection rules
-            // as the base: --format applies to all inputs (the base
-            // and every --merge source), and file extension falls
-            // back when --format is unset.
-            let format = args.format.unwrap_or_else(|| {
-                if path_looks_like_yaml(path) {
-                    InputFormat::Yaml
-                } else {
-                    InputFormat::Json
-                }
-            });
-            let value = parse_value(&raw, format == InputFormat::Yaml)
+            // Each `--merge` source uses extension-based format detection and
+            // auto-detects its own OpenAPI version so callers can freely mix
+            // YAML/JSON or different spec versions even when `--format` or
+            // `--from` was specified for the base input (e.g. stdin).
+            let is_yaml = path_looks_like_yaml(path);
+            let value = parse_value(&raw, is_yaml)
                 .with_context(|| format!("parsing {}", path.display()))?;
-            let other = versioned::detect_or_use(args.from, value)
+            let other = versioned::detect_or_use(None, value)
                 .with_context(|| format!("detecting version of {}", path.display()))?;
             if (other.version() as u8) > (target as u8) {
                 bail!(
@@ -983,6 +979,32 @@ mod tests {
             apply_options: vec![],
         };
         run_convert(args).expect("cross-version merge after convert must succeed");
+    }
+
+    #[test]
+    fn run_convert_merge_detects_own_format_and_version_independently_of_base_flags() {
+        // Base forces `--from v2 --format json`; the `--merge` file is a YAML
+        // v3.0 document. `--merge` must detect its own extension & version
+        // rather than forcing the base's `--from` / `--format` onto it.
+        let base = TempFile::write("base-forced", MINIMAL_V2);
+        let layer = TempFile::write(
+            "merge-v3_0.yaml",
+            b"openapi: '3.0.4'\ninfo:\n  title: x\n  version: '1'\npaths: {}\ntags:\n  - name: pets\n",
+        );
+        let args = ConvertArgs {
+            file: Some(base.0.clone()),
+            to: SpecVersion::V3_2,
+            from: Some(SpecVersion::V2),
+            format: Some(InputFormat::Json),
+            output_format: None,
+            merge: vec![layer.0.clone()],
+            merge_options: vec![],
+            collapse: false,
+            load: vec![],
+            apply: vec![],
+            apply_options: vec![],
+        };
+        run_convert(args).expect("merge file must detect its own YAML format and v3.0 version");
     }
 
     #[test]

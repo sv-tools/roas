@@ -19,9 +19,9 @@
 //!   `Context` / `ValidationError` types.
 //! - [`apply`] — [`Apply`](apply::Apply) trait, [`ApplyOptions`](apply::ApplyOptions),
 //!   [`ApplyReport`](apply::ApplyReport), [`ApplyError`](apply::ApplyError).
-//! - [`v1_0`] — Overlay v1.0 document model + `Validate` / `Apply` impls.
-//! - [`v1_1`] — Overlay v1.1 document model + `Validate` / `Apply` impls.
-//! - [`v1_2`] — Overlay v1.2 document model (reusable actions, `$self`)
+//! - `v1_0` (feature `v1_0`) — Overlay v1.0 document model + `Validate` / `Apply` impls.
+//! - `v1_1` (feature `v1_1`) — Overlay v1.1 document model + `Validate` / `Apply` impls.
+//! - `v1_2` (feature `v1_2`, default) — Overlay v1.2 document model (reusable actions, `$self`)
 //!   + `Validate` / `Apply` impls.
 //!
 //! ## Applying an overlay
@@ -61,7 +61,7 @@
 //!
 //! ## Versions
 //!
-//! v1.0.x ([`v1_0`]), v1.1.x ([`v1_1`]) and v1.2.x ([`v1_2`], default
+//! v1.0.x (`v1_0`), v1.1.x (`v1_1`) and v1.2.x (`v1_2`, default
 //! feature) are implemented; enable whichever you need. With
 //! neighbouring features enabled, `impl From<v1_0::Overlay> for
 //! v1_1::Overlay` and `impl From<v1_1::Overlay> for v1_2::Overlay` are
