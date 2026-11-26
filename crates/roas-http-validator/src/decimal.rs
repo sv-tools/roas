@@ -29,7 +29,7 @@ const MAX_DIGITS: u32 = 38;
 /// Always normalized, so the same value has one representation —
 /// `1.0`, `1`, `10e-1` and `0.01e2` are all `Decimal { 1, 0 }`, and
 /// comparing them is comparing two pairs of integers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Decimal {
     mantissa: i128,
     scale: i32,
@@ -174,6 +174,10 @@ impl Decimal {
 
     pub(crate) fn is_zero(self) -> bool {
         self.mantissa == 0
+    }
+
+    pub(crate) fn is_positive(self) -> bool {
+        self.mantissa > 0
     }
 
     /// Compare magnitudes (`|self|` vs `|other|`) without scaling, so

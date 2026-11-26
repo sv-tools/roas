@@ -12,12 +12,17 @@
 //! about, so a body with three bad fields reports three failures rather
 //! than the first.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use roas::common::bool_or::BoolOr;
 use roas::common::formats::SchemaType;
 use roas::common::reference::{RefOr, ReferenceObject, ResolveError};
+use roas::v3_2::media_type::MediaType;
+use roas::v3_2::parameter::Parameter;
+use roas::v3_2::path_item::PathItem;
 use roas::v3_2::schema::{
     AllOfSchema, AnyOfSchema, ArraySchema, IntegerSchema, NotSchema, NumberSchema, ObjectSchema,
     OneOfSchema, Schema, SchemaRef, SingleSchema, StringSchema,
@@ -52,9 +57,304 @@ pub(crate) enum FailureKind {
     Unchecked,
 }
 
+/// Precompiled schema regular expressions, built once when a [`Validator`] is
+/// constructed so validation does not recompile `pattern` / `patternProperties`
+/// on every request.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RegexCache {
+    compiled: Arc<HashMap<String, Result<regex::Regex, String>>>,
+}
+
+enum CompiledRegex<'a> {
+    Borrowed(&'a regex::Regex),
+    Owned(regex::Regex),
+}
+
+impl CompiledRegex<'_> {
+    fn is_match(&self, text: &str) -> bool {
+        match self {
+            Self::Borrowed(regex) => regex.is_match(text),
+            Self::Owned(regex) => regex.is_match(text),
+        }
+    }
+}
+
+impl RegexCache {
+    /// Walk every schema reachable from `spec` and `path_items` and compile
+    /// all `pattern` and `patternProperties` regular expressions once.
+    pub(crate) fn from_spec(spec: &Spec, path_items: &BTreeMap<String, PathItem>) -> Self {
+        let mut compiled = HashMap::new();
+        if let Some(components) = &spec.components {
+            if let Some(schemas) = &components.schemas {
+                for schema in schemas.values() {
+                    collect_schema_regexes(schema, &mut compiled);
+                }
+            }
+            if let Some(parameters) = &components.parameters {
+                for param in parameters.values() {
+                    if let RefOr::Item(param) = param {
+                        collect_parameter_regexes(param, &mut compiled);
+                    }
+                }
+            }
+            if let Some(bodies) = &components.request_bodies {
+                for body in bodies.values() {
+                    if let RefOr::Item(body) = body {
+                        collect_content_regexes(&body.content, &mut compiled);
+                    }
+                }
+            }
+            if let Some(media_types) = &components.media_types {
+                for media_type in media_types.values() {
+                    if let RefOr::Item(media_type) = media_type {
+                        collect_media_type_regexes(media_type, &mut compiled);
+                    }
+                }
+            }
+        }
+        for path_item in path_items.values() {
+            if let Some(parameters) = &path_item.parameters {
+                for param in parameters {
+                    if let RefOr::Item(param) = param {
+                        collect_parameter_regexes(param, &mut compiled);
+                    }
+                }
+            }
+            for operation in path_item
+                .operations
+                .iter()
+                .flatten()
+                .chain(path_item.additional_operations.iter().flatten())
+                .map(|(_, op)| op)
+            {
+                if let Some(parameters) = &operation.parameters {
+                    for param in parameters {
+                        if let RefOr::Item(param) = param {
+                            collect_parameter_regexes(param, &mut compiled);
+                        }
+                    }
+                }
+                if let Some(RefOr::Item(body)) = &operation.request_body {
+                    collect_content_regexes(&body.content, &mut compiled);
+                }
+            }
+        }
+        Self {
+            compiled: Arc::new(compiled),
+        }
+    }
+
+    fn get_or_compile(&self, pattern: &str) -> Result<CompiledRegex<'_>, String> {
+        if let Some(cached) = self.compiled.get(pattern) {
+            return match cached {
+                Ok(regex) => Ok(CompiledRegex::Borrowed(regex)),
+                Err(error) => Err(error.clone()),
+            };
+        }
+        regex::Regex::new(pattern)
+            .map(CompiledRegex::Owned)
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn cache_pattern(pattern: &str, out: &mut HashMap<String, Result<regex::Regex, String>>) {
+    if !out.contains_key(pattern) {
+        let result = regex::Regex::new(pattern).map_err(|error| error.to_string());
+        out.insert(pattern.to_owned(), result);
+    }
+}
+
+fn collect_parameter_regexes(
+    parameter: &Parameter,
+    out: &mut HashMap<String, Result<regex::Regex, String>>,
+) {
+    let (schema, content) = match parameter {
+        Parameter::Path(p) => (p.schema.as_ref(), p.content.as_ref()),
+        Parameter::Query(p) => (p.schema.as_ref(), p.content.as_ref()),
+        Parameter::Header(p) => (p.schema.as_ref(), p.content.as_ref()),
+        Parameter::Cookie(p) => (p.schema.as_ref(), p.content.as_ref()),
+        Parameter::Querystring(p) => (None, Some(&p.content)),
+    };
+    if let Some(schema) = schema {
+        collect_schema_regexes(schema, out);
+    }
+    if let Some(content) = content {
+        collect_content_regexes(content, out);
+    }
+}
+
+fn collect_content_regexes(
+    content: &BTreeMap<String, RefOr<MediaType>>,
+    out: &mut HashMap<String, Result<regex::Regex, String>>,
+) {
+    for media_type in content.values() {
+        if let RefOr::Item(media_type) = media_type {
+            collect_media_type_regexes(media_type, out);
+        }
+    }
+}
+
+fn collect_media_type_regexes(
+    media_type: &MediaType,
+    out: &mut HashMap<String, Result<regex::Regex, String>>,
+) {
+    if let Some(schema) = &media_type.schema {
+        collect_schema_regexes(schema, out);
+    }
+}
+
+fn collect_schema_regexes(
+    schema: &RefOr<Schema, SchemaRef>,
+    out: &mut HashMap<String, Result<regex::Regex, String>>,
+) {
+    match schema {
+        RefOr::Ref(reference) => collect_json_map_regexes(&reference.siblings, out),
+        RefOr::Item(schema) => {
+            match schema {
+                Schema::Bool(_) | Schema::Empty(_) | Schema::Multi(_) => {}
+                Schema::AllOf(all_of) => {
+                    for sub in &all_of.all_of {
+                        collect_schema_regexes(sub, out);
+                    }
+                }
+                Schema::AnyOf(any_of) => {
+                    for sub in &any_of.any_of {
+                        collect_schema_regexes(sub, out);
+                    }
+                }
+                Schema::OneOf(one_of) => {
+                    for sub in &one_of.one_of {
+                        collect_schema_regexes(sub, out);
+                    }
+                }
+                Schema::Not(not) => collect_schema_regexes(&not.not, out),
+                Schema::Single(single) => match single.as_ref() {
+                    SingleSchema::String(string) => {
+                        if let Some(pattern) = &string.pattern {
+                            cache_pattern(pattern, out);
+                        }
+                    }
+                    SingleSchema::Array(array) => {
+                        if let Some(BoolOr::Item(items)) = &array.items {
+                            collect_schema_regexes(items, out);
+                        }
+                    }
+                    SingleSchema::Object(object) => {
+                        if let Some(props) = &object.properties {
+                            for sub in props.values() {
+                                collect_schema_regexes(sub, out);
+                            }
+                        }
+                        if let Some(patterns) = &object.pattern_properties {
+                            for (pattern, sub) in patterns {
+                                cache_pattern(pattern, out);
+                                collect_schema_regexes(sub, out);
+                            }
+                        }
+                        if let Some(BoolOr::Item(sub)) = &object.additional_properties {
+                            collect_schema_regexes(sub, out);
+                        }
+                        if let Some(BoolOr::Item(sub)) = &object.unevaluated_properties {
+                            collect_schema_regexes(sub, out);
+                        }
+                        if let Some(sub) = &object.property_names {
+                            collect_schema_regexes(sub, out);
+                        }
+                    }
+                    SingleSchema::Integer(_)
+                    | SingleSchema::Number(_)
+                    | SingleSchema::Boolean(_)
+                    | SingleSchema::Null(_) => {}
+                },
+            }
+            if let Some(ext) = schema_extensions(schema) {
+                collect_json_map_regexes(ext, out);
+            }
+        }
+    }
+}
+
+fn collect_json_map_regexes(
+    map: &BTreeMap<String, Value>,
+    out: &mut HashMap<String, Result<regex::Regex, String>>,
+) {
+    for (key, value) in map {
+        if key == "pattern"
+            && let Some(pattern) = value.as_str()
+        {
+            cache_pattern(pattern, out);
+        } else if key == "patternProperties"
+            && let Some(obj) = value.as_object()
+        {
+            for (pattern, sub) in obj {
+                cache_pattern(pattern, out);
+                collect_json_value_regexes(sub, out);
+            }
+        } else if matches!(
+            key.as_str(),
+            "properties"
+                | "$defs"
+                | "definitions"
+                | "items"
+                | "additionalProperties"
+                | "unevaluatedProperties"
+                | "propertyNames"
+                | "allOf"
+                | "anyOf"
+                | "oneOf"
+                | "not"
+        ) {
+            collect_json_value_regexes(value, out);
+        }
+    }
+}
+
+fn collect_json_value_regexes(
+    value: &Value,
+    out: &mut HashMap<String, Result<regex::Regex, String>>,
+) {
+    match value {
+        Value::Object(obj) => {
+            for (key, child) in obj {
+                if key == "pattern"
+                    && let Some(pattern) = child.as_str()
+                {
+                    cache_pattern(pattern, out);
+                } else if key == "patternProperties"
+                    && let Some(patterns) = child.as_object()
+                {
+                    for (pattern, sub) in patterns {
+                        cache_pattern(pattern, out);
+                        collect_json_value_regexes(sub, out);
+                    }
+                } else {
+                    collect_json_value_regexes(child, out);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_json_value_regexes(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Judge `value` against `schema`, collecting every failure.
+#[cfg(test)]
 pub(crate) fn check(value: &Value, schema: &RefOr<Schema, SchemaRef>, spec: &Spec) -> Vec<Failure> {
-    let mut checker = Checker::new(spec);
+    check_with_cache(value, schema, spec, &RegexCache::default())
+}
+
+/// Judge `value` against `schema` using precompiled regexes from `regexes`.
+pub(crate) fn check_with_cache(
+    value: &Value,
+    schema: &RefOr<Schema, SchemaRef>,
+    spec: &Spec,
+    regexes: &RegexCache,
+) -> Vec<Failure> {
+    let mut checker = Checker::new(spec, regexes);
     checker.schema(value, schema);
     checker.failures
 }
@@ -70,15 +370,17 @@ const MAX_DEPTH: u32 = 64;
 
 struct Checker<'s> {
     spec: &'s Spec,
+    regexes: &'s RegexCache,
     pointer: String,
     failures: Vec<Failure>,
     depth: u32,
 }
 
 impl<'s> Checker<'s> {
-    fn new(spec: &'s Spec) -> Self {
+    fn new(spec: &'s Spec, regexes: &'s RegexCache) -> Self {
         Self {
             spec,
+            regexes,
             pointer: String::new(),
             failures: Vec::new(),
             depth: 0,
@@ -130,7 +432,7 @@ impl<'s> Checker<'s> {
     /// `{ "not": { "pattern": "(" } }` accept anything at all, on the
     /// strength of a check that never ran.
     fn judge(&self, value: &Value, schema: &RefOr<Schema, SchemaRef>) -> Verdict {
-        let mut probe = Checker::new(self.spec);
+        let mut probe = Checker::new(self.spec, self.regexes);
         // The probe continues this walk, so it inherits its depth — a
         // cycle that runs through `anyOf` must still terminate.
         probe.depth = self.depth;
@@ -174,47 +476,52 @@ impl<'s> Checker<'s> {
         // when `X` is itself a `$ref` with siblings, those apply too. So
         // the chain is walked one hop at a time, each hop's siblings
         // checked against the same value, until the inline target.
-        let target = schema.get_item(self.spec).ok();
-        let mut current = schema;
-        let mut visited: HashSet<&str> = HashSet::new();
+        let mut target: Option<Option<Cow<'_, Schema>>> = None;
+        let mut current: Cow<'_, RefOr<Schema, SchemaRef>> = Cow::Borrowed(schema);
+        let mut visited: HashSet<String> = HashSet::new();
         loop {
-            let reference = match current {
+            let next = match current.as_ref() {
                 RefOr::Item(resolved) => {
                     self.resolved(value, resolved);
                     return;
                 }
-                RefOr::Ref(reference) => reference,
-            };
-            if reference.has_siblings() {
-                match sibling_schemas(reference, target) {
-                    Ok(schemas) => {
-                        for siblings in &schemas {
-                            self.resolved(value, siblings);
+                RefOr::Ref(reference) => {
+                    let target_ref = reference.reference();
+                    if !visited.insert(target_ref.to_owned()) {
+                        self.record(
+                            FailureKind::Unresolved,
+                            format!("reference `{target_ref}` is part of a cycle"),
+                        );
+                        return;
+                    }
+                    if reference.has_siblings() {
+                        let resolved_target = target
+                            .get_or_insert_with(|| resolve_final_schema(self.spec, schema))
+                            .as_deref();
+                        match sibling_schemas(reference, resolved_target) {
+                            Ok(schemas) => {
+                                for siblings in &schemas {
+                                    self.resolved(value, siblings);
+                                }
+                            }
+                            Err(message) => self.unchecked(message),
                         }
                     }
-                    Err(message) => self.unchecked(message),
+                    match resolve_hop(self.spec, target_ref) {
+                        Some(next) => next,
+                        None => {
+                            let error = if target_ref.starts_with('#') {
+                                ResolveError::NotFound(target_ref.to_owned())
+                            } else {
+                                ResolveError::ExternalUnsupported(target_ref.to_owned())
+                            };
+                            self.record(FailureKind::Unresolved, error.to_string());
+                            return;
+                        }
+                    }
                 }
-            }
-            let target_ref = reference.reference();
-            if !visited.insert(target_ref) {
-                self.record(
-                    FailureKind::Unresolved,
-                    format!("reference `{target_ref}` is part of a cycle"),
-                );
-                return;
-            }
-            match next_hop(self.spec, target_ref) {
-                Some(next) => current = next,
-                None => {
-                    let error = if target_ref.starts_with("#/") {
-                        ResolveError::NotFound(target_ref.to_owned())
-                    } else {
-                        ResolveError::ExternalUnsupported(target_ref.to_owned())
-                    };
-                    self.record(FailureKind::Unresolved, error.to_string());
-                    return;
-                }
-            }
+            };
+            current = next;
         }
     }
 
@@ -619,7 +926,7 @@ impl<'s> Checker<'s> {
             ));
         }
         if let Some(pattern) = &schema.pattern {
-            match regex::Regex::new(pattern) {
+            match self.regexes.get_or_compile(pattern) {
                 Ok(regex) => {
                     if !regex.is_match(value) {
                         self.fail(format!("does not match pattern {pattern:?}"));
@@ -755,13 +1062,16 @@ impl<'s> Checker<'s> {
             );
             return;
         };
+        if !step.is_positive() {
+            self.unchecked(format!(
+                "`multipleOf` must be strictly positive (got {step}), so divisibility could NOT \
+                 be checked",
+            ));
+            return;
+        }
         match value.is_multiple_of(step) {
             Some(true) => {}
             Some(false) => self.fail(format!("{value} is not a multiple of {step}")),
-            // A zero step is the description's error, which `roas`'s own
-            // validator reports; scaling that will not fit is this
-            // crate's limit and is reported as one.
-            None if step.is_zero() => {}
             None => self.unchecked(format!(
                 "whether {value} is a multiple of {step} could NOT be established: the \
                  arithmetic does not fit",
@@ -782,33 +1092,54 @@ impl<'s> Checker<'s> {
             self.fail(format!("has {length} items, more than maxItems {max}"));
         }
         if schema.unique_items == Some(true) {
+            let mut seen_exact: HashSet<CanonicalValue<'_>> = HashSet::new();
+            let mut unreadable_indices: Vec<usize> = Vec::new();
             for (index, value) in values.iter().enumerate() {
-                let mut undetermined = false;
-                let mut repeats = false;
-                for earlier in &values[..index] {
-                    match same_value(earlier, value) {
-                        Some(true) => {
-                            repeats = true;
-                            break;
-                        }
-                        None => undetermined = true,
-                        Some(false) => {}
+                if let Some(canonical) = CanonicalValue::from_value(value) {
+                    if !seen_exact.insert(canonical) {
+                        self.nested(&index.to_string(), |checker| {
+                            checker.fail("repeats an earlier item, but uniqueItems is set");
+                        });
+                    } else if unreadable_indices
+                        .iter()
+                        .any(|&earlier| same_value(&values[earlier], value).is_none())
+                    {
+                        self.nested(&index.to_string(), |checker| {
+                            checker.unchecked(
+                                "could NOT be compared with an earlier item: a number in one of \
+                                 them has more digits than this crate can hold",
+                            );
+                        });
                     }
-                }
-                if repeats {
-                    self.nested(&index.to_string(), |checker| {
-                        checker.fail("repeats an earlier item, but uniqueItems is set");
-                    });
-                } else if undetermined {
-                    // Nothing here is definitely a repeat, and something
-                    // could not be compared — saying the array is unique
-                    // would be asserting what was never established.
-                    self.nested(&index.to_string(), |checker| {
-                        checker.unchecked(
-                            "could NOT be compared with an earlier item: a number in one of them \
-                             has more digits than this crate can hold",
-                        );
-                    });
+                } else {
+                    let mut undetermined = false;
+                    let mut repeats = false;
+                    for earlier in &values[..index] {
+                        match same_value(earlier, value) {
+                            Some(true) => {
+                                repeats = true;
+                                break;
+                            }
+                            None => undetermined = true,
+                            Some(false) => {}
+                        }
+                    }
+                    unreadable_indices.push(index);
+                    if repeats {
+                        self.nested(&index.to_string(), |checker| {
+                            checker.fail("repeats an earlier item, but uniqueItems is set");
+                        });
+                    } else if undetermined {
+                        // Nothing here is definitely a repeat, and something
+                        // could not be compared — saying the array is unique
+                        // would be asserting what was never established.
+                        self.nested(&index.to_string(), |checker| {
+                            checker.unchecked(
+                                "could NOT be compared with an earlier item: a number in one of \
+                                 them has more digits than this crate can hold",
+                            );
+                        });
+                    }
                 }
             }
         }
@@ -865,9 +1196,11 @@ impl<'s> Checker<'s> {
             }
         }
 
+        let mut has_uncompilable_pattern = false;
         if let Some(patterns) = &schema.pattern_properties {
             for (pattern, subschema) in patterns {
-                let Ok(regex) = regex::Regex::new(pattern) else {
+                let Ok(regex) = self.regexes.get_or_compile(pattern) else {
+                    has_uncompilable_pattern = true;
                     self.unchecked(format!(
                         "patternProperties key {pattern:?} could not be compiled",
                     ));
@@ -891,29 +1224,36 @@ impl<'s> Checker<'s> {
 
         // `additionalProperties` judges what no other keyword reached —
         // and, when it is a schema or `true`, evaluates it in turn.
-        let mut all_evaluated = false;
-        match &schema.additional_properties {
-            None => {}
-            Some(BoolOr::Bool(true)) => all_evaluated = true,
-            Some(BoolOr::Bool(false)) => {
-                for name in members.keys() {
-                    if !evaluated.contains(name.as_str()) {
-                        self.nested(name, |checker| {
-                            checker.fail("is not described, and additionalProperties is `false`");
-                        });
+        // When a `patternProperties` regex failed to compile, we cannot know
+        // whether an unmatched property would have matched that pattern, so
+        // do not emit a false client violation (the `Unchecked` diagnostic
+        // above already prevents the request from looking valid).
+        let mut all_evaluated = has_uncompilable_pattern;
+        if !has_uncompilable_pattern {
+            match &schema.additional_properties {
+                None => {}
+                Some(BoolOr::Bool(true)) => all_evaluated = true,
+                Some(BoolOr::Bool(false)) => {
+                    for name in members.keys() {
+                        if !evaluated.contains(name.as_str()) {
+                            self.nested(name, |checker| {
+                                checker
+                                    .fail("is not described, and additionalProperties is `false`");
+                            });
+                        }
                     }
                 }
-            }
-            Some(subschema) => {
-                let BoolOr::Item(subschema) = subschema else {
-                    unreachable!("the boolean forms are matched above")
-                };
-                for (name, value) in members {
-                    if !evaluated.contains(name.as_str()) {
-                        self.nested(name, |checker| checker.schema(value, subschema));
+                Some(subschema) => {
+                    let BoolOr::Item(subschema) = subschema else {
+                        unreachable!("the boolean forms are matched above")
+                    };
+                    for (name, value) in members {
+                        if !evaluated.contains(name.as_str()) {
+                            self.nested(name, |checker| checker.schema(value, subschema));
+                        }
                     }
+                    all_evaluated = true;
                 }
-                all_evaluated = true;
             }
         }
 
@@ -938,6 +1278,46 @@ impl<'s> Checker<'s> {
                         self.nested(name, |checker| checker.schema(value, subschema));
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Canonical, hashable representation of a JSON value whose numbers all fit in
+/// [`Decimal`]. Used for O(N) `uniqueItems` checks; values containing an
+/// unreadable (`TooLarge`) number return `None` and fall back to [`same_value`].
+#[derive(PartialEq, Eq, Hash)]
+enum CanonicalValue<'a> {
+    Null,
+    Bool(bool),
+    Number(Decimal),
+    String(&'a str),
+    Array(Vec<CanonicalValue<'a>>),
+    Object(Vec<(&'a str, CanonicalValue<'a>)>),
+}
+
+impl<'a> CanonicalValue<'a> {
+    fn from_value(value: &'a Value) -> Option<Self> {
+        match value {
+            Value::Null => Some(Self::Null),
+            Value::Bool(b) => Some(Self::Bool(*b)),
+            Value::Number(_) => match read(value) {
+                Reading::Exact(decimal) => Some(Self::Number(decimal)),
+                Reading::TooLarge | Reading::NotANumber => None,
+            },
+            Value::String(s) => Some(Self::String(s.as_str())),
+            Value::Array(items) => items
+                .iter()
+                .map(Self::from_value)
+                .collect::<Option<Vec<_>>>()
+                .map(Self::Array),
+            Value::Object(map) => {
+                let mut entries = map
+                    .iter()
+                    .map(|(k, v)| Self::from_value(v).map(|cv| (k.as_str(), cv)))
+                    .collect::<Option<Vec<_>>>()?;
+                entries.sort_unstable_by_key(|(k, _)| *k);
+                Some(Self::Object(entries))
             }
         }
     }
@@ -1151,14 +1531,261 @@ const OBJECT_KEYWORDS: &[&str] = &[
     "unevaluatedProperties",
 ];
 
-/// One hop along a chain of local schema references: the component the
-/// reference names, which may itself be a reference.
-pub(crate) fn next_hop<'s>(
+/// Unescape one RFC 6901 JSON Pointer token (`~1` → `/`, `~0` → `~`).
+fn unescape_pointer_token(token: &str) -> Option<String> {
+    let mut out = String::with_capacity(token.len());
+    let mut chars = token.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '~' {
+            match chars.next() {
+                Some('0') => out.push('~'),
+                Some('1') => out.push('/'),
+                _ => return None,
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    Some(out)
+}
+
+/// Parse an RFC 6901 §4 array index (`"0"` or `[1-9][0-9]*`, no leading zeros
+/// or leading `+`).
+fn parse_pointer_index(token: &str) -> Option<usize> {
+    if token == "0" {
+        return Some(0);
+    }
+    if token.starts_with('0') || !token.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    token.parse().ok()
+}
+
+/// Split a local URI-fragment JSON Pointer (`#/...`) into decoded RFC 6901
+/// tokens: per RFC 6901 §6, percent-decode the fragment first, then split on
+/// `/` and unescape `~1`/`~0`.
+fn pointer_tokens(reference: &str) -> Option<Vec<String>> {
+    let fragment = reference.strip_prefix('#')?;
+    let decoded = percent_encoding::percent_decode_str(fragment)
+        .decode_utf8()
+        .ok()?;
+    let rest = decoded.strip_prefix('/')?;
+    rest.split('/').map(unescape_pointer_token).collect()
+}
+
+/// Descend one step along typed subschema slots of `schema`.
+fn step_subschema<'s>(
+    schema: &'s Schema,
+    tokens: &[String],
+) -> Option<(&'s RefOr<Schema, SchemaRef>, usize)> {
+    let head = tokens.first()?.as_str();
+    match (schema, head) {
+        (Schema::Single(single), _) => match (single.as_ref(), head) {
+            (SingleSchema::Object(obj), "properties") => {
+                let key = tokens.get(1)?;
+                Some((obj.properties.as_ref()?.get(key)?, 2))
+            }
+            (SingleSchema::Object(obj), "patternProperties") => {
+                let key = tokens.get(1)?;
+                Some((obj.pattern_properties.as_ref()?.get(key)?, 2))
+            }
+            (SingleSchema::Object(obj), "additionalProperties") => {
+                match obj.additional_properties.as_ref()? {
+                    BoolOr::Item(sub) => Some((sub, 1)),
+                    BoolOr::Bool(_) => None,
+                }
+            }
+            (SingleSchema::Object(obj), "unevaluatedProperties") => {
+                match obj.unevaluated_properties.as_ref()? {
+                    BoolOr::Item(sub) => Some((sub, 1)),
+                    BoolOr::Bool(_) => None,
+                }
+            }
+            (SingleSchema::Object(obj), "propertyNames") => Some((obj.property_names.as_ref()?, 1)),
+            (SingleSchema::Array(arr), "items") => match arr.items.as_ref()? {
+                BoolOr::Item(sub) => Some((sub, 1)),
+                BoolOr::Bool(_) => None,
+            },
+            _ => None,
+        },
+        (Schema::AllOf(a), "allOf") => {
+            let idx = parse_pointer_index(tokens.get(1)?)?;
+            Some((a.all_of.get(idx)?, 2))
+        }
+        (Schema::AnyOf(a), "anyOf") => {
+            let idx = parse_pointer_index(tokens.get(1)?)?;
+            Some((a.any_of.get(idx)?, 2))
+        }
+        (Schema::OneOf(a), "oneOf") => {
+            let idx = parse_pointer_index(tokens.get(1)?)?;
+            Some((a.one_of.get(idx)?, 2))
+        }
+        (Schema::Not(n), "not") => Some((&n.not, 1)),
+        _ => None,
+    }
+}
+
+/// Extract `.extensions` from any `Schema` variant that carries them.
+fn schema_extensions(schema: &Schema) -> Option<&BTreeMap<String, Value>> {
+    match schema {
+        Schema::AllOf(s) => s.extensions.as_ref(),
+        Schema::AnyOf(s) => s.extensions.as_ref(),
+        Schema::OneOf(s) => s.extensions.as_ref(),
+        Schema::Not(s) => s.extensions.as_ref(),
+        Schema::Multi(s) => s.extensions.as_ref(),
+        Schema::Single(single) => match single.as_ref() {
+            SingleSchema::String(s) => s.extensions.as_ref(),
+            SingleSchema::Integer(s) => s.extensions.as_ref(),
+            SingleSchema::Number(s) => s.extensions.as_ref(),
+            SingleSchema::Boolean(s) => s.extensions.as_ref(),
+            SingleSchema::Null(s) => s.extensions.as_ref(),
+            SingleSchema::Array(s) => s.extensions.as_ref(),
+            SingleSchema::Object(s) => s.extensions.as_ref(),
+        },
+        Schema::Bool(_) | Schema::Empty(_) => None,
+    }
+}
+
+/// Descend into a JSON map (`.extensions` or `$ref` siblings) along `tokens`
+/// and deserialize the resulting subschema.
+fn json_subschema(
+    map: &BTreeMap<String, Value>,
+    tokens: &[String],
+) -> Option<RefOr<Schema, SchemaRef>> {
+    let mut cursor = map.get(tokens.first()?)?;
+    for token in &tokens[1..] {
+        cursor = match cursor {
+            Value::Object(obj) => obj.get(token)?,
+            Value::Array(arr) => arr.get(parse_pointer_index(token)?)?,
+            _ => return None,
+        };
+    }
+    serde_json::from_value::<RefOr<Schema, SchemaRef>>(cursor.clone()).ok()
+}
+
+/// Boolean subschema slot (`additionalProperties: false`, `items: false`, ...).
+fn bool_subschema_slot(schema: &Schema, token: &str) -> Option<bool> {
+    let Schema::Single(single) = schema else {
+        return None;
+    };
+    match (single.as_ref(), token) {
+        (SingleSchema::Object(obj), "additionalProperties") => match obj.additional_properties {
+            Some(BoolOr::Bool(b)) => Some(b),
+            _ => None,
+        },
+        (SingleSchema::Object(obj), "unevaluatedProperties") => match obj.unevaluated_properties {
+            Some(BoolOr::Bool(b)) => Some(b),
+            _ => None,
+        },
+        (SingleSchema::Array(arr), "items") => match arr.items {
+            Some(BoolOr::Bool(b)) => Some(b),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// One hop along a chain of local schema references: resolves `#/components/schemas/...`
+/// including nested subschema pointers, RFC 6901 escapes, boolean subschema
+/// slots, and `$defs`/`definitions` in extensions or `$ref` siblings.
+pub(crate) fn resolve_hop<'s>(
     spec: &'s Spec,
     reference: &str,
-) -> Option<&'s RefOr<Schema, SchemaRef>> {
-    let name = reference.strip_prefix("#/components/schemas/")?;
-    spec.components.as_ref()?.schemas.as_ref()?.get(name)
+) -> Option<Cow<'s, RefOr<Schema, SchemaRef>>> {
+    resolve_hop_inner(spec, reference, 0)
+}
+
+fn resolve_hop_inner<'s>(
+    spec: &'s Spec,
+    reference: &str,
+    mut depth: u32,
+) -> Option<Cow<'s, RefOr<Schema, SchemaRef>>> {
+    if depth >= MAX_DEPTH {
+        return None;
+    }
+    let tokens = pointer_tokens(reference)?;
+    if tokens.len() < 3 || tokens[0] != "components" || tokens[1] != "schemas" {
+        return None;
+    }
+    let mut current: Cow<'s, RefOr<Schema, SchemaRef>> = Cow::Borrowed(
+        spec.components
+            .as_ref()?
+            .schemas
+            .as_ref()?
+            .get(&tokens[2])?,
+    );
+    let mut rest = &tokens[3..];
+    while !rest.is_empty() {
+        if let RefOr::Ref(inner) = current.as_ref() {
+            if let Some(found) = json_subschema(&inner.siblings, rest) {
+                return Some(Cow::Owned(found));
+            }
+            depth += 1;
+            current = resolve_hop_inner(spec, inner.reference(), depth)?;
+            continue;
+        }
+        match current {
+            Cow::Borrowed(RefOr::Item(schema)) => {
+                if let Some((next, consumed)) = step_subschema(schema, rest) {
+                    current = Cow::Borrowed(next);
+                    rest = &rest[consumed..];
+                    continue;
+                }
+                if rest.len() == 1
+                    && let Some(b) = bool_subschema_slot(schema, &rest[0])
+                {
+                    return Some(Cow::Owned(RefOr::Item(Schema::Bool(b))));
+                }
+                return json_subschema(schema_extensions(schema)?, rest).map(Cow::Owned);
+            }
+            Cow::Owned(RefOr::Item(schema)) => {
+                if let Some((next, consumed)) = step_subschema(&schema, rest) {
+                    let owned_next = next.clone();
+                    current = Cow::Owned(owned_next);
+                    rest = &rest[consumed..];
+                    continue;
+                }
+                if rest.len() == 1
+                    && let Some(b) = bool_subschema_slot(&schema, &rest[0])
+                {
+                    return Some(Cow::Owned(RefOr::Item(Schema::Bool(b))));
+                }
+                return json_subschema(schema_extensions(&schema)?, rest).map(Cow::Owned);
+            }
+            Cow::Borrowed(RefOr::Ref(_)) | Cow::Owned(RefOr::Ref(_)) => {
+                unreachable!("RefOr::Ref handled above")
+            }
+        }
+    }
+    Some(current)
+}
+
+/// Resolve the final inline `Schema` of a `$ref` chain (following subschema
+/// pointers, RFC 6901 escapes, and `$defs`), returning an owned clone only when
+/// the target lives inside an extension or a `BoolOr::Bool` slot.
+pub(crate) fn resolve_final_schema<'s>(
+    spec: &'s Spec,
+    schema: &'s RefOr<Schema, SchemaRef>,
+) -> Option<Cow<'s, Schema>> {
+    let mut current = Cow::Borrowed(schema);
+    let mut visited: HashSet<String> = HashSet::new();
+    for _ in 0..MAX_DEPTH {
+        match current {
+            Cow::Borrowed(RefOr::Item(item)) => return Some(Cow::Borrowed(item)),
+            Cow::Owned(RefOr::Item(item)) => return Some(Cow::Owned(item)),
+            other => {
+                let RefOr::Ref(r) = other.as_ref() else {
+                    unreachable!("items returned above")
+                };
+                let target_ref = r.reference().to_owned();
+                if !visited.insert(target_ref.clone()) {
+                    return None;
+                }
+                current = resolve_hop(spec, &target_ref)?;
+            }
+        }
+    }
+    None
 }
 
 /// Deserialize a single composition keyword (`allOf`/`anyOf`/`oneOf`/`not`)
