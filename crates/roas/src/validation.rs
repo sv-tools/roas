@@ -316,8 +316,10 @@ pub enum Options {
     /// v3.0 schemas share the same keyword-preservation policy). Vendor-extension payload
     /// objects (`x-servers`, `x-tagGroups`, `x-logo`, `x-codeSamples`, `x-badges`) are also
     /// exempt because any JSON shape is allowed inside an `x-*` extension. Note that
-    /// `PathItem`, `Responses`, and `Ref` reject unknown keys during deserialization rather
-    /// than validation, so this option does not apply to them.
+    /// [`Ref`](crate::common::reference::Ref) rejects unknown sibling keys during
+    /// deserialization rather than validation, so this option does not apply to it; OAS 2.0
+    /// and 3.0 `PathItem` treat unrecognized non-`x-` keys as custom HTTP methods rather than
+    /// unknown fields.
     /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreUnknownFields,
 }

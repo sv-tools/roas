@@ -990,3 +990,195 @@ fn v3_0_to_v3_1_strips_unknown_keys_from_schema_keyword_external_docs_and_discri
         json!({"propertyName": "kind", "x-keep": 2})
     );
 }
+
+#[cfg(feature = "v2")]
+#[test]
+fn v2_responses_keeps_and_reports_unknown_fields() {
+    let document = json!({
+        "swagger": "2.0",
+        "info": {"title": "t", "version": "1"},
+        "paths": {"/x": {"get": {
+            "responses": {
+                "200": {"description": "ok"},
+                "x-keep": 1,
+                "600": {"description": "out of range"},
+                "bogus": true
+            }
+        }}}
+    });
+    let spec: roas::v2::spec::Spec = serde_json::from_value(document.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&spec).unwrap(), document);
+    assert_eq!(
+        unknown_field_paths(&spec, Options::new()),
+        [
+            "#.paths[/x].get.responses.600",
+            "#.paths[/x].get.responses.bogus"
+        ]
+    );
+    assert!(unknown_field_paths(&spec, Options::IgnoreUnknownFields.into()).is_empty());
+}
+
+#[cfg(feature = "v3_0")]
+#[test]
+fn v3_0_responses_keeps_and_reports_unknown_fields() {
+    let document = json!({
+        "openapi": "3.0.4",
+        "info": {"title": "t", "version": "1"},
+        "paths": {"/x": {"get": {
+            "responses": {
+                "200": {"description": "ok"},
+                "x-keep": 1,
+                "2xx": {"description": "lowercase wildcard"},
+                "bogus": true
+            }
+        }}}
+    });
+    let spec: roas::v3_0::spec::Spec = serde_json::from_value(document.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&spec).unwrap(), document);
+    assert_eq!(
+        unknown_field_paths(&spec, Options::new()),
+        [
+            "#.paths[/x].get.responses.2xx",
+            "#.paths[/x].get.responses.bogus"
+        ]
+    );
+    assert!(unknown_field_paths(&spec, Options::IgnoreUnknownFields.into()).is_empty());
+}
+
+#[cfg(feature = "v3_1")]
+#[test]
+fn v3_1_path_item_and_responses_keep_and_report_unknown_fields() {
+    let document = json!({
+        "openapi": "3.1.2",
+        "info": {"title": "t", "version": "1"},
+        "paths": {"/x": {
+            "x-path-ext": 1,
+            "gett": {"responses": {"200": {"description": "typo"}}},
+            "GET": {"responses": {"200": {"description": "uppercase"}}},
+            "get": {
+                "responses": {
+                    "200": {"description": "ok"},
+                    "x-resp-ext": 2,
+                    "bogus": true
+                }
+            }
+        }}
+    });
+    let spec: roas::v3_1::spec::Spec = serde_json::from_value(document.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&spec).unwrap(), document);
+    assert_eq!(
+        unknown_field_paths(&spec, Options::new()),
+        [
+            "#.paths[/x].GET",
+            "#.paths[/x].get.responses.bogus",
+            "#.paths[/x].gett"
+        ]
+    );
+    assert!(unknown_field_paths(&spec, Options::IgnoreUnknownFields.into()).is_empty());
+}
+
+#[cfg(feature = "v3_2")]
+#[test]
+fn v3_2_path_item_and_responses_keep_and_report_unknown_fields() {
+    let document = json!({
+        "openapi": "3.2.0",
+        "info": {"title": "t", "version": "1"},
+        "paths": {"/x": {
+            "x-path-ext": 1,
+            "gett": {"responses": {"200": {"description": "typo"}}},
+            "get": {
+                "responses": {
+                    "200": {"description": "ok"},
+                    "x-resp-ext": 2,
+                    "bogus": true
+                }
+            }
+        }}
+    });
+    let spec: roas::v3_2::spec::Spec = serde_json::from_value(document.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&spec).unwrap(), document);
+    assert_eq!(
+        unknown_field_paths(&spec, Options::new()),
+        ["#.paths[/x].get.responses.bogus", "#.paths[/x].gett"]
+    );
+    assert!(unknown_field_paths(&spec, Options::IgnoreUnknownFields.into()).is_empty());
+}
+
+#[cfg(all(feature = "v2", feature = "v3_0", feature = "v3_1", feature = "v3_2"))]
+#[test]
+fn conversions_strip_unknown_keys_from_path_item_and_responses() {
+    let v2_doc = json!({
+        "swagger": "2.0",
+        "info": {"title": "t", "version": "1"},
+        "paths": {"/x": {"get": {
+            "responses": {
+                "200": {"description": "ok"},
+                "x-keep": 1,
+                "bogus": true
+            }
+        }}}
+    });
+    let v2_spec: roas::v2::spec::Spec = serde_json::from_value(v2_doc).unwrap();
+    let v30_from_v2 = roas::v3_0::spec::Spec::try_from(v2_spec).unwrap();
+    assert!(unknown_field_paths(&v30_from_v2, Options::new()).is_empty());
+    let v30_json = serde_json::to_value(&v30_from_v2).unwrap();
+    assert_eq!(v30_json["paths"]["/x"]["get"]["responses"]["x-keep"], 1);
+    assert!(
+        v30_json["paths"]["/x"]["get"]["responses"]
+            .get("bogus")
+            .is_none()
+    );
+
+    let v30_doc = json!({
+        "openapi": "3.0.4",
+        "info": {"title": "t", "version": "1"},
+        "paths": {"/x": {"get": {
+            "responses": {
+                "200": {"description": "ok"},
+                "x-keep": 2,
+                "bogus": true
+            }
+        }}}
+    });
+    let v30_spec: roas::v3_0::spec::Spec = serde_json::from_value(v30_doc).unwrap();
+    let v31_from_v30 = roas::v3_1::spec::Spec::try_from(v30_spec).unwrap();
+    assert!(unknown_field_paths(&v31_from_v30, Options::new()).is_empty());
+    let v31_json = serde_json::to_value(&v31_from_v30).unwrap();
+    assert_eq!(v31_json["paths"]["/x"]["get"]["responses"]["x-keep"], 2);
+    assert!(
+        v31_json["paths"]["/x"]["get"]["responses"]
+            .get("bogus")
+            .is_none()
+    );
+
+    let v31_doc = json!({
+        "openapi": "3.1.2",
+        "info": {"title": "t", "version": "1"},
+        "paths": {"/x": {
+            "x-path-keep": 3,
+            "gett": {"responses": {"200": {"description": "typo"}}},
+            "get": {
+                "responses": {
+                    "200": {"description": "ok"},
+                    "x-resp-keep": 4,
+                    "bogus": true
+                }
+            }
+        }}
+    });
+    let v31_spec: roas::v3_1::spec::Spec = serde_json::from_value(v31_doc).unwrap();
+    let v32_from_v31 = roas::v3_2::spec::Spec::try_from(v31_spec).unwrap();
+    assert!(unknown_field_paths(&v32_from_v31, Options::new()).is_empty());
+    let v32_json = serde_json::to_value(&v32_from_v31).unwrap();
+    assert_eq!(v32_json["paths"]["/x"]["x-path-keep"], 3);
+    assert!(v32_json["paths"]["/x"].get("gett").is_none());
+    assert_eq!(
+        v32_json["paths"]["/x"]["get"]["responses"]["x-resp-keep"],
+        4
+    );
+    assert!(
+        v32_json["paths"]["/x"]["get"]["responses"]
+            .get("bogus")
+            .is_none()
+    );
+}
