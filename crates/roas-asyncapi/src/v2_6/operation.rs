@@ -112,6 +112,7 @@ impl ValidateWithContext for Operation {
         if let Some(message) = &self.message {
             ctx.in_field("message", |ctx| message.validate_with_context(ctx));
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -161,6 +162,7 @@ impl ValidateWithContext for OperationTrait {
         if let Some(bindings) = &self.bindings {
             ctx.in_field("bindings", |ctx| bindings.validate_with_context(ctx));
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

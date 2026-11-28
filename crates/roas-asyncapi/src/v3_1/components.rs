@@ -48,6 +48,7 @@ macro_rules! component_maps {
                         ctx.in_key($name, key, |ctx| value.validate_with_context(ctx));
                     }
                 )+
+                ctx.validate_unknown_fields(&self.extensions);
             }
         }
     };

@@ -55,6 +55,7 @@ impl ValidateWithContext for Info {
         if let Some(license) = &self.license {
             ctx.in_field("license", |ctx| license.validate_with_context(ctx));
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -84,6 +85,7 @@ impl ValidateWithContext for Contact {
         {
             ctx.error_field("email", "must be an email address");
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -106,6 +108,7 @@ pub struct License {
 impl ValidateWithContext for License {
     fn validate_with_context(&self, ctx: &mut Context) {
         ctx.require_non_empty("name", &self.name);
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -137,19 +140,21 @@ mod tests {
 
     #[test]
     fn tags_and_external_docs_are_not_info_fields_in_2_6() {
-        // They belong to the document root here, so they are dropped
-        // as unknown keys rather than parsed.
-        let info: Info = serde_json::from_value(json!({
+        // They belong to the document root here, so they are kept as
+        // unknown keys in `extensions` and reported by validation.
+        let value = json!({
             "title": "T",
             "version": "1",
             "tags": [ { "name": "x" } ],
             "externalDocs": { "url": "https://e" }
-        }))
-        .unwrap();
-        assert_eq!(
-            serde_json::to_value(&info).unwrap(),
-            json!({ "title": "T", "version": "1" })
-        );
+        });
+        let info: Info = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&info).unwrap(), value);
+
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.info");
+        info.validate_with_context(&mut ctx);
+        assert!(ctx.errors.iter().any(|e| e.path == "#.info.tags"));
+        assert!(ctx.errors.iter().any(|e| e.path == "#.info.externalDocs"));
     }
 
     #[test]

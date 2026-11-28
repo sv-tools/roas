@@ -80,6 +80,7 @@ impl ValidateWithContext for Server {
         if let Some(bindings) = &self.bindings {
             ctx.in_field("bindings", |ctx| bindings.validate_with_context(ctx));
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -140,6 +141,7 @@ impl ValidateWithContext for ServerVariable {
                 format!("`{default}` is not one of the values listed in `enum`"),
             );
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -271,17 +273,22 @@ mod tests {
 
     #[test]
     fn a_server_has_no_external_docs_field_in_2_6() {
-        // The 2.6 Server Object has no `externalDocs`; it is dropped as
-        // an unknown key rather than parsed.
-        let server: Server = serde_json::from_value(json!({
+        // The 2.6 Server Object has no `externalDocs`; it is kept as an
+        // unknown key in `extensions` and reported by validation.
+        let value = json!({
             "url": "amqp://e",
             "protocol": "amqp",
             "externalDocs": { "url": "https://e" }
-        }))
-        .unwrap();
-        assert_eq!(
-            serde_json::to_value(&server).unwrap(),
-            json!({ "url": "amqp://e", "protocol": "amqp" })
+        });
+        let server: Server = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&server).unwrap(), value);
+
+        let errors = errors_for(value);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.starts_with("#.servers.prod.externalDocs:")),
+            "got: {errors:?}"
         );
     }
 

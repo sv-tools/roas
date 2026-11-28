@@ -34,6 +34,7 @@ impl ValidateWithContext for Tag {
         if let Some(docs) = &self.external_docs {
             ctx.in_field("externalDocs", |ctx| docs.validate_with_context(ctx));
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

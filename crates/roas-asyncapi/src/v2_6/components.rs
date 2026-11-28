@@ -56,6 +56,7 @@ macro_rules! component_maps {
                         ctx.in_key($name, key, |ctx| value.validate_with_context(ctx));
                     }
                 )+
+                ctx.validate_unknown_fields(&self.extensions);
             }
         }
     };
@@ -116,14 +117,26 @@ mod tests {
     #[test]
     fn v3_only_maps_are_not_component_fields_here() {
         // `operations`, `replies`, `replyAddresses`, `tags` and
-        // `externalDocs` arrived in v3.
-        let components: Components = serde_json::from_value(json!({
+        // `externalDocs` arrived in v3, so they are kept as unknown
+        // keys in `extensions` and reported by validation.
+        let value = json!({
             "operations": { "o": {} },
             "replies": { "r": {} },
             "tags": { "t": { "name": "x" } }
-        }))
-        .unwrap();
-        assert_eq!(serde_json::to_value(&components).unwrap(), json!({}));
+        });
+        let components: Components = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&components).unwrap(), value);
+
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.components");
+        components.validate_with_context(&mut ctx);
+        for key in ["operations", "replies", "tags"] {
+            let path = format!("#.components.{key}");
+            assert!(
+                ctx.errors.iter().any(|e| e.path == path),
+                "expected unknown-field error at {path}, got: {:?}",
+                ctx.errors
+            );
+        }
     }
 
     #[test]

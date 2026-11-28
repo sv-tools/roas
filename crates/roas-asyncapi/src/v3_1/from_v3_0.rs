@@ -6,11 +6,24 @@
 //! dropped or approximated. The one value that changes is the
 //! `asyncapi` version string itself.
 //!
+//! Unknown (non-`x-`) keys on non-schema objects are stripped silently
+//! during conversion while `x-` Specification Extensions and JSON Schema
+//! keywords on `Schema` objects are preserved; validate the source
+//! `Document` first if you want unknown fields reported.
+//!
 //! Available when both the `v3_0` and `v3_1` features are enabled.
 
+use crate::common::extensions::retain_extensions_only;
 use crate::common::reference::RefOr;
 use crate::{v3_0, v3_1};
 use std::collections::BTreeMap;
+
+fn strip_unknown(
+    mut extensions: Option<BTreeMap<String, serde_json::Value>>,
+) -> Option<BTreeMap<String, serde_json::Value>> {
+    retain_extensions_only(&mut extensions);
+    extensions
+}
 
 /// Convert a `RefOr<A>` into a `RefOr<B>`, leaving a `$ref` untouched.
 fn map_ref_or<A, B: From<A>>(value: RefOr<A>) -> RefOr<B> {
@@ -35,6 +48,11 @@ fn map_boxed<A, B: From<A>>(value: A) -> Box<B> {
 }
 
 impl From<v3_0::Document> for v3_1::Document {
+    /// Upconvert a v3.0 document to v3.1.
+    ///
+    /// Unknown (non-`x-`) keys on non-schema objects are stripped
+    /// silently; validate the source document first if you want them
+    /// reported.
     fn from(value: v3_0::Document) -> Self {
         Self {
             // The only value that actually changes.
@@ -46,7 +64,7 @@ impl From<v3_0::Document> for v3_1::Document {
             channels: map_map(value.channels),
             operations: map_map(value.operations),
             components: value.components.map(Into::into),
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -62,7 +80,7 @@ impl From<v3_0::Info> for v3_1::Info {
             license: value.license.map(Into::into),
             tags: map_vec(value.tags),
             external_docs: value.external_docs.map(map_ref_or),
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -73,7 +91,7 @@ impl From<v3_0::Contact> for v3_1::Contact {
             name: value.name,
             url: value.url,
             email: value.email,
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -83,7 +101,7 @@ impl From<v3_0::License> for v3_1::License {
         Self {
             name: value.name,
             url: value.url,
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -94,7 +112,7 @@ impl From<v3_0::Tag> for v3_1::Tag {
             name: value.name,
             description: value.description,
             external_docs: value.external_docs.map(map_ref_or),
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -104,7 +122,7 @@ impl From<v3_0::ExternalDocumentation> for v3_1::ExternalDocumentation {
         Self {
             url: value.url,
             description: value.description,
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -124,7 +142,7 @@ impl From<v3_0::Server> for v3_1::Server {
             tags: map_vec(value.tags),
             external_docs: value.external_docs.map(map_ref_or),
             bindings: value.bindings.map(map_ref_or),
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -136,7 +154,7 @@ impl From<v3_0::ServerVariable> for v3_1::ServerVariable {
             default: value.default,
             description: value.description,
             examples: value.examples,
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -154,7 +172,7 @@ impl From<v3_0::Channel> for v3_1::Channel {
             tags: map_vec(value.tags),
             external_docs: value.external_docs.map(map_ref_or),
             bindings: value.bindings.map(map_ref_or),
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -167,7 +185,7 @@ impl From<v3_0::Parameter> for v3_1::Parameter {
             description: value.description,
             examples: value.examples,
             location: value.location,
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -196,7 +214,7 @@ impl From<v3_0::Operation> for v3_1::Operation {
             tags: map_vec(value.tags),
             external_docs: value.external_docs.map(map_ref_or),
             bindings: value.bindings.map(map_ref_or),
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -211,7 +229,7 @@ impl From<v3_0::OperationTrait> for v3_1::OperationTrait {
             tags: map_vec(value.tags),
             external_docs: value.external_docs.map(map_ref_or),
             bindings: value.bindings.map(map_ref_or),
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -222,7 +240,7 @@ impl From<v3_0::OperationReply> for v3_1::OperationReply {
             address: value.address.map(map_ref_or),
             channel: value.channel,
             messages: value.messages,
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -232,7 +250,7 @@ impl From<v3_0::OperationReplyAddress> for v3_1::OperationReplyAddress {
         Self {
             location: value.location,
             description: value.description,
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -254,7 +272,7 @@ impl From<v3_0::Message> for v3_1::Message {
             bindings: value.bindings.map(map_ref_or),
             examples: value.examples.into_iter().map(Into::into).collect(),
             traits: map_vec(value.traits),
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -274,7 +292,7 @@ impl From<v3_0::MessageTrait> for v3_1::MessageTrait {
             external_docs: value.external_docs.map(map_ref_or),
             bindings: value.bindings.map(map_ref_or),
             examples: value.examples.into_iter().map(Into::into).collect(),
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -286,7 +304,7 @@ impl From<v3_0::MessageExample> for v3_1::MessageExample {
             summary: value.summary,
             headers: value.headers,
             payload: value.payload,
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -296,7 +314,7 @@ impl From<v3_0::CorrelationId> for v3_1::CorrelationId {
         Self {
             location: value.location,
             description: value.description,
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -318,7 +336,7 @@ impl From<v3_0::MultiFormatSchema> for v3_1::MultiFormatSchema {
             // format carries over untouched.
             schema_format: value.schema_format,
             schema: value.schema,
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -472,7 +490,7 @@ impl From<v3_0::SecurityScheme> for v3_1::SecurityScheme {
             flows: value.flows.map(Into::into),
             open_id_connect_url: value.open_id_connect_url,
             scopes: value.scopes,
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -484,7 +502,7 @@ impl From<v3_0::OAuthFlows> for v3_1::OAuthFlows {
             password: value.password.map(Into::into),
             client_credentials: value.client_credentials.map(Into::into),
             authorization_code: value.authorization_code.map(Into::into),
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -496,7 +514,7 @@ impl From<v3_0::OAuthFlow> for v3_1::OAuthFlow {
             token_url: value.token_url,
             refresh_url: value.refresh_url,
             available_scopes: value.available_scopes,
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
@@ -523,7 +541,7 @@ impl From<v3_0::Components> for v3_1::Components {
             channel_bindings: map_map(value.channel_bindings),
             operation_bindings: map_map(value.operation_bindings),
             message_bindings: map_map(value.message_bindings),
-            extensions: value.extensions,
+            extensions: strip_unknown(value.extensions),
         }
     }
 }
