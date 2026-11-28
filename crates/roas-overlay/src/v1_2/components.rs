@@ -22,6 +22,10 @@ pub struct Components {
     pub actions: BTreeMap<String, ReusableAction>,
 
     /// `x-`-prefixed Specification Extensions.
+    ///
+    /// Any other key the object does not define is kept here too, so the document
+    /// round-trips; validation reports it unless
+    /// [`crate::validation::ValidationOptions::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,6 +73,7 @@ fn has_only_valid_escapes(segment: &str) -> bool {
 
 impl ValidateWithContext for Components {
     fn validate_with_context(&self, ctx: &mut Context) {
+        ctx.validate_unknown_fields(&self.extensions);
         ctx.in_field("actions", |ctx| {
             for (name, action) in &self.actions {
                 ctx.in_field(name, |ctx| action.validate_with_context(ctx));
@@ -96,14 +101,19 @@ pub struct ReusableAction {
     pub fields: Option<ReusableActionFields>,
 
     /// `x-`-prefixed Specification Extensions.
+    ///
+    /// Any other key the object does not define is kept here too, so the document
+    /// round-trips; validation reports it unless
+    /// [`crate::validation::ValidationOptions::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, Value>>,
 }
 
-/// `fields` as [`ReusableActionFields`], rejecting a `target` rather
-/// than dropping it: the reference supplies the target.
+/// `fields` as [`ReusableActionFields`], rejecting `target` during
+/// deserialization rather than keeping it in `extensions` for validation:
+/// the reference supplies the target.
 fn fields_without_target<'de, D: Deserializer<'de>>(
     de: D,
 ) -> Result<Option<ReusableActionFields>, D::Error> {
@@ -119,6 +129,7 @@ fn fields_without_target<'de, D: Deserializer<'de>>(
 
 impl ValidateWithContext for ReusableAction {
     fn validate_with_context(&self, ctx: &mut Context) {
+        ctx.validate_unknown_fields(&self.extensions);
         if let Some(fields) = &self.fields {
             ctx.in_field("fields", |ctx| fields.validate_with_context(ctx));
         }
@@ -152,6 +163,11 @@ pub struct ReusableActionFields {
 
     /// `x-`-prefixed Specification Extensions, carried into the
     /// resolved action.
+    ///
+    /// Any other key the object does not define (other than `target`, which is
+    /// rejected during deserialization) is kept here too, so the document
+    /// round-trips; validation reports it unless
+    /// [`crate::validation::ValidationOptions::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -162,6 +178,7 @@ impl ValidateWithContext for ReusableActionFields {
     /// The checks that hold for `fields` on their own. Whether the
     /// resolved action does anything is checked where it is referenced.
     fn validate_with_context(&self, ctx: &mut Context) {
+        ctx.validate_unknown_fields(&self.extensions);
         validate_operation_fields(
             self.update.as_ref(),
             self.copy.as_deref(),

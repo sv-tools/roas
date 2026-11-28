@@ -186,7 +186,7 @@ cat spec.json | roas overlay apply --overlay patch.yaml     # spec on stdin
 roas overlay apply --overlay a.yaml --overlay b.yaml spec.json | roas openapi validate
 ```
 
-- **`overlay validate`** — checks structure: the `overlay` version, non-empty `actions`, valid RFC 9535 JSONPath in every `target` (and `copy`), and the mutual-exclusivity rules. `--ignore <CHECK>` skips a check (`empty-info-title`, `empty-info-version`); `--print` echoes the parsed overlay.
+- **`overlay validate`** — checks structure: the `overlay` version, non-empty `actions`, valid RFC 9535 JSONPath in every `target` (and `copy`), and the mutual-exclusivity rules. `--ignore <CHECK>` skips a check (`empty-info-title`, `empty-info-version`, `unknown-fields`); `--print` echoes the parsed overlay.
 - **`overlay convert --to <v1_0|v1_1|v1_2>`** — upconverts an overlay. Only upconversion is supported (v1.0 → v1.1 adds the `copy` action and `info.description`; v1.1 → v1.2 adds reusable actions, `$self` and primitive targets); downconversion errors.
 - **`overlay apply`** — applies overlay(s) to a target spec. The spec is the positional argument (or stdin); `--overlay <FILE>` (repeatable, at least one required) names the overlay(s), applied in order. The spec is treated as untyped JSON, so this works for any OpenAPI version. `--apply-option` (repeatable) accepts `error-on-zero-match` and `error-on-mixed-kind-match`. On any apply error the spec is left untouched and `roas` exits non-zero. For an Overlay 1.2 overlay with `extends`, `extends` is resolved against the overlay's `$self` (or its path) and compared with the spec's `$self` and path; a mismatch is a warning on stderr, or an error with `--strict`. A spec piped on stdin is checked only when it has an absolute `$self`.
 

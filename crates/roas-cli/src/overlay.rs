@@ -995,6 +995,52 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_and_runs_overlay_validate_ignore_unknown_fields() {
+        let cli = TestCli::try_parse_from([
+            "roas",
+            "validate",
+            "--ignore",
+            "unknown-fields",
+            "overlay.yaml",
+        ])
+        .unwrap();
+        match cli.command {
+            OverlayCommand::Validate(a) => {
+                assert_eq!(a.ignore, vec![ValidationOptions::IgnoreUnknownFields]);
+            }
+            _ => panic!("expected validate"),
+        }
+
+        let doc = json!({
+            "overlay": "1.2.0",
+            "info": { "title": "T", "version": "1.0.0", "extra": true },
+            "actions": [ { "target": "$.info", "update": {} } ],
+            "bogus": 1
+        });
+        let f = TempFile::write("unknown-fields.json", &doc);
+
+        let err = run_overlay(OverlayCommand::Validate(OverlayValidateArgs {
+            file: Some(f.0.clone()),
+            format: None,
+            ignore: vec![],
+            print: false,
+        }))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("2 errors)"),
+            "expected two unknown-field errors, got: {err}",
+        );
+
+        run_overlay(OverlayCommand::Validate(OverlayValidateArgs {
+            file: Some(f.0.clone()),
+            format: None,
+            ignore: vec![ValidationOptions::IgnoreUnknownFields],
+            print: true,
+        }))
+        .expect("unknown fields are ignored");
+    }
+
+    #[test]
     fn run_overlay_convert_upconverts_v1_0_to_v1_1() {
         let f = TempFile::write("conv.json", &v1_0_overlay());
         let args = OverlayConvertArgs {

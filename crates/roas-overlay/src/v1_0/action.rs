@@ -34,6 +34,10 @@ pub struct Action {
     pub remove: Option<bool>,
 
     /// `x-`-prefixed Specification Extensions.
+    ///
+    /// Any other key the object does not define is kept here too, so the document
+    /// round-trips; validation reports it unless
+    /// [`crate::validation::ValidationOptions::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,6 +54,7 @@ impl Action {
 
 impl ValidateWithContext for Action {
     fn validate_with_context(&self, ctx: &mut Context) {
+        ctx.validate_unknown_fields(&self.extensions);
         ctx.require_jsonpath("target", &self.target);
         // The spec says `update` "has no impact if the `remove` field
         // of this action object is `true`", but at validation time we

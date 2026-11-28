@@ -44,6 +44,10 @@ pub struct Overlay {
     pub components: Option<Components>,
 
     /// `x-`-prefixed Specification Extensions on the root.
+    ///
+    /// Any other key the object does not define is kept here too, so the document
+    /// round-trips; validation reports it unless
+    /// [`ValidationOptions::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -98,6 +102,7 @@ impl Overlay {
 
     fn validate_inner(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error> {
         let mut ctx = Context::new(options);
+        ctx.validate_unknown_fields(&self.extensions);
 
         if let Some(self_uri) = &self.self_uri {
             validate_uri_reference(&mut ctx, "$self", self_uri);
@@ -128,6 +133,7 @@ impl Overlay {
     /// once, under `components`; here only that the reference resolves
     /// to an action that does something.
     fn validate_reference(&self, reference: &ReusableActionReference, ctx: &mut Context) {
+        ctx.validate_unknown_fields(&reference.extensions);
         ctx.require_jsonpath("target", &reference.target);
         match reference.resolve(self.components.as_ref()) {
             Err(reason) => ctx.error_field("$ref", reason.to_string()),
@@ -219,7 +225,15 @@ impl From<crate::v1_1::Overlay> for Overlay {
     /// Upconvert an Overlay v1.1 document to v1.2. Additive: the
     /// `overlay` version string becomes `1.2.0`, and every action stays
     /// an inline action; `$self` and `components` stay unset.
-    fn from(o: crate::v1_1::Overlay) -> Self {
+    ///
+    /// Unknown non-`x-` keys preserved in `extensions` are stripped during
+    /// conversion so they cannot collide with fields defined by v1.2; validate
+    /// the source document first if you want them reported.
+    fn from(mut o: crate::v1_1::Overlay) -> Self {
+        use crate::common::extensions::retain_extensions_only;
+
+        retain_extensions_only(&mut o.extensions);
+        retain_extensions_only(&mut o.info.extensions);
         Self {
             overlay: Version::V1_2_0(),
             self_uri: None,
@@ -233,7 +247,8 @@ impl From<crate::v1_1::Overlay> for Overlay {
             actions: o
                 .actions
                 .into_iter()
-                .map(|a| {
+                .map(|mut a| {
+                    retain_extensions_only(&mut a.extensions);
                     ActionItem::Action(Action {
                         target: a.target,
                         description: a.description,
