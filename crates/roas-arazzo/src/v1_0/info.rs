@@ -41,6 +41,7 @@ impl ValidateWithContext for Info {
         if !ctx.is_option(ValidationOptions::IgnoreEmptyInfoVersion) {
             ctx.require_non_empty("version", &self.version);
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -81,17 +82,25 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_keeps_x_dash_extensions_and_drops_others() {
+    fn deserialize_keeps_x_dash_extensions_and_unclaimed_keys() {
         let info: Info = serde_json::from_value(json!({
             "title": "T",
             "version": "1.0",
             "x-team": "platform",
-            "ignored": 42,
+            "unknownField": 42,
         }))
         .unwrap();
         let ext = info.extensions.as_ref().unwrap();
         assert_eq!(ext.get("x-team").unwrap(), &json!("platform"));
-        assert!(!ext.contains_key("ignored"));
+        assert_eq!(ext.get("unknownField").unwrap(), &json!(42));
+
+        let mut c = ctx();
+        info.validate_with_context(&mut c);
+        assert_eq!(c.errors.len(), 1);
+        assert!(
+            c.errors[0]
+                == "#.info.unknownField: not a field of this object; only `x-` extensions may be added"
+        );
     }
 
     #[test]

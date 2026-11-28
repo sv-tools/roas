@@ -115,6 +115,7 @@ impl ValidateWithContext for Criterion {
         if let Some(type_) = &self.type_ {
             ctx.in_field("type", |ctx| type_.validate_with_context(ctx));
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

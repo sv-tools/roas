@@ -652,22 +652,40 @@ struct CheckPosition {
 
 fn run_arazzo_validate(args: ArazzoValidateArgs) -> Result<()> {
     let source = resolve_input_source(args.file.as_deref())?;
+    let mut options = EnumSet::<ValidationOptions>::empty();
+    for ignore in &args.ignore {
+        options |= *ignore;
+    }
+    let ignore_unknown = options.contains(ValidationOptions::IgnoreUnknownFields);
     let ReadArazzo {
         detected,
         format: input_format,
         text,
         value,
-    } = read_arazzo_as(&source, args.format, true)?;
+    } = read_arazzo_as(&source, args.format, !ignore_unknown)?;
 
-    let mut options = EnumSet::<ValidationOptions>::empty();
-    for ignore in &args.ignore {
-        options |= *ignore;
-    }
-
-    // What the model dropped is reported, but does not fail validation:
-    // only running a workflow needs to honour every member.
-    let unknown = detected.unknown_members(&value.expect("kept for `validate`"))?;
     let result = detected.validate(options);
+    // `validate` reports unknown fields on every extensible object unless
+    // `--ignore unknown-fields` is set. `unknown_members` also catches extra
+    // keys dropped by non-extensible `Reusable` objects; suppress anything
+    // `validate` already reported so the same key is never printed twice, and
+    // skip unknown-member warnings when `--ignore unknown-fields` is passed.
+    let mut unknown = if ignore_unknown {
+        UnknownMembers::default()
+    } else {
+        detected.unknown_members(&value.expect("kept for `validate`"))?
+    };
+    if let Err(err) = &result {
+        let reported: BTreeSet<&str> = err
+            .errors
+            .iter()
+            .filter(|e| e.is_unknown_field())
+            .map(|e| e.path.as_str())
+            .collect();
+        unknown
+            .members
+            .retain(|member| !reported.contains(member.path.as_str()));
+    }
     // Built only when there is something to locate.
     let map = (!unknown.is_empty() || result.is_err())
         .then(|| SourceMap::parse(&text).ok())
@@ -812,6 +830,11 @@ fn inputs_of(workflow: &v1_1::Workflow) -> Vec<String> {
 
 fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     let source = resolve_input_source(args.file.as_deref())?;
+    let mut checks = EnumSet::<ValidationOptions>::empty();
+    for ignore in &args.ignore {
+        checks |= *ignore;
+    }
+    let ignore_unknown = checks.contains(ValidationOptions::IgnoreUnknownFields);
     let read = read_arazzo_as(&source, args.format, true)?;
     let map = read.source_map();
     let ReadArazzo {
@@ -822,26 +845,40 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     } = read;
     let value = value.expect("kept for `run`");
     // Against the model of the version it declares, before upconversion.
-    let unknown = detected.unknown_members(&value)?;
+    let unknown = if ignore_unknown {
+        None
+    } else {
+        Some(detected.unknown_members(&value)?)
+    };
 
     // Before a single request: a description with two workflows of the
     // same id, or a step that names nothing, has no business reaching
     // an API. Validate against the declared version before upconverting
-    // so v1.0-only errors are caught and paths match `SourceMap`.
-    let mut checks = EnumSet::<ValidationOptions>::empty();
-    for ignore in &args.ignore {
-        checks |= *ignore;
-    }
-    if let Err(errors) = detected.validate(checks) {
-        for error in &errors.errors {
-            eprintln!("- {}", located(map.as_ref(), error));
+    // so v1.0-only errors (including empty-valued unknown fields such as
+    // `null`, `[]`, `{}`) are caught and paths match `SourceMap`.
+    // Non-empty unknown fields covered by `unknown_members` are left to
+    // `prepare` below so they are reported with the declared Arazzo version
+    // (alongside extra keys on `Reusable` objects).
+    let covered: BTreeSet<&str> = unknown
+        .as_ref()
+        .into_iter()
+        .flat_map(|u| u.members.iter().map(|m| m.path.as_str()))
+        .collect();
+    if let Err(mut errors) = detected.validate(checks) {
+        errors
+            .errors
+            .retain(|error| !(error.is_unknown_field() && covered.contains(error.path.as_str())));
+        if !errors.errors.is_empty() {
+            for error in &errors.errors {
+                eprintln!("- {}", located(map.as_ref(), error));
+            }
+            return Err(anyhow!(
+                "{}: the description does not validate ({} error{}), so nothing was run",
+                source.display(),
+                errors.errors.len(),
+                if errors.errors.len() == 1 { "" } else { "s" }
+            ));
         }
-        return Err(anyhow!(
-            "{}: the description does not validate ({} error{}), so nothing was run",
-            source.display(),
-            errors.errors.len(),
-            if errors.errors.len() == 1 { "" } else { "s" }
-        ));
     }
 
     // One interpreter: a v1.0 description is upconverted after validation.
@@ -861,7 +898,9 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     if let Some(map) = map {
         options = options.source_map(map);
     }
-    options = options.unknown_members(unknown);
+    if let Some(unknown) = unknown {
+        options = options.unknown_members(unknown);
+    }
     for schema in &args.schema {
         let (uri, path) = split_pair(schema, "--schema")?;
         let (document, _) = read_input(&InputSource::File(PathBuf::from(path)), None)
@@ -2160,7 +2199,7 @@ workflows:
     }
 
     #[test]
-    fn validate_warns_about_unknown_members_but_passes() {
+    fn validate_rejects_unknown_fields_unless_ignored() {
         let mut doc = v1_0_doc();
         doc["info"]["summery"] = json!("S");
         let f = TempFile::write("unknown.json", &doc);
@@ -2170,7 +2209,86 @@ workflows:
             ignore: vec![],
             print: false,
         };
-        run_arazzo(ArazzoCommand::Validate(args)).expect("an unknown member is a warning");
+        let err = run_arazzo(ArazzoCommand::Validate(args))
+            .expect_err("unknown fields must fail validation by default");
+        assert!(
+            err.to_string()
+                .contains("Arazzo validation failed (1 error)"),
+            "got: {err}"
+        );
+
+        let ignored_args = ArazzoValidateArgs {
+            file: Some(f.0.clone()),
+            format: None,
+            ignore: vec![ValidationOptions::IgnoreUnknownFields],
+            print: false,
+        };
+        run_arazzo(ArazzoCommand::Validate(ignored_args))
+            .expect("`--ignore unknown-fields` should pass validation");
+    }
+
+    #[test]
+    fn validate_warns_about_unknown_members_on_reusable_without_failing() {
+        let mut doc = v1_0_doc();
+        doc["components"] = json!({
+            "parameters": {
+                "p": { "name": "p", "in": "query", "value": 1 }
+            }
+        });
+        doc["workflows"][0]["steps"][0]["parameters"] = json!([
+            { "reference": "$components.parameters.p", "x-note": 1 }
+        ]);
+        let f = TempFile::write("unknown-reusable.json", &doc);
+        let args = ArazzoValidateArgs {
+            file: Some(f.0.clone()),
+            format: None,
+            ignore: vec![],
+            print: false,
+        };
+        run_arazzo(ArazzoCommand::Validate(args))
+            .expect("extra keys on Reusable are warned via unknown_members");
+
+        let ignored_args = ArazzoValidateArgs {
+            file: Some(f.0.clone()),
+            format: None,
+            ignore: vec![ValidationOptions::IgnoreUnknownFields],
+            print: false,
+        };
+        run_arazzo(ArazzoCommand::Validate(ignored_args))
+            .expect("`--ignore unknown-fields` suppresses Reusable warnings too");
+    }
+
+    #[test]
+    fn validate_rejects_empty_valued_unknown_fields_unless_ignored() {
+        for (label, value) in [
+            ("null", json!(null)),
+            ("arr", json!([])),
+            ("obj", json!({})),
+        ] {
+            let mut doc = v1_0_doc();
+            doc["info"]["bogus"] = value;
+            let f = TempFile::write(&format!("unknown-empty-{label}.json"), &doc);
+            let err = run_arazzo(ArazzoCommand::Validate(ArazzoValidateArgs {
+                file: Some(f.0.clone()),
+                format: None,
+                ignore: vec![],
+                print: false,
+            }))
+            .expect_err("empty-valued unknown fields must fail validation");
+            assert!(
+                err.to_string()
+                    .contains("Arazzo validation failed (1 error)"),
+                "{label}: {err}"
+            );
+
+            run_arazzo(ArazzoCommand::Validate(ArazzoValidateArgs {
+                file: Some(f.0.clone()),
+                format: None,
+                ignore: vec![ValidationOptions::IgnoreUnknownFields],
+                print: false,
+            }))
+            .expect("`--ignore unknown-fields` should allow empty-valued unknown fields");
+        }
     }
 
     #[test]
@@ -2196,6 +2314,41 @@ workflows:
                      a field of Arazzo {version}"
                 )),
                 "{shown}"
+            );
+
+            // Empty-valued unknown fields (`null`, `[]`, `{}`) are also refused
+            // by `arazzo run` on both v1.0 and v1.1 (even though `unknown_members`
+            // skips empty values).
+            for (label, empty_val) in [("null", "null"), ("arr", "[]"), ("obj", "{}")] {
+                let empty_text = LOCATED
+                    .replace("arazzo: 1.1.0", &format!("arazzo: {arazzo}"))
+                    .replace("title: \"\"", &format!("title: T\n  bogus: {empty_val}"))
+                    .replace("$statusCode == 'caf\\u00e9' && (", "$statusCode == 200");
+                let empty_desc =
+                    TempFile::text(&format!("unknown-empty-{arazzo}-{label}.yaml"), &empty_text);
+                let mut args = run_args(&empty_desc, &openapi, "http://127.0.0.1:1");
+                args.quiet = true;
+                let error = run_arazzo(ArazzoCommand::Run(args.into())).unwrap_err();
+                let shown = format!("{error:#}");
+                assert!(
+                    shown.contains("the description does not validate (1 error)"),
+                    "{arazzo} {label}: {shown}"
+                );
+            }
+
+            // With `--ignore unknown-fields`, validation and preparation skip
+            // unknown members (so an unsupplied source fails on the missing
+            // source rather than the unknown member, without making any network
+            // request).
+            let mut ignored = run_args(&description, &openapi, "http://127.0.0.1:1");
+            ignored.source.clear();
+            ignored.ignore = vec![ValidationOptions::IgnoreUnknownFields];
+            ignored.quiet = true;
+            let error = run_arazzo(ArazzoCommand::Run(ignored.into())).unwrap_err();
+            let shown = format!("{error:#}");
+            assert!(
+                !shown.contains("timeoutMs") && !shown.contains("not a field"),
+                "{arazzo}: {shown}"
             );
         }
     }

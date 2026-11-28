@@ -107,6 +107,7 @@ impl ValidateWithContext for Selector {
         ctx.require_non_empty("context", &self.context);
         ctx.require_non_empty("selector", &self.selector);
         ctx.in_field("type", |ctx| self.type_.validate_with_context(ctx));
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -271,7 +272,7 @@ mod tests {
         assert_eq!(v, ValueOrSelector::Literal(raw));
 
         // A complete selector object with an extra stray key still parses as
-        // a Selector so `unknown_members` can report the stray key.
+        // a Selector so validation and `unknown_members` can report the stray key.
         let with_stray: ValueOrSelector = serde_json::from_value(json!({
             "context": "$response.body",
             "selector": "$.id",
@@ -280,6 +281,14 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(with_stray, ValueOrSelector::Selector(_)));
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.sel");
+        with_stray.validate_with_context(&mut ctx);
+        assert!(
+            ctx.errors.iter().any(|e| e
+                == "#.sel.stray: not a field of this object; only `x-` extensions may be added"),
+            "{:?}",
+            ctx.errors
+        );
 
         assert!(serde_json::from_value::<SelectorType>(json!(42)).is_err());
     }

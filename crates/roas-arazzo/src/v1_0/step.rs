@@ -139,6 +139,7 @@ impl ValidateWithContext for Step {
             ctx.in_index("onFailure", i, |ctx| action.validate_with_context(ctx));
         }
         ctx.validate_map_keys("outputs", &self.outputs);
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

@@ -1,12 +1,15 @@
-//! A member is listed as unknown exactly when the model drops it: checked
-//! on every bundled description, untouched and with a stray member added
-//! to each of its objects in turn.
+//! Every unknown member is listed by `unknown_members` and (on extensible
+//! objects) preserved across round-tripping and reported by validation:
+//! checked on every bundled description, untouched and with a stray member
+//! added to each of its objects in turn.
 #![cfg(all(feature = "v1_0", feature = "v1_1"))]
 
 #[path = "../src/test_yaml.rs"]
 mod yaml;
 
+use enumset::EnumSet;
 use roas_arazzo::unknown::UnknownMembers;
+use roas_arazzo::validation::{Validate, ValidationOptions};
 use serde_json::Value;
 use std::path::Path;
 
@@ -43,23 +46,63 @@ fn fixtures() -> Vec<(String, Value)> {
     found
 }
 
-/// What the model of `value`'s version does not keep, and what it keeps;
+/// What the model of `value`'s version considers unknown, what it round-trips,
+/// and whether validation reports an unknown-field finding at `member_path`.
 /// `None` when `value` is no description of it.
-fn unknown(value: &Value) -> Option<(UnknownMembers, Value)> {
+fn inspect(value: &Value, member_path: Option<&str>) -> Option<(UnknownMembers, Value, bool)> {
     if value["arazzo"].as_str().unwrap().starts_with("1.0") {
         let description: roas_arazzo::v1_0::Description =
             serde_json::from_value(value.clone()).ok()?;
-        Some((
-            description.unknown_members(value).unwrap(),
-            serde_json::to_value(description).unwrap(),
-        ))
+        let found = description.unknown_members(value).unwrap();
+        let kept = serde_json::to_value(&description).unwrap();
+        let validated_as_unknown = member_path.is_some_and(|path| {
+            description
+                .validate(EnumSet::empty())
+                .err()
+                .is_some_and(|err| {
+                    err.errors
+                        .iter()
+                        .any(|e| e.path == path && e.is_about_key())
+                })
+        });
+        if validated_as_unknown {
+            // IgnoreUnknownFields must suppress that finding.
+            let suppressed = description
+                .validate(EnumSet::only(ValidationOptions::IgnoreUnknownFields))
+                .err()
+                .is_none_or(|err| !err.errors.iter().any(|e| e.path == member_path.unwrap()));
+            assert!(
+                suppressed,
+                "IgnoreUnknownFields did not suppress {member_path:?}"
+            );
+        }
+        Some((found, kept, validated_as_unknown))
     } else {
         let description: roas_arazzo::v1_1::Description =
             serde_json::from_value(value.clone()).ok()?;
-        Some((
-            description.unknown_members(value).unwrap(),
-            serde_json::to_value(description).unwrap(),
-        ))
+        let found = description.unknown_members(value).unwrap();
+        let kept = serde_json::to_value(&description).unwrap();
+        let validated_as_unknown = member_path.is_some_and(|path| {
+            description
+                .validate(EnumSet::empty())
+                .err()
+                .is_some_and(|err| {
+                    err.errors
+                        .iter()
+                        .any(|e| e.path == path && e.is_about_key())
+                })
+        });
+        if validated_as_unknown {
+            let suppressed = description
+                .validate(EnumSet::only(ValidationOptions::IgnoreUnknownFields))
+                .err()
+                .is_none_or(|err| !err.errors.iter().any(|e| e.path == member_path.unwrap()));
+            assert!(
+                suppressed,
+                "IgnoreUnknownFields did not suppress {member_path:?}"
+            );
+        }
+        Some((found, kept, validated_as_unknown))
     }
 }
 
@@ -95,14 +138,14 @@ fn objects(value: &Value, path: String, pointer: String, found: &mut Vec<(String
 #[test]
 fn a_bundled_description_has_no_unknown_members() {
     for (name, value) in fixtures() {
-        let (found, _) = unknown(&value).unwrap();
+        let (found, _, _) = inspect(&value, None).unwrap();
         assert!(found.is_empty(), "{name}: {:?}", found.members);
         assert_eq!(found.version, value["arazzo"].as_str().unwrap(), "{name}");
     }
 }
 
 #[test]
-fn a_stray_member_is_listed_exactly_when_the_model_drops_it() {
+fn a_stray_member_is_listed_and_extensible_objects_preserve_and_validate_it() {
     // A misspelt field, and an extension where none is allowed.
     for stray in ["strayMember", "x-stray"] {
         let mut listed = 0;
@@ -116,26 +159,53 @@ fn a_stray_member_is_listed_exactly_when_the_model_drops_it() {
                     unreachable!("{pointer} is an object");
                 };
                 members.insert(stray.into(), Value::from(1));
+                let member = format!("{path}.{stray}");
                 // A new entry of a map of named objects is no description.
-                let Some((found, kept)) = unknown(&changed) else {
+                let Some((found, kept, validated_as_unknown)) = inspect(&changed, Some(&member))
+                else {
                     continue;
                 };
-                let member = format!("{path}.{stray}");
-                if kept.pointer(&format!("{pointer}/{stray}")).is_some() {
-                    // Free-form JSON, such as a schema or a payload, keeps
-                    // it, as does an object that allows extensions.
-                    assert!(found.is_empty(), "{name}: {member}: {:?}", found.members);
+                let preserved_on_round_trip = kept.pointer(&format!("{pointer}/{stray}")).is_some();
+                let reusable = kept.pointer(&pointer).unwrap().get("reference").is_some();
+                if found.is_empty() {
+                    // Free-form JSON (such as a schema or a payload) keeps
+                    // both keys, and extensible objects accept `x-stray`.
+                    assert!(
+                        preserved_on_round_trip,
+                        "{name}: {member} not listed as unknown yet dropped"
+                    );
+                    assert!(
+                        !validated_as_unknown,
+                        "{name}: {member} not unknown yet failed validation"
+                    );
                     kept_extension += 1;
                 } else {
                     let paths: Vec<_> = found.members.iter().map(|m| m.path.as_str()).collect();
                     assert_eq!(paths, [member.as_str()], "{name}");
                     assert_eq!(found.members[0].name, stray);
                     // Every object but a Reusable Object allows extensions.
-                    let reusable = kept.pointer(&pointer).unwrap().get("reference").is_some();
                     assert_eq!(
                         found.members[0].extensions_allowed, !reusable,
                         "{name}: {member}"
                     );
+                    if reusable {
+                        // Reusable objects drop extra keys during deserialization.
+                        assert!(
+                            !preserved_on_round_trip,
+                            "{name}: {member} on Reusable should not serialize"
+                        );
+                    } else {
+                        // Extensible model objects preserve unknown keys for
+                        // lossless round-tripping and report them in validation.
+                        assert!(
+                            preserved_on_round_trip,
+                            "{name}: {member} should round-trip on extensible object"
+                        );
+                        assert!(
+                            validated_as_unknown,
+                            "{name}: {member} should fail validation"
+                        );
+                    }
                     listed += 1;
                 }
             }

@@ -19,8 +19,8 @@
 //! - [`source_map`] — where a path is written in the JSON or YAML text a
 //!   description was read from (`SourceMap::parse` behind the
 //!   `source-map` feature).
-//! - [`unknown`] — the members a description's model dropped: neither
-//!   fields nor `x-` extensions (`Description::unknown_members`).
+//! - [`unknown`] — the members of a description that are neither fields
+//!   nor `x-` extensions (`Description::unknown_members`).
 //! - `editor` (feature `editor`) — tolerant reading of damaged text for
 //!   editors: an outline and located diagnostics, never anything runnable.
 //!
@@ -83,6 +83,8 @@ pub mod common;
 #[cfg(feature = "editor")]
 pub mod editor;
 pub mod source_map;
+#[cfg(any(feature = "v1_0", feature = "v1_1"))]
+mod strip_unknown;
 pub mod unknown;
 #[cfg(feature = "editor")]
 mod yaml_value;

@@ -120,6 +120,7 @@ impl ValidateWithContext for FailureAction {
         for (i, criterion) in self.criteria.iter().enumerate() {
             ctx.in_index("criteria", i, |ctx| criterion.validate_with_context(ctx));
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
