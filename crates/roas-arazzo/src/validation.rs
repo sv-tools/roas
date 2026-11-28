@@ -18,6 +18,9 @@ use std::fmt::{self, Display, Write};
 /// The message of a map key outside the component key pattern.
 const KEY_PATTERN: &str = r"key must match `^[a-zA-Z0-9\.\-_]+$`";
 
+/// The message of a key an object does not define (neither a field nor an `x-` extension).
+const UNKNOWN_FIELD: &str = "not a field of this object; only `x-` extensions may be added";
+
 /// A single validation finding.
 ///
 /// `path` is a human-readable locator (e.g. `#.workflows[0].steps[1].stepId`),
@@ -35,10 +38,17 @@ impl ValidationError {
     }
 
     /// Whether the finding is about a member's name rather than its value
-    /// (a map key outside the component key pattern), so a source location
-    /// belongs at the name.
+    /// (a map key outside the component key pattern, or an unknown field name),
+    /// so a source location belongs at the name.
     pub fn is_about_key(&self) -> bool {
-        self.message == KEY_PATTERN
+        self.message == KEY_PATTERN || self.message == UNKNOWN_FIELD
+    }
+
+    /// Whether the finding reports a key an object does not define (neither a
+    /// field nor an `x-` extension).
+    #[must_use]
+    pub fn is_unknown_field(&self) -> bool {
+        self.message == UNKNOWN_FIELD
     }
 
     /// Substring search across path and message (and the rendered
@@ -106,6 +116,17 @@ pub enum ValidationOptions {
     IgnoreEmptyInfoTitle,
     /// Allow `info.version` to be empty (still required to be present).
     IgnoreEmptyInfoVersion,
+    /// Ignore keys an object does not define: neither one of its fields nor an
+    /// `x-` Specification Extension.
+    ///
+    /// [`Validate::validate`] checks extensible objects (since
+    /// [`Reusable`](crate::common::reusable::Reusable) disallows all extra
+    /// fields, including `x-*` extensions, and drops them during
+    /// deserialization). Higher-level consumers (`editor`,
+    /// `roas-arazzo-executor`, and `roas-cli`) also honor this option to
+    /// suppress `Description::unknown_members` findings, including extra keys
+    /// on `Reusable` objects.
+    IgnoreUnknownFields,
 }
 
 #[cfg(feature = "clap")]
@@ -114,6 +135,7 @@ impl clap::ValueEnum for ValidationOptions {
         &[
             ValidationOptions::IgnoreEmptyInfoTitle,
             ValidationOptions::IgnoreEmptyInfoVersion,
+            ValidationOptions::IgnoreUnknownFields,
         ]
     }
 
@@ -125,6 +147,10 @@ impl clap::ValueEnum for ValidationOptions {
             ValidationOptions::IgnoreEmptyInfoVersion => {
                 ("empty-info-version", "Allow empty `info.version`")
             }
+            ValidationOptions::IgnoreUnknownFields => (
+                "unknown-fields",
+                "Allow keys an object does not define, other than `x-` extensions",
+            ),
         };
         Some(clap::builder::PossibleValue::new(name).help(help))
     }
@@ -224,6 +250,20 @@ impl Context {
         });
     }
 
+    /// Report every key in `extensions` that is not an `x-` Specification
+    /// Extension, unless [`ValidationOptions::IgnoreUnknownFields`] is set.
+    pub fn validate_unknown_fields(
+        &mut self,
+        extensions: &Option<BTreeMap<String, serde_json::Value>>,
+    ) {
+        if self.is_option(ValidationOptions::IgnoreUnknownFields) {
+            return;
+        }
+        for key in crate::common::extensions::unknown_fields(extensions) {
+            self.error_field(key, UNKNOWN_FIELD);
+        }
+    }
+
     fn push_field(&mut self, field: &str) {
         self.path.push('.');
         self.path.push_str(field);
@@ -271,9 +311,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_key_pattern_finding_is_about_a_key() {
-        assert!(ValidationError::new("#.a".into(), KEY_PATTERN.into()).is_about_key());
-        assert!(!ValidationError::new("#.a".into(), "must not be empty".into()).is_about_key());
+    fn key_pattern_and_unknown_field_findings_are_about_a_key() {
+        let key_err = ValidationError::new("#.a".into(), KEY_PATTERN.into());
+        let unknown_err = ValidationError::new("#.a".into(), UNKNOWN_FIELD.into());
+        let value_err = ValidationError::new("#.a".into(), "must not be empty".into());
+        assert!(key_err.is_about_key());
+        assert!(!key_err.is_unknown_field());
+        assert!(unknown_err.is_about_key());
+        assert!(unknown_err.is_unknown_field());
+        assert!(!value_err.is_about_key());
+        assert!(!value_err.is_unknown_field());
+    }
+
+    #[test]
+    fn validate_unknown_fields_reports_non_x_keys_unless_ignored() {
+        let ext = Some(BTreeMap::from([
+            ("bogus".to_owned(), serde_json::json!(1)),
+            ("x-ok".to_owned(), serde_json::json!(2)),
+        ]));
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.info");
+        ctx.validate_unknown_fields(&ext);
+        assert_eq!(ctx.errors.len(), 1);
+        assert!(ctx.errors[0] == format!("#.info.bogus: {UNKNOWN_FIELD}").as_str());
+        assert!(ctx.errors[0].is_about_key());
+
+        let mut ignored = Context::with_path(
+            EnumSet::only(ValidationOptions::IgnoreUnknownFields),
+            "#.info",
+        );
+        ignored.validate_unknown_fields(&ext);
+        assert!(ignored.errors.is_empty());
     }
 
     #[test]

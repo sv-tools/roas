@@ -44,6 +44,7 @@ pub struct Parameter {
 impl ValidateWithContext for Parameter {
     fn validate_with_context(&self, ctx: &mut Context) {
         ctx.require_non_empty("name", &self.name);
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

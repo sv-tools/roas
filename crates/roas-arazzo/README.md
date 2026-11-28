@@ -62,9 +62,10 @@ YAML descriptions work the same way — parse with `serde-saphyr` (or any other 
 - uniqueness of source names, workflow ids, and step ids;
 - a step setting exactly one of `operationId` / `operationPath` / `workflowId`, with `in` required on operation-step parameters;
 - criterion `type` → `context` dependency and expression-type `version` constants;
-- `goto` actions requiring exactly one of `workflowId` / `stepId`.
+- `goto` actions requiring exactly one of `workflowId` / `stepId`;
+- unknown fields on extensible objects (keys that are neither fields of the object nor `x-` extensions).
 
-`ValidationOptions` (EnumSet): `IgnoreEmptyInfoTitle`, `IgnoreEmptyInfoVersion`. Behind the `clap` feature, the enum implements `clap::ValueEnum` so downstream CLIs can surface it directly.
+`ValidationOptions` (EnumSet): `IgnoreEmptyInfoTitle`, `IgnoreEmptyInfoVersion`, `IgnoreUnknownFields`. Behind the `clap` feature, the enum implements `clap::ValueEnum` so downstream CLIs can surface it directly.
 
 ## Reusable objects
 
@@ -74,7 +75,7 @@ Input schemas are plain JSON Schema. `resolve_input_ref("#/components/inputs/pet
 
 ## Unknown members
 
-An Arazzo object holds the fields its specification defines and, except for a Reusable Object, `x-` extensions; deserializing drops anything else without a word, so a misspelt `sucessCriteria` simply vanishes. `Description::unknown_members(&raw)` lists what was dropped from the value the description was deserialized from, each with a model-style `path` (`#.workflows[0].steps[1].sucessCriteria`) that a `SourceMap` locates with `locate_key`. A member whose value is `null`, `[]` or `{}` is not listed: a known optional field left empty is dropped the same way, so the two cannot be told apart. List a v1.0 description's members before upconverting it; `UnknownMembers::version` keeps the version it declared.
+An Arazzo object holds the fields its specification defines and, except for a Reusable Object, `x-` extensions. Extensible objects preserve every unclaimed key in `extensions` so a document round-trips without loss, and `Validate::validate` reports non-`x-` keys unless `ValidationOptions::IgnoreUnknownFields` is set (upconverting `v1_0::Description` to `v1_1::Description` strips non-`x-` keys). A Reusable Object allows no extensions and drops extra keys during deserialization. `Description::unknown_members(&raw)` strips unknown keys from a clone before comparing against the value the description was deserialized from, listing every unknown member across both extensible objects and `Reusable` objects, each with a model-style `path` (`#.workflows[0].steps[1].sucessCriteria`) that a `SourceMap` locates with `locate_key`. A member whose value is `null`, `[]` or `{}` is not listed by `unknown_members` (a known optional field left empty serializes the same way, though `Validate::validate` still reports it on extensible objects). List a v1.0 description's members before upconverting it; `UnknownMembers::version` keeps the version it declared.
 
 ```rust
 let raw = serde_json::json!({

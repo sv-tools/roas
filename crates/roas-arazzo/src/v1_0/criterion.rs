@@ -43,24 +43,26 @@ pub struct CriterionExpressionType {
 impl ValidateWithContext for CriterionExpressionType {
     fn validate_with_context(&self, ctx: &mut Context) {
         ctx.require_non_empty("version", &self.version);
-        if self.version.is_empty() {
-            return;
-        }
-        match self.type_ {
-            CriterionExpressionKind::Jsonpath if self.version != JSONPATH_VERSION => {
-                ctx.error_field(
-                    "version",
-                    format!("must be `{JSONPATH_VERSION}` for type `jsonpath`"),
-                );
+        if !self.version.is_empty() {
+            match self.type_ {
+                CriterionExpressionKind::Jsonpath if self.version != JSONPATH_VERSION => {
+                    ctx.error_field(
+                        "version",
+                        format!("must be `{JSONPATH_VERSION}` for type `jsonpath`"),
+                    );
+                }
+                CriterionExpressionKind::Xpath
+                    if !XPATH_VERSIONS.contains(&self.version.as_str()) =>
+                {
+                    ctx.error_field(
+                        "version",
+                        "must be one of `xpath-10`, `xpath-20`, `xpath-30` for type `xpath`",
+                    );
+                }
+                _ => {}
             }
-            CriterionExpressionKind::Xpath if !XPATH_VERSIONS.contains(&self.version.as_str()) => {
-                ctx.error_field(
-                    "version",
-                    "must be one of `xpath-10`, `xpath-20`, `xpath-30` for type `xpath`",
-                );
-            }
-            _ => {}
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -195,6 +197,7 @@ impl ValidateWithContext for Criterion {
                 _ => ctx.error_field("version", "is only valid with type `jsonpath` or `xpath`"),
             }
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

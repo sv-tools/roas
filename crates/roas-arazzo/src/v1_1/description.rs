@@ -47,9 +47,9 @@ pub struct Description {
 }
 
 impl Description {
-    /// The members of `raw` that this description did not keep: neither
-    /// fields of their object nor `x-` extensions. `raw` is the value this
-    /// description was deserialized from; see [`crate::unknown`].
+    /// The members of `raw` that are neither fields of their object nor `x-`
+    /// extensions it allows. `raw` is the value this description was
+    /// deserialized from; see [`crate::unknown`].
     ///
     /// ```
     /// use roas_arazzo::v1_1::Description;
@@ -73,7 +73,9 @@ impl Description {
         &self,
         raw: &serde_json::Value,
     ) -> Result<crate::unknown::UnknownMembers, serde_json::Error> {
-        Ok(crate::unknown::diff(raw, &serde_json::to_value(self)?))
+        let mut stripped = self.clone();
+        crate::strip_unknown::v1_1::strip_description(&mut stripped);
+        Ok(crate::unknown::diff(raw, &serde_json::to_value(&stripped)?))
     }
 
     fn validate_inner(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error> {
@@ -122,6 +124,7 @@ impl Description {
             ctx.in_field("components", |ctx| components.validate_with_context(ctx));
         }
 
+        ctx.validate_unknown_fields(&self.extensions);
         ctx.into_result()
     }
 }

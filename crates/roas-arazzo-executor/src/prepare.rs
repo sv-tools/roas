@@ -16,7 +16,7 @@ use roas_arazzo::v1_1::{
     Criterion, CriterionKind, CriterionType, Description, ExpressionKind, Parameter,
     ParameterLocation, ReusableOr, SourceType, Step, ValueOrSelector, Workflow,
 };
-use roas_arazzo::validation::{Validate, ValidationError};
+use roas_arazzo::validation::{Validate, ValidationError, ValidationOptions};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -596,13 +596,33 @@ impl<'d> Compiler<'d> {
     }
 
     fn validate_model(&mut self) {
+        let ignore_unknown = self
+            .options
+            .validation
+            .contains(ValidationOptions::IgnoreUnknownFields);
+        // When `IgnoreUnknownFields` is set, suppress both model unknown-field
+        // errors and `unknown_members` findings (including on `Reusable`
+        // objects and external Arazzo documents). Otherwise deduplicate model
+        // unknown-field errors already covered by `unknown_members`, while
+        // keeping any remaining ones (such as `null`/`[]`/`{}` values skipped
+        // by `unknown::diff`).
+        let unknown = (!ignore_unknown)
+            .then(|| self.documents.get(self.current).unknown)
+            .flatten();
+        let covered: BTreeSet<&str> = unknown
+            .into_iter()
+            .flat_map(|u| u.members.iter().map(|m| m.path.as_str()))
+            .collect();
         if let Err(error) = self.description().validate(self.options.validation) {
             for error in error.errors {
+                if error.is_unknown_field() && covered.contains(error.path.as_str()) {
+                    continue;
+                }
                 let site = self.model_site(&error.path);
                 self.finding(&site, None, PreparationIssue::Model(error));
             }
         }
-        if let Some(unknown) = self.documents.get(self.current).unknown {
+        if let Some(unknown) = unknown {
             for member in &unknown.members {
                 let site = self.model_site(&member.path);
                 self.finding(

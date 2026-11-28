@@ -250,12 +250,79 @@ fn an_unknown_member_is_an_error_located_at_its_name() {
          of Arazzo 1.1.0; an extension's name starts with `x-`"
     );
 
-    // Unless the caller says what was dropped, nothing is known to be.
-    let found = diagnostics(&text, &self::options());
+    // Without `unknown_members`, model validation still catches unknown fields
+    // on extensible objects (located at the key name), unless ignored.
+    let map = SourceMap::parse(text.clone()).unwrap();
+    let found = diagnostics(&text, &self::options().source_map(map.clone()));
+    let model_member = find(&found, "#.workflows[0].steps[0].timeoutMs");
+    let span = model_member.span.expect("the name is located");
+    assert_eq!((span.start.line, span.start.column), (14, 9));
+    let ignored = diagnostics(
+        &text,
+        &self::options().source_map(map).validation_options(
+            roas_arazzo::validation::ValidationOptions::IgnoreUnknownFields.into(),
+        ),
+    );
     assert!(
-        found
+        ignored
             .iter()
             .all(|finding| !finding.path.ends_with("timeoutMs")),
-        "{found:#?}"
+        "{ignored:#?}"
     );
+}
+
+#[test]
+fn prepare_honors_ignore_unknown_fields_with_unknown_members_and_catches_empty_values() {
+    use roas_arazzo::validation::ValidationOptions;
+
+    let text = TEXT
+        .replace("  title: \"\"\n", "  title: \"T\"\n")
+        .replace(
+            "        operationId: check\n",
+            "        operationId: check\n        timeoutMs: 5\n        bogusNull: null\n        bogusArr: []\n        bogusObj: {}\n",
+        )
+        .replace(
+            "          - reference: $components.successActions.shared\n",
+            "          - reference: $components.successActions.shared\n            x-note: 1\n",
+        );
+    let value: serde_json::Value = serde_saphyr::from_str(&text).unwrap();
+    let description: Description = serde_json::from_value(value.clone()).unwrap();
+    let unknown = description.unknown_members(&value).unwrap();
+    let map = SourceMap::parse(text).unwrap();
+
+    // Without IgnoreUnknownFields: `unknown_members` reports `timeoutMs` and the
+    // Reusable `x-note` once each, while model validation still catches the
+    // empty-valued `bogusNull`/`bogusArr`/`bogusObj` skipped by `unknown::diff`.
+    let opts = options()
+        .source_map(map.clone())
+        .unknown_members(unknown.clone());
+    let found = prepare(&description, &opts).unwrap_err().diagnostics;
+    for path in [
+        "#.workflows[0].steps[0].timeoutMs",
+        "#.workflows[0].steps[0].bogusNull",
+        "#.workflows[0].steps[0].bogusArr",
+        "#.workflows[0].steps[0].bogusObj",
+        "#.workflows[0].steps[0].onSuccess[0].x-note",
+    ] {
+        let matches: Vec<_> = found.iter().filter(|d| d.path == path).collect();
+        assert_eq!(matches.len(), 1, "expected 1 finding at {path}: {found:#?}");
+        assert!(matches[0].span.is_some(), "expected span for {path}");
+    }
+
+    // With IgnoreUnknownFields: both `unknown_members` (including Reusable)
+    // and model unknown-field findings (including empty-valued ones) are
+    // suppressed.
+    let ignored_opts = options()
+        .source_map(map)
+        .unknown_members(unknown)
+        .validation_options(ValidationOptions::IgnoreUnknownFields.into());
+    let ignored = prepare(&description, &ignored_opts)
+        .unwrap_err()
+        .diagnostics;
+    for suffix in ["timeoutMs", "bogusNull", "bogusArr", "bogusObj", "x-note"] {
+        assert!(
+            ignored.iter().all(|d| !d.path.ends_with(suffix)),
+            "expected `{suffix}` suppressed under IgnoreUnknownFields: {ignored:#?}"
+        );
+    }
 }

@@ -73,6 +73,7 @@ impl ValidateWithContext for ExpressionType {
                 ),
             );
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

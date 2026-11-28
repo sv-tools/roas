@@ -427,13 +427,13 @@ A response body is untrusted, so the engine runs under limits:
 
 ## Support matrix
 
-Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-arazzo) parses, the source registry and preparation resolve references, `roas-arazzo`'s `Validate` and checked preparation (`prepare`) validate, and a run executes. A capability marked *Not run* (XPath without its feature, AsyncAPI steps without a message client) is an error where it is met, never skipped; `x-` extensions of Arazzo objects are ignored. A check named in the validation column is made by `prepare`, and the lazy `execute` / `Run::start` path makes only some of them: it does not see unknown members at all.
+Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-arazzo) parses, the source registry and preparation resolve references, `roas-arazzo`'s `Validate` and checked preparation (`prepare`) validate, and a run executes. A capability marked *Not run* (XPath without its feature, AsyncAPI steps without a message client) is an error where it is met, never skipped; `x-` extensions of Arazzo objects are ignored. A check named in the validation column is made by `prepare`, and the lazy `execute` / `Run::start` path makes only some of them: it does not validate unknown members.
 
 | Feature | Parsing | Reference resolution | Validation | Execution |
 | --- | --- | --- | --- | --- |
 | Arazzo 1.0 / 1.1 | Typed models; v1.0 keeps its written version | `$self` and Arazzo `sourceDescriptions` through `SourceRegistry` (`source-graph`) | Structural checks; preparation checks the selected workflow's reachable graph | v1.1 directly; v1.0 after upconversion |
 | `x-` extensions of Arazzo objects | Kept on every object but a Reusable Object | — | Not interpreted | Ignored |
-| Other unknown members | Dropped by the model; listed by `Description::unknown_members` | — | Preparation error (entry when given `Options::unknown_members`, external documents always) | A checked run refuses them; the lazy path never sees them |
+| Other unknown members | Preserved in `extensions` on extensible objects; dropped by `Reusable`; listed by `Description::unknown_members` | — | Preparation error (extensible objects caught via model validation even without `Options::unknown_members`; `Options::unknown_members` and external documents add `Reusable` coverage and declared-version messages; suppressed by `ValidationOptions::IgnoreUnknownFields`) | A checked run refuses them unless `IgnoreUnknownFields` is set; the lazy path ignores them |
 | OpenAPI 2.0 / 3.0 / 3.1 / 3.2 sources | Raw values with a checked version | `operationId`, `operationPath`, Path Item `$ref` chains, servers | Duplicate IDs, reference cycles, Path Item overlaps; no structural or schema validation | HTTP requests ([methods and servers](#openapi-operation-resolution)) |
 | AsyncAPI 2.6 / 3.0 / 3.1 sources | Raw values with a checked version | Operations and channels by `operationId` / `channelPath`, local `$ref`s | Channels, parameter locations and sources checked; `$message` outside an AsyncAPI step is an error | Messages sent and received through a `MessageClient` ([details](#asyncapi-steps)) |
 | External Arazzo workflows | Typed models from the registry | `$sourceDescriptions.<name>.<workflowId>` | Structure, unknown members and the cross-document workflow graph | In their own document's scope |
@@ -530,12 +530,18 @@ and YAML folding); its display then reads `… at line 12, column 31: …` inste
 that document's identity with `Options::document_source_map(identity, map)`, where
 `identity` is what the finding's `document` names. Without a map, or for a value the map cannot decode exactly, nothing
 is guessed: `position` stays `None` and the byte offset is shown.
-Give `Options::unknown_members` what `roas_arazzo`'s `Description::unknown_members`
-listed for the description, and each member is a `PreparationIssue::UnknownMember`
-error located at its name: the specification allows only its fields and `x-`
-extensions (a Reusable Object allows none), and a member the model dropped, such as a misspelt `successCriteria`,
-would otherwise be silently ignored by the run. External Arazzo documents in the
-`SourceRegistry` are checked the same way without being asked. Only checked
+Extensible Arazzo objects preserve unknown fields in `extensions`, so `prepare`
+catches them via model validation even without `Options::unknown_members` (unless
+`ValidationOptions::IgnoreUnknownFields` is set). Give `Options::unknown_members`
+what `roas_arazzo`'s `Description::unknown_members` listed for the description to
+also cover extra keys dropped by a Reusable Object and report each non-empty
+unknown member as a `PreparationIssue::UnknownMember` error with the document's
+declared Arazzo version, located at its name (deduplicated against model
+validation, while empty-valued unknown fields such as `null`, `[]`, or `{}` on
+extensible objects still surface via model validation). External Arazzo documents
+in the `SourceRegistry` are checked the same way without being asked; setting
+`ValidationOptions::IgnoreUnknownFields` suppresses all unknown-member findings
+across entry and external documents alike. Only checked
 preparation locates findings; errors of the lazy `execute` / `Run::start` path carry
 no field paths.
 

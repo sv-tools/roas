@@ -1,14 +1,15 @@
 //! Members of an Arazzo description that its model does not know.
 //!
 //! An Arazzo object holds the fields its specification defines and, except
-//! for a Reusable Object, `x-`-prefixed extensions. Deserializing keeps
-//! those and drops anything else without a word, so a misspelt
-//! `sucessCriteria` simply vanishes.
-//! `v1_0::Description::unknown_members`
-//! and
-//! `v1_1::Description::unknown_members`
-//! list what was dropped, by comparing the value a description was
-//! deserialized from with the description serialized again.
+//! for a Reusable Object, `x-`-prefixed extensions. On extensible objects,
+//! unclaimed keys are preserved in `extensions` for lossless round-tripping
+//! and reported by validation unless
+//! [`ValidationOptions::IgnoreUnknownFields`](crate::validation::ValidationOptions::IgnoreUnknownFields)
+//! is set; a Reusable Object allows no extensions and drops extra keys on
+//! deserialization. `v1_0::Description::unknown_members` and
+//! `v1_1::Description::unknown_members` list every unknown member across the
+//! document by comparing the value a description was deserialized from with
+//! the description serialized after stripping unknown keys.
 //!
 //! A member whose value is `null`, `[]` or `{}` is not listed: a known
 //! optional field left empty is dropped the same way, so the two cannot be

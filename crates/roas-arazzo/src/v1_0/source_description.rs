@@ -46,6 +46,7 @@ impl ValidateWithContext for SourceDescription {
             ctx.error_field("name", r"must match `^[A-Za-z0-9_\-]+$`");
         }
         ctx.require_non_empty("url", &self.url);
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

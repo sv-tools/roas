@@ -41,6 +41,7 @@ impl ValidateWithContext for Info {
         if !ctx.is_option(ValidationOptions::IgnoreEmptyInfoVersion) {
             ctx.require_non_empty("version", &self.version);
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

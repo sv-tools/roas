@@ -75,6 +75,7 @@ impl ValidateWithContext for Components {
                 action.validate_with_context(ctx)
             });
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

@@ -916,6 +916,14 @@ fn an_unknown_member_of_an_external_document_fails_preparation() {
         "{found}"
     );
 
+    // `ValidationOptions::IgnoreUnknownFields` suppresses unknown-member
+    // findings in external Arazzo documents as well.
+    let ignored_options = graph
+        .options("main")
+        .validation_options(roas_arazzo::validation::ValidationOptions::IgnoreUnknownFields.into());
+    prepare(&graph.description, &ignored_options)
+        .expect("IgnoreUnknownFields should suppress external document unknown members");
+
     // A v1.0 document is compared with the v1.0 model, before upconversion.
     let mut registry = SourceRegistry::new();
     let id = registry

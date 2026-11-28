@@ -878,13 +878,36 @@ impl Checks<'_> {
                 }
             }
         };
+        let ignore_unknown = options.contains(ValidationOptions::IgnoreUnknownFields);
+        let unknown = if ignore_unknown {
+            None
+        } else {
+            description.unknown(value).ok()
+        };
+        let covered: std::collections::BTreeSet<&str> = unknown
+            .as_ref()
+            .into_iter()
+            .flat_map(|u| u.members.iter().map(|m| m.path.as_str()))
+            .collect();
         if let Err(errors) = description.validate(options) {
             for error in errors.errors {
-                let key = error.is_about_key();
-                self.push(Severity::Error, error.path, key, error.message);
+                if error.is_unknown_field() {
+                    // Non-empty unknown fields are reported once below via
+                    // `unknown_members` with the declared Arazzo version;
+                    // empty-valued unknown fields (`null`, `[]`, `{}`) are
+                    // skipped by `unknown_members` and surface here once as a
+                    // warning to match the editor's severity policy.
+                    if covered.contains(error.path.as_str()) {
+                        continue;
+                    }
+                    self.push(Severity::Warning, error.path, true, error.message);
+                } else {
+                    let key = error.is_about_key();
+                    self.push(Severity::Error, error.path, key, error.message);
+                }
             }
         }
-        if let Ok(unknown) = description.unknown(value) {
+        if let Some(unknown) = unknown {
             for member in unknown.members {
                 let message = crate::unknown::message(
                     &member.name,

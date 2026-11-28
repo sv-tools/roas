@@ -38,6 +38,7 @@ impl ValidateWithContext for RequestBody {
                 replacement.validate_with_context(ctx)
             });
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -71,6 +72,7 @@ impl ValidateWithContext for PayloadReplacement {
             });
         }
         ctx.in_field("value", |ctx| self.value.validate_with_context(ctx));
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

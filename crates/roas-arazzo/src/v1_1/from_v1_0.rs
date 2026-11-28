@@ -6,8 +6,19 @@
 //! [`ExpressionType`](crate::v1_1::ExpressionType) folding, and wrapping
 //! plain values / output strings as [`ValueOrSelector::Literal`].
 
+use crate::common::extensions::retain_extensions_only;
 use crate::common::reusable::ReusableOr;
 use crate::{v1_0, v1_1};
+use std::collections::BTreeMap;
+
+/// Keep only `x-` Specification Extensions when upconverting from v1.0,
+/// stripping unknown fields that v1.0 captured for round-tripping.
+fn extensions_only(
+    mut extensions: Option<BTreeMap<String, serde_json::Value>>,
+) -> Option<BTreeMap<String, serde_json::Value>> {
+    retain_extensions_only(&mut extensions);
+    extensions
+}
 
 /// Map a `ReusableOr<A>` to a `ReusableOr<B>` (the `Reusable` arm is a
 /// shared `common` type, so only the `Item` arm converts).
@@ -32,7 +43,7 @@ impl From<v1_0::Description> for v1_1::Description {
             source_descriptions: d.source_descriptions.into_iter().map(Into::into).collect(),
             workflows: d.workflows.into_iter().map(Into::into).collect(),
             components: d.components.map(Into::into),
-            extensions: d.extensions,
+            extensions: extensions_only(d.extensions),
         }
     }
 }
@@ -44,7 +55,7 @@ impl From<v1_0::Info> for v1_1::Info {
             summary: i.summary,
             description: i.description,
             version: i.version,
-            extensions: i.extensions,
+            extensions: extensions_only(i.extensions),
         }
     }
 }
@@ -64,7 +75,7 @@ impl From<v1_0::SourceDescription> for v1_1::SourceDescription {
             name: s.name,
             url: s.url,
             type_: s.type_.map(Into::into),
-            extensions: s.extensions,
+            extensions: extensions_only(s.extensions),
         }
     }
 }
@@ -86,7 +97,7 @@ impl From<v1_0::Parameter> for v1_1::Parameter {
             name: p.name,
             in_: p.in_.map(Into::into),
             value: v1_1::ValueOrSelector::Literal(p.value),
-            extensions: p.extensions,
+            extensions: extensions_only(p.extensions),
         }
     }
 }
@@ -107,7 +118,7 @@ impl From<v1_0::Criterion> for v1_1::Criterion {
                     V0Expr::Xpath => ExpressionKind::Xpath,
                 },
                 version: et.version,
-                extensions: et.extensions,
+                extensions: extensions_only(et.extensions),
             }),
             V0::Jsonpath => match c.version {
                 Some(version) => CriterionType::Expression(ExpressionType {
@@ -133,7 +144,7 @@ impl From<v1_0::Criterion> for v1_1::Criterion {
             context: c.context,
             condition: c.condition,
             type_,
-            extensions: c.extensions,
+            extensions: extensions_only(c.extensions),
         }
     }
 }
@@ -144,7 +155,7 @@ impl From<v1_0::PayloadReplacement> for v1_1::PayloadReplacement {
             target: r.target,
             target_selector_type: None,
             value: v1_1::ValueOrSelector::literal(r.value),
-            extensions: r.extensions,
+            extensions: extensions_only(r.extensions),
         }
     }
 }
@@ -155,7 +166,7 @@ impl From<v1_0::RequestBody> for v1_1::RequestBody {
             content_type: b.content_type,
             payload: b.payload,
             replacements: b.replacements.into_iter().map(Into::into).collect(),
-            extensions: b.extensions,
+            extensions: extensions_only(b.extensions),
         }
     }
 }
@@ -178,7 +189,7 @@ impl From<v1_0::SuccessAction> for v1_1::SuccessAction {
             step_id: a.step_id,
             parameters: Vec::new(),
             criteria: a.criteria.into_iter().map(Into::into).collect(),
-            extensions: a.extensions,
+            extensions: extensions_only(a.extensions),
         }
     }
 }
@@ -204,7 +215,7 @@ impl From<v1_0::FailureAction> for v1_1::FailureAction {
             retry_after: a.retry_after,
             retry_limit: a.retry_limit,
             criteria: a.criteria.into_iter().map(Into::into).collect(),
-            extensions: a.extensions,
+            extensions: extensions_only(a.extensions),
         }
     }
 }
@@ -232,7 +243,7 @@ impl From<v1_0::Step> for v1_1::Step {
                 .into_iter()
                 .map(|(k, v)| (k, v1_1::ValueOrSelector::literal(v)))
                 .collect(),
-            extensions: s.extensions,
+            extensions: extensions_only(s.extensions),
         }
     }
 }
@@ -254,7 +265,7 @@ impl From<v1_0::Workflow> for v1_1::Workflow {
                 .map(|(k, v)| (k, v1_1::ValueOrSelector::literal(v)))
                 .collect(),
             parameters: map_reusables(w.parameters),
-            extensions: w.extensions,
+            extensions: extensions_only(w.extensions),
         }
     }
 }
@@ -278,7 +289,7 @@ impl From<v1_0::Components> for v1_1::Components {
                 .into_iter()
                 .map(|(k, v)| (k, v.into()))
                 .collect(),
-            extensions: c.extensions,
+            extensions: extensions_only(c.extensions),
         }
     }
 }

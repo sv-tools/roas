@@ -108,6 +108,7 @@ impl ValidateWithContext for Workflow {
         for (name, output) in &self.outputs {
             ctx.in_key("outputs", name, |ctx| output.validate_with_context(ctx));
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
