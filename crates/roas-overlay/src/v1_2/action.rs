@@ -49,6 +49,10 @@ pub struct Action {
     pub remove: Option<bool>,
 
     /// `x-`-prefixed Specification Extensions.
+    ///
+    /// Any other key the object does not define is kept here too, so the document
+    /// round-trips; validation reports it unless
+    /// [`crate::validation::ValidationOptions::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -100,6 +104,7 @@ pub(crate) fn validate_operation_fields(
 
 impl ValidateWithContext for Action {
     fn validate_with_context(&self, ctx: &mut Context) {
+        ctx.validate_unknown_fields(&self.extensions);
         ctx.require_jsonpath("target", &self.target);
         validate_operation_fields(
             self.update.as_ref(),
@@ -146,6 +151,12 @@ pub struct ReusableActionReference {
     /// `x-`-prefixed Specification Extensions. On resolution they are
     /// merged over the referenced `fields`' extensions, winning on
     /// shared keys.
+    ///
+    /// Any other key the object does not define (other than `update`, `copy`,
+    /// and `remove`, which are rejected during [`ActionItem`] deserialization)
+    /// is kept here too, so the document round-trips; validation reports it
+    /// unless [`crate::validation::ValidationOptions::IgnoreUnknownFields`] is
+    /// set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -155,8 +166,9 @@ pub struct ReusableActionReference {
 impl ReusableActionReference {
     /// The plain action this reference stands for: the referenced
     /// reusable action's `fields`, with this reference's `target`, its
-    /// `description` when it has one, and its extensions merged over
-    /// those of `fields`.
+    /// `description` when it has one, and its `x-` extensions merged over
+    /// those of `fields` (any unknown non-`x-` keys are excluded from the
+    /// resolved action).
     ///
     /// # Errors
     ///
@@ -179,15 +191,24 @@ impl ReusableActionReference {
     }
 }
 
-/// `base` with every entry of `overrides` inserted over it; `None` when
-/// both are empty.
+/// `x-` extensions from `base` with every `x-` extension of `overrides`
+/// inserted over them; `None` when none remain. Non-`x-` unknown keys are
+/// excluded from both inputs.
 fn merge_extensions(
     base: Option<BTreeMap<String, Value>>,
     overrides: Option<&BTreeMap<String, Value>>,
 ) -> Option<BTreeMap<String, Value>> {
+    use crate::common::extensions::is_extension;
+
     let mut merged = base.unwrap_or_default();
+    merged.retain(|k, _| is_extension(k));
     if let Some(overrides) = overrides {
-        merged.extend(overrides.iter().map(|(k, v)| (k.clone(), v.clone())));
+        merged.extend(
+            overrides
+                .iter()
+                .filter(|(k, _)| is_extension(k))
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
     }
     if merged.is_empty() {
         None
@@ -253,7 +274,8 @@ const OPERATION_FIELDS: [&str; 3] = ["update", "copy", "remove"];
 impl<'de> Deserialize<'de> for ActionItem {
     /// An entry with `$ref` is a reference, any other an inline action.
     /// A reference that also sets `update`, `copy` or `remove` is
-    /// rejected rather than having those fields dropped.
+    /// rejected during deserialization rather than kept in `extensions`
+    /// for validation.
     fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         let value = Value::deserialize(de)?;
         if value.get("$ref").is_none() {
@@ -393,6 +415,62 @@ mod tests {
                 ("x-b".to_owned(), json!("reference")),
             ])),
         );
+    }
+
+    #[test]
+    fn resolve_drops_unknown_non_extension_keys_while_merging_extensions() {
+        let comps = components(
+            "errors",
+            ReusableActionFields {
+                update: Some(json!({ "responses": {} })),
+                extensions: Some(BTreeMap::from([
+                    ("x-shared".to_owned(), json!("from-fields")),
+                    ("x-only-fields".to_owned(), json!(1)),
+                    ("bogus_fields".to_owned(), json!("drop-me")),
+                    ("target".to_owned(), json!("$.wrong")),
+                ])),
+                ..Default::default()
+            },
+        );
+        let reference = ReusableActionReference {
+            reference: "#/components/actions/errors".into(),
+            target: "$.paths.*.get".into(),
+            description: None,
+            extensions: Some(BTreeMap::from([
+                ("x-shared".to_owned(), json!("from-ref")),
+                ("x-only-ref".to_owned(), json!(2)),
+                ("bogus_ref".to_owned(), json!("drop-me-too")),
+                ("$ref".to_owned(), json!("evil")),
+            ])),
+        };
+        let action = reference.resolve(Some(&comps)).unwrap();
+        assert_eq!(
+            action.extensions,
+            Some(BTreeMap::from([
+                ("x-only-fields".to_owned(), json!(1)),
+                ("x-only-ref".to_owned(), json!(2)),
+                ("x-shared".to_owned(), json!("from-ref")),
+            ])),
+        );
+
+        // When both inputs contain only unknown non-`x-` keys, resolved
+        // `extensions` becomes `None`.
+        let only_unknown = components(
+            "only_unknown",
+            ReusableActionFields {
+                remove: Some(true),
+                extensions: Some(BTreeMap::from([("bogus_fields".to_owned(), json!(1))])),
+                ..Default::default()
+            },
+        );
+        let ref_only_unknown = ReusableActionReference {
+            reference: "#/components/actions/only_unknown".into(),
+            target: "$.x".into(),
+            description: None,
+            extensions: Some(BTreeMap::from([("bogus_ref".to_owned(), json!(2))])),
+        };
+        let resolved = ref_only_unknown.resolve(Some(&only_unknown)).unwrap();
+        assert_eq!(resolved.extensions, None);
     }
 
     #[test]

@@ -21,7 +21,7 @@ The version features are independent — enable whichever you need. With neighbo
 
 ### Overlay 1.2
 
-- **Reusable actions.** `components.actions` holds named action fields without a `target`; an `actions` entry `{ "$ref": "#/components/actions/<name>", "target": … }` applies them to its own target. Apply resolves each reference into a plain action first: the referenced `fields`, then the reference's `target`, its `description` when set, and its `x-` extensions merged over those of `fields`. A reference may not set `update`, `copy` or `remove` (the schema forbids it), and deserializing one that does fails rather than dropping them.
+- **Reusable actions.** `components.actions` holds named action fields without a `target`; an `actions` entry `{ "$ref": "#/components/actions/<name>", "target": … }` applies them to its own target. Apply resolves each reference into a plain action first: the referenced `fields`, then the reference's `target`, its `description` when set, and its `x-` extensions merged over those of `fields`. A reference may not set `update`, `copy` or `remove` (the schema forbids it), and deserializing one that does fails immediately rather than keeping them in `extensions` for validation.
 - **`$self` and `extends`** are parsed, serialized and validated (neither may contain a fragment). `Overlay::base_uri` and `Overlay::extends_uri` resolve them per the spec's base URI rules, given the URI the overlay was retrieved from; `extends` should then match the target's `v1_2::document_uri` (its own `$self`, or where it was read from). Applying an overlay does not check `extends`: that is left to the caller.
 - **Primitive targets.** `update` and `copy` replace a selected primitive (or `null`) with their value, which must then be a primitive too (`NonPrimitiveValueForPrimitiveTarget`), and `remove` removes primitive array elements.
 
@@ -86,6 +86,7 @@ On any error the target document is left **untouched** — `Overlay::apply` oper
 `ValidationOptions` (EnumSet):
 
 - `IgnoreEmptyInfoTitle`, `IgnoreEmptyInfoVersion` — allow `info.title` / `info.version` to be empty.
+- `IgnoreUnknownFields` — allow keys an object does not define, other than `x-` Specification Extensions (which are otherwise kept for round-tripping and reported during validation).
 
 Behind the `clap` feature, both enums implement `clap::ValueEnum` so downstream CLIs (such as `roas-cli`) can surface them directly.
 

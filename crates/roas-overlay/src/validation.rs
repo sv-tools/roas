@@ -11,7 +11,9 @@
 //! [`roas::validation`]: https://docs.rs/roas/latest/roas/validation/index.html
 
 use crate::common::apply::compile_path;
+use crate::common::extensions;
 use enumset::{EnumSet, EnumSetType};
+use std::collections::BTreeMap;
 use std::fmt::{self, Display, Write};
 
 /// A single validation finding.
@@ -95,6 +97,15 @@ pub enum ValidationOptions {
     IgnoreEmptyInfoTitle,
     /// Allow `info.version` to be empty (still required to be present).
     IgnoreEmptyInfoVersion,
+    /// Ignore keys an object does not define: neither one of its fields nor an `x-`
+    /// Specification Extension.
+    ///
+    /// Applies for Overlay v1.0, v1.1, and v1.2. Note that in Overlay v1.2,
+    /// `update`, `copy`, and `remove` beside `$ref` on a Reusable Action
+    /// Reference Object and `target` inside a Reusable Action Object's `fields`
+    /// are rejected during deserialization rather than validation, so this
+    /// option does not apply to them.
+    IgnoreUnknownFields,
 }
 
 #[cfg(feature = "clap")]
@@ -103,6 +114,7 @@ impl clap::ValueEnum for ValidationOptions {
         &[
             ValidationOptions::IgnoreEmptyInfoTitle,
             ValidationOptions::IgnoreEmptyInfoVersion,
+            ValidationOptions::IgnoreUnknownFields,
         ]
     }
 
@@ -114,6 +126,10 @@ impl clap::ValueEnum for ValidationOptions {
             ValidationOptions::IgnoreEmptyInfoVersion => {
                 ("empty-info-version", "Allow empty `info.version`")
             }
+            ValidationOptions::IgnoreUnknownFields => (
+                "unknown-fields",
+                "Allow keys an object does not define, other than `x-` extensions",
+            ),
         };
         Some(clap::builder::PossibleValue::new(name).help(help))
     }
@@ -198,6 +214,24 @@ impl Context {
             self.error_field(field, "must not be empty");
         } else if let Err(msg) = compile_path(value) {
             self.error_field(field, format!("invalid JSONPath query: {msg}"));
+        }
+    }
+
+    /// Record an error for each key in `extensions` that is not an `x-`
+    /// Specification Extension, unless [`ValidationOptions::IgnoreUnknownFields`]
+    /// is set.
+    pub fn validate_unknown_fields(
+        &mut self,
+        extensions: &Option<BTreeMap<String, serde_json::Value>>,
+    ) {
+        if self.is_option(ValidationOptions::IgnoreUnknownFields) {
+            return;
+        }
+        for key in extensions::unknown_fields(extensions) {
+            self.error_field(
+                key,
+                "not a field of this object; only `x-` extensions may be added",
+            );
         }
     }
 
@@ -311,6 +345,32 @@ mod tests {
         });
         assert_eq!(ctx.errors.len(), 1);
         assert!(ctx.errors[0] == "#.info.title: must not be empty");
+    }
+
+    #[test]
+    fn validate_unknown_fields_reports_only_non_x_keys_unless_ignored() {
+        let ext = Some(BTreeMap::from([
+            ("bogus".to_owned(), serde_json::json!(1)),
+            ("x-keep".to_owned(), serde_json::json!(2)),
+        ]));
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.info");
+        ctx.validate_unknown_fields(&ext);
+        assert_eq!(ctx.errors.len(), 1);
+        assert!(
+            ctx.errors[0]
+                == "#.info.bogus: not a field of this object; only `x-` extensions may be added"
+        );
+
+        let mut ignored = Context::with_path(
+            EnumSet::only(ValidationOptions::IgnoreUnknownFields),
+            "#.info",
+        );
+        ignored.validate_unknown_fields(&ext);
+        assert!(ignored.errors.is_empty());
+
+        let mut none_ctx = Context::new(EnumSet::empty());
+        none_ctx.validate_unknown_fields(&None);
+        assert!(none_ctx.errors.is_empty());
     }
 }
 

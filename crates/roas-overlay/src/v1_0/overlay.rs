@@ -36,6 +36,10 @@ pub struct Overlay {
     pub actions: Vec<Action>,
 
     /// `x-`-prefixed Specification Extensions on the root.
+    ///
+    /// Any other key the object does not define is kept here too, so the document
+    /// round-trips; validation reports it unless
+    /// [`ValidationOptions::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -45,6 +49,7 @@ pub struct Overlay {
 impl Overlay {
     fn validate_inner(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error> {
         let mut ctx = Context::new(options);
+        ctx.validate_unknown_fields(&self.extensions);
 
         ctx.in_field("info", |ctx| self.info.validate_with_context(ctx));
 
@@ -262,13 +267,13 @@ mod tests {
             "extends": "./base.yaml",
             "actions": [ { "target": "$", "update": {} } ],
             "x-team": "platform",
-            "skipped": 1
+            "unclaimed": 1
         }"#;
         let o = parse(json);
         assert_eq!(o.extends.as_deref(), Some("./base.yaml"));
         let ext = o.extensions.as_ref().unwrap();
-        assert!(ext.contains_key("x-team"));
-        assert!(!ext.contains_key("skipped"));
+        assert_eq!(ext.get("x-team"), Some(&json!("platform")));
+        assert_eq!(ext.get("unclaimed"), Some(&json!(1)));
     }
 
     #[test]

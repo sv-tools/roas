@@ -20,6 +20,10 @@ pub struct Info {
     pub description: Option<String>,
 
     /// `x-`-prefixed Specification Extensions.
+    ///
+    /// Any other key the object does not define is kept here too, so the document
+    /// round-trips; validation reports it unless
+    /// [`ValidationOptions::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -28,6 +32,7 @@ pub struct Info {
 
 impl ValidateWithContext for Info {
     fn validate_with_context(&self, ctx: &mut Context) {
+        ctx.validate_unknown_fields(&self.extensions);
         if !ctx.is_option(ValidationOptions::IgnoreEmptyInfoTitle) {
             ctx.require_non_empty("title", &self.title);
         }
@@ -81,17 +86,17 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_keeps_x_dash_extensions_and_drops_others() {
+    fn deserialize_keeps_x_dash_extensions_and_unclaimed_keys() {
         let info: Info = serde_json::from_value(json!({
             "title": "T",
             "version": "1.0",
             "x-team": "platform",
-            "ignored": 42,
+            "unclaimed": 42,
         }))
         .unwrap();
         let ext = info.extensions.as_ref().unwrap();
         assert_eq!(ext.get("x-team").unwrap(), &json!("platform"));
-        assert!(!ext.contains_key("ignored"));
+        assert_eq!(ext.get("unclaimed").unwrap(), &json!(42));
     }
 
     #[test]
