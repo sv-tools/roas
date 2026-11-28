@@ -1,5 +1,6 @@
 //! Response Object
 
+use crate::common::helpers::validate_unknown_fields;
 use crate::common::reference::RefOr;
 use crate::v3_2::header::Header;
 use crate::v3_2::link::Link;
@@ -77,6 +78,9 @@ pub struct Responses {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
@@ -114,6 +118,9 @@ pub struct Response {
     pub links: Option<BTreeMap<String, RefOr<Link>>>,
 
     /// `^x-` Specification Extensions.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,9 +146,7 @@ impl Serialize for Responses {
 
         if let Some(ref ext) = self.extensions {
             for (k, v) in ext {
-                if k.starts_with("x-") {
-                    map.serialize_entry(&k, &v)?;
-                }
+                map.serialize_entry(&k, &v)?;
             }
         }
 
@@ -187,18 +192,16 @@ impl<'de> Deserialize<'de> for Responses {
                             return Err(Error::duplicate_field("default"));
                         }
                         res.default = Some(map.next_value()?);
-                    } else if key.starts_with("x-") {
-                        if extensions.contains_key(key.as_str()) {
-                            return Err(Error::custom(format_args!("duplicate field `{key}`")));
-                        }
-                        extensions.insert(key, map.next_value()?);
                     } else if is_response_code_key(key.as_str()) {
                         if responses.contains_key(key.as_str()) {
                             return Err(Error::custom(format_args!("duplicate field `{key}`")));
                         }
                         responses.insert(key, map.next_value()?);
                     } else {
-                        return Err(Error::unknown_field(key.as_str(), FIELDS));
+                        if extensions.contains_key(key.as_str()) {
+                            return Err(Error::custom(format_args!("duplicate field `{key}`")));
+                        }
+                        extensions.insert(key, map.next_value()?);
                     }
                 }
                 if !responses.is_empty() {
@@ -217,6 +220,7 @@ impl<'de> Deserialize<'de> for Responses {
 
 impl ValidateWithContext<Spec> for Response {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         // OAS 3.2: `description` is optional per the JSON Schema. When set,
         // the legacy `IgnoreEmptyResponseDescription` toggle is moot — but
         // we still flag a present-but-empty value (the field was set so it
@@ -247,6 +251,7 @@ impl ValidateWithContext<Spec> for Response {
 
 impl ValidateWithContext<Spec> for Responses {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         // Per the OAS 3.2 JSON Schema, a Responses Object satisfies the
         // anyOf with either a `default` entry OR at least one status-code /
         // wildcard entry. Both shapes are valid; only an entirely empty
@@ -680,10 +685,25 @@ mod tests {
     #[test]
     fn responses_out_of_range_status_code_rejected() {
         // A 3-digit number outside 100-599 (e.g. 600) is not a valid status code.
-        // The key 600 is neither a valid code nor a wildcard, so it should error.
+        // It is captured in `extensions` and rejected at validation time.
         let json = serde_json::json!({ "600": {"description": "bad"} });
-        let result = serde_json::from_value::<Responses>(json);
-        assert!(result.is_err(), "out-of-range code should fail to parse");
+        let parsed: Responses = serde_json::from_value(json).unwrap();
+        assert!(parsed.responses.is_none());
+        assert!(
+            parsed
+                .extensions
+                .as_ref()
+                .is_some_and(|e| e.contains_key("600"))
+        );
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        parsed.validate_with_context(&mut ctx, "r".into());
+        assert!(
+            ctx.errors
+                .mentions_all(&["r.600", "not a field of this object"]),
+            "expected unknown-field error, got: {:?}",
+            ctx.errors
+        );
     }
 
     #[test]
@@ -709,10 +729,28 @@ mod tests {
 
     #[test]
     fn responses_deserialize_unknown_field_rejected() {
-        // A key that's neither "default", "x-...", nor a valid status code.
-        let raw = r#"{"badKey": {"description": "a"}}"#;
-        let result = serde_json::from_str::<Responses>(raw);
-        assert!(result.is_err(), "unknown field should fail");
+        // A key that's neither "default", "x-...", nor a valid status code is
+        // captured in `extensions` and reported during validation.
+        let raw = r#"{"200": {"description": "ok"}, "badKey": {"description": "a"}}"#;
+        let parsed: Responses = serde_json::from_str(raw).unwrap();
+        assert!(
+            parsed
+                .extensions
+                .as_ref()
+                .is_some_and(|e| e.contains_key("badKey"))
+        );
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        parsed.validate_with_context(&mut ctx, "r".into());
+        assert!(
+            ctx.errors
+                .mentions_all(&["r.badKey", "not a field of this object"]),
+            "expected unknown-field error, got: {:?}",
+            ctx.errors
+        );
+        let mut ignored = Context::new(&spec, Options::IgnoreUnknownFields.into());
+        parsed.validate_with_context(&mut ignored, "r".into());
+        assert!(ignored.errors.is_empty(), "errors: {:?}", ignored.errors);
     }
 
     #[test]
@@ -888,20 +926,15 @@ mod tests {
 
     #[test]
     fn responses_extensions_serialize() {
-        // line 144: the closing `}` of `if k.starts_with("x-")` — the false branch
-        // is hit when an extension key does NOT start with "x-" and is filtered out.
         let mut extensions = std::collections::BTreeMap::new();
         extensions.insert("x-custom".to_owned(), serde_json::json!("value"));
-        extensions.insert("not-x-prefix".to_owned(), serde_json::json!("filtered")); // false branch
+        extensions.insert("not-x-prefix".to_owned(), serde_json::json!("preserved"));
         let resp = Responses {
             extensions: Some(extensions),
             ..Default::default()
         };
         let val = serde_json::to_value(&resp).unwrap();
-        // The "x-" key should be present; the non-"x-" key filtered out.
         assert_eq!(val["x-custom"], "value");
-        let obj = val.as_object().unwrap();
-        assert!(obj.contains_key("x-custom"));
-        assert!(!obj.contains_key("not-x-prefix"));
+        assert_eq!(val["not-x-prefix"], "preserved");
     }
 }

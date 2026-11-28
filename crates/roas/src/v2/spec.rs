@@ -2,6 +2,7 @@
 
 use crate::common::helpers::{
     validate_not_visited, validate_optional_string_matches, validate_unique_by,
+    validate_unknown_fields,
 };
 use crate::common::reference::RefOr;
 use crate::common::reference::ResolveReference;
@@ -191,6 +192,9 @@ pub struct Spec {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -340,7 +344,8 @@ pub struct Server {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
-    /// Allows extensions on the server extension object.
+    /// Additional fields on the `x-servers` vendor-extension payload.
+    /// Kept verbatim so the document round-trips; not reported as unknown OpenAPI fields.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -356,7 +361,8 @@ pub struct TagGroup {
     /// **Required** The tags included in the group.
     pub tags: Vec<String>,
 
-    /// Allows extensions on the tag group extension object.
+    /// Additional fields on the `x-tagGroups` vendor-extension payload.
+    /// Kept verbatim so the document round-trips; not reported as unknown OpenAPI fields.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -573,6 +579,7 @@ impl Spec {
             Some(l) => Context::new(self, options).with_loader(l),
             None => Context::new(self, options),
         };
+        validate_unknown_fields(&self.extensions, &mut ctx, "#");
 
         self.swagger
             .validate_with_context(&mut ctx, "#.swagger".to_owned());
@@ -697,12 +704,16 @@ impl Validate for Spec {
 
 impl ValidateWithContext<Spec> for Server {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // `x-servers` is a vendor-extension payload, so additional keys
+        // (e.g. Redoc's `variables`) are preserved without unknown-field errors.
         crate::common::helpers::validate_required_string(&self.url, ctx, format!("{path}.url"));
     }
 }
 
 impl ValidateWithContext<Spec> for TagGroup {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // `x-tagGroups` is a vendor-extension payload, so additional keys
+        // (e.g. Redoc's `description`) are preserved without unknown-field errors.
         crate::common::helpers::validate_required_string(&self.name, ctx, format!("{path}.name"));
         for (i, tag) in self.tags.iter().enumerate() {
             crate::common::helpers::validate_required_string(tag, ctx, format!("{path}.tags[{i}]"));

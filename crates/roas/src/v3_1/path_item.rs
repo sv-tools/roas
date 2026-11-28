@@ -1,5 +1,6 @@
 //! Path Items
 
+use crate::common::helpers::validate_unknown_fields;
 use crate::common::reference::RefOr;
 use crate::v3_1::operation::Operation;
 use crate::v3_1::parameter::Parameter;
@@ -87,6 +88,9 @@ pub struct PathItem {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
@@ -123,9 +127,7 @@ impl Serialize for PathItem {
 
         if let Some(ref ext) = self.extensions {
             for (k, v) in ext {
-                if k.starts_with("x-") {
-                    map.serialize_entry(&k, &v)?;
-                }
+                map.serialize_entry(&k, &v)?;
             }
         }
 
@@ -168,6 +170,14 @@ impl<'de> Deserialize<'de> for PathItem {
             where
                 V: MapAccess<'de>,
             {
+                // OAS 3.1.2 fixes the Operation field set to these eight
+                // lowercase method names. Field names are case-sensitive:
+                // `GET` is not a fixed field and is captured as an unknown
+                // key in `extensions` for validation to report.
+                const HTTP_METHODS: &[&str] = &[
+                    "get", "put", "post", "delete", "options", "head", "patch", "trace",
+                ];
+
                 let mut res = PathItem::default();
                 let mut operations: BTreeMap<String, Operation> = BTreeMap::new();
                 let mut extensions: BTreeMap<String, serde_json::Value> = BTreeMap::new();
@@ -197,25 +207,16 @@ impl<'de> Deserialize<'de> for PathItem {
                             return Err(Error::duplicate_field("servers"));
                         }
                         res.servers = Some(map.next_value()?);
-                    } else if key.starts_with("x-") {
-                        if extensions.contains_key(key.clone().as_str()) {
-                            return Err(Error::custom(format!("duplicate field '{key}'")));
-                        }
-                        extensions.insert(key, map.next_value()?);
-                    } else {
-                        // OAS 3.1.2 fixes the Operation field set to these
-                        // eight lowercase method names. Field names are
-                        // case-sensitive: `GET` is not a fixed field.
-                        const HTTP_METHODS: &[&str] = &[
-                            "get", "put", "post", "delete", "options", "head", "patch", "trace",
-                        ];
-                        if !HTTP_METHODS.contains(&key.as_str()) {
-                            return Err(Error::unknown_field(key.as_str(), FIELDS));
-                        }
+                    } else if HTTP_METHODS.contains(&key.as_str()) {
                         if operations.contains_key(key.as_str()) {
                             return Err(Error::custom(format!("duplicate field '{key}'")));
                         }
                         operations.insert(key, map.next_value()?);
+                    } else {
+                        if extensions.contains_key(key.as_str()) {
+                            return Err(Error::custom(format!("duplicate field '{key}'")));
+                        }
+                        extensions.insert(key, map.next_value()?);
                     }
                 }
                 if !operations.is_empty() {
@@ -234,6 +235,7 @@ impl<'de> Deserialize<'de> for PathItem {
 
 impl ValidateWithContext<Spec> for PathItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         if let Some(r) = &self.reference {
             if r.is_empty() {
                 ctx.error(path.clone(), ".$ref: must not be empty");
@@ -741,12 +743,25 @@ mod tests {
     #[test]
     fn unknown_method_key_rejected() {
         let raw = r#"{"gett": {"responses": {"200": {"description": "ok"}}}}"#;
-        let err = serde_json::from_str::<PathItem>(raw).expect_err("expected unknown-field error");
-        let msg = err.to_string();
+        let pi: PathItem = serde_json::from_str(raw).unwrap();
+        assert!(pi.operations.is_none());
         assert!(
-            msg.contains("gett") && msg.contains("unknown field"),
-            "unexpected error: {msg}"
+            pi.extensions
+                .as_ref()
+                .is_some_and(|e| e.contains_key("gett"))
         );
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .mentions_all(&["p.gett", "not a field of this object"]),
+            "unexpected errors: {:?}",
+            ctx.errors
+        );
+        let mut ignored = Context::new(&spec, Options::IgnoreUnknownFields.into());
+        pi.validate_with_context(&mut ignored, "p".into());
+        assert!(ignored.errors.is_empty(), "errors: {:?}", ignored.errors);
     }
 
     #[test]
@@ -879,11 +894,16 @@ mod tests {
     #[test]
     fn uppercase_method_rejected() {
         let raw = r#"{"GET": {"responses": {"200": {"description": "ok"}}}}"#;
-        let err = serde_json::from_str::<PathItem>(raw)
-            .expect_err("expected unknown-field error for uppercase method");
+        let pi: PathItem = serde_json::from_str(raw).unwrap();
+        assert!(pi.operations.is_none());
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
         assert!(
-            err.to_string().contains("unknown field") && err.to_string().contains("GET"),
-            "unexpected error: {err}"
+            ctx.errors
+                .mentions_all(&["p.GET", "not a field of this object"]),
+            "unexpected errors: {:?}",
+            ctx.errors
         );
     }
 
@@ -910,9 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn path_item_serialize_extension_non_x_key_filtered() {
-        // PathItem serializer filters out extension keys that do not start with "x-".
-        // This exercises line 128 (closing brace of the `if k.starts_with("x-")` guard).
+    fn path_item_serialize_extension_non_x_key_round_trips() {
         let mut ext = BTreeMap::new();
         ext.insert("not-an-ext".to_owned(), serde_json::Value::Bool(true));
         ext.insert("x-real".to_owned(), serde_json::Value::Bool(false));
@@ -921,15 +939,8 @@ mod tests {
             ..Default::default()
         };
         let v = serde_json::to_value(&pi).unwrap();
-        // "x-real" must be present; "not-an-ext" must be filtered out.
-        assert!(
-            v.get("x-real").is_some(),
-            "x- key should be serialized: {v}"
-        );
-        assert!(
-            v.get("not-an-ext").is_none(),
-            "non-x- key should be filtered: {v}"
-        );
+        assert_eq!(v["x-real"], false);
+        assert_eq!(v["not-an-ext"], true);
     }
 
     #[test]

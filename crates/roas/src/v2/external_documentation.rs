@@ -1,6 +1,6 @@
 //! External Documentation Object
 
-use crate::common::helpers::validate_required_url;
+use crate::common::helpers::{validate_required_url, validate_unknown_fields};
 use crate::v2::spec::Spec;
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,9 @@ pub struct ExternalDocumentation {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -35,6 +38,7 @@ pub struct ExternalDocumentation {
 
 impl ValidateWithContext<Spec> for ExternalDocumentation {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         if self.url.is_empty()
             && ctx.is_option(crate::validation::Options::IgnoreEmptyExternalDocumentationUrl)
         {

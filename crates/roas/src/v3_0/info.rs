@@ -2,6 +2,7 @@
 
 use crate::common::helpers::{
     validate_email, validate_optional_url, validate_required_string, validate_required_url,
+    validate_unknown_fields,
 };
 use crate::v3_0::spec::Spec;
 use crate::validation::Options;
@@ -62,6 +63,9 @@ pub struct Info {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,6 +100,9 @@ pub struct Contact {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,6 +132,9 @@ pub struct License {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -150,7 +160,8 @@ pub struct Logo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub href: Option<String>,
 
-    /// Allows extensions on the logo extension object.
+    /// Additional fields on the `x-logo` vendor-extension payload.
+    /// Kept verbatim so the document round-trips; not reported as unknown OpenAPI fields.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -159,6 +170,7 @@ pub struct Logo {
 
 impl ValidateWithContext<Spec> for Info {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         if !ctx.is_option(Options::IgnoreEmptyInfoTitle) {
             validate_required_string(&self.title, ctx, format!("{path}.title"));
         }
@@ -182,6 +194,7 @@ impl ValidateWithContext<Spec> for Info {
 
 impl ValidateWithContext<Spec> for Contact {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_optional_url(&self.url, ctx, format!("{path}.url"));
         validate_email(&self.email, ctx, format!("{path}.email"));
     }
@@ -189,6 +202,7 @@ impl ValidateWithContext<Spec> for Contact {
 
 impl ValidateWithContext<Spec> for License {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         validate_optional_url(&self.url, ctx, format!("{path}.url"));
     }
@@ -196,6 +210,8 @@ impl ValidateWithContext<Spec> for License {
 
 impl ValidateWithContext<Spec> for Logo {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // `x-logo` is a vendor-extension payload, so additional keys are
+        // preserved without unknown-field errors.
         // Single helper: empties → "must not be empty", non-URLs → "must be a valid URL".
         validate_required_url(&self.url, ctx, format!("{path}.url"));
         validate_optional_url(&self.href, ctx, format!("{path}.href"));

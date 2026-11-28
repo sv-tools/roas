@@ -1,5 +1,6 @@
 //! Represents a possible design-time link for a response
 
+use crate::common::helpers::validate_unknown_fields;
 use crate::v3_2::server::Server;
 use crate::v3_2::spec::Spec;
 use crate::validation::Options;
@@ -462,6 +463,9 @@ pub struct Link {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -470,6 +474,7 @@ pub struct Link {
 
 impl ValidateWithContext<Spec> for Link {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         // Spec: a Link MUST identify the linked operation via operationRef
         // or operationId, and the two are mutually exclusive.
         match (&self.operation_ref, &self.operation_id) {

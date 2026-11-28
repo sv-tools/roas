@@ -5,6 +5,7 @@
 //! crate-internal helpers.
 
 use regex::Regex;
+use std::collections::BTreeMap;
 #[cfg(feature = "v2")]
 use std::collections::HashSet;
 
@@ -110,6 +111,39 @@ pub fn validate_required_url<T>(url: &String, ctx: &mut Context<T>, path: String
     // TODO: Consider using a more robust URL validation library.
     if !url.starts_with(HTTP) && !url.starts_with(HTTPS) {
         ctx.error(path, format_args!("must be a valid URL, found `{url}`"));
+    }
+}
+
+/// Reports every key `extensions` holds that is not an `x-` extension: a key the object does not
+/// define, which the specification does not allow. Parsing keeps such keys (see
+/// [`crate::common::extensions`]) so that this check can see them.
+pub fn validate_unknown_fields<T>(
+    extensions: &Option<BTreeMap<String, serde_json::Value>>,
+    ctx: &mut Context<T>,
+    path: &str,
+) {
+    validate_unknown_fields_allowing(extensions, &[], ctx, path);
+}
+
+/// Like [`validate_unknown_fields`], but also permits any key listed in `allowed`
+/// (used for OAS 2.0 object types whose Rust model splits one specification object across
+/// per-type structs).
+pub fn validate_unknown_fields_allowing<T>(
+    extensions: &Option<BTreeMap<String, serde_json::Value>>,
+    allowed: &[&str],
+    ctx: &mut Context<T>,
+    path: &str,
+) {
+    if ctx.is_option(Options::IgnoreUnknownFields) {
+        return;
+    }
+    for key in crate::common::extensions::unknown_fields(extensions) {
+        if !allowed.contains(&key) {
+            ctx.error(
+                format!("{path}.{key}"),
+                "not a field of this object; only `x-` extensions may be added",
+            );
+        }
     }
 }
 

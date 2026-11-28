@@ -62,6 +62,10 @@ impl TryFrom<V2Spec> for V3Spec {
 
     /// The v2.0 description as v3.0.
     ///
+    /// Unknown (non-`x-`) keys on non-schema objects are stripped silently
+    /// before converting; validate the source `Spec` first if you want them
+    /// reported.
+    ///
     /// # Errors
     ///
     /// [`ConversionError`] when the transformed document does not fit the v3.0 model.
@@ -102,11 +106,15 @@ fn transform_spec(spec: &mut Value) {
         .collect();
     // A non-empty `x-servers` (Redoc extension) wins; empty or absent
     // falls back to assembling from host/basePath/schemes so users
-    // don't lose their server info to an empty list.
+    // don't lose their server info to an empty list. Because `x-servers`
+    // is a vendor-extension payload, sanitize each promoted entry so
+    // non-OAS fields or wrongly-typed `variables` cannot break v3.0
+    // deserialization or validation.
     let x_servers = obj.remove("x-servers");
     let promoted_x_servers = match x_servers {
         Some(Value::Array(arr)) if !arr.is_empty() => {
-            obj.insert("servers".into(), Value::Array(arr));
+            let sanitized: Vec<Value> = arr.into_iter().map(sanitize_promoted_server).collect();
+            obj.insert("servers".into(), Value::Array(sanitized));
             true
         }
         _ => false,
@@ -769,6 +777,17 @@ fn build_form_request_body(form_params: Vec<Value>, consumes: &[String]) -> Opti
         }
         if p_obj.get("type").and_then(|v| v.as_str()) == Some("file") {
             // multipart form file → schema { type: string, format: binary }.
+            // `FileParameter` does not type string-only OAS 2.0 keywords, so
+            // drop any cross-type values that would fail `v3_0::StringSchema`
+            // deserialization.
+            p_obj.retain(|k, v| match k.as_str() {
+                "maxLength" | "minLength" => v.as_u64().is_some(),
+                "pattern" | "default" => v.is_string(),
+                "enum" => v
+                    .as_array()
+                    .is_some_and(|arr| arr.iter().all(Value::is_string)),
+                _ => true,
+            });
             p_obj.insert("type".into(), Value::String("string".into()));
             p_obj.insert("format".into(), Value::String("binary".into()));
         }
@@ -1039,6 +1058,66 @@ fn walk_schema_object(
             _ => walk(v, body_param_names, form_param_names, Pos::Generic),
         }
     }
+    // Cross-type OAS 2.0 keywords (e.g. `allOf: 5` or `discriminator: 5` on a
+    // `type: string` schema) are valid in v2 `extensions`, but `v3_0::Schema`
+    // routes any object with `allOf` to `AllOfSchema` and strongly types
+    // `discriminator`. Drop values that do not fit v3.0, and strip unknown
+    // keys from any object-shaped `discriminator`.
+    if let Some(v) = obj.get("allOf")
+        && serde_json::from_value::<Vec<crate::common::reference::RefOr<crate::v3_0::schema::Schema>>>(
+            v.clone(),
+        )
+        .is_err()
+    {
+        obj.remove("allOf");
+    }
+    if let Some(v) = obj.get_mut("discriminator") {
+        if let Ok(mut d) =
+            serde_json::from_value::<crate::v3_0::discriminator::Discriminator>(v.clone())
+        {
+            crate::common::extensions::retain_extensions_only(&mut d.extensions);
+            if let Ok(clean) = serde_json::to_value(d) {
+                *v = clean;
+            }
+        } else {
+            obj.remove("discriminator");
+        }
+    }
+}
+
+/// Sanitize a promoted `x-servers` entry so it fits `v3_0::server::Server`
+/// cleanly: keep `url`, string `description`, `x-*` extensions, and `variables`
+/// only when it deserializes as `BTreeMap<String, ServerVariable>` (with
+/// non-`x-` keys stripped from each variable).
+fn sanitize_promoted_server(value: Value) -> Value {
+    let Value::Object(mut map) = value else {
+        return value;
+    };
+    let mut clean = Map::new();
+    if let Some(url) = map.remove("url") {
+        clean.insert("url".into(), url);
+    }
+    if let Some(desc @ Value::String(_)) = map.remove("description") {
+        clean.insert("description".into(), desc);
+    }
+    if let Some(vars_val) = map.remove("variables")
+        && let Ok(mut vars) = serde_json::from_value::<
+            std::collections::BTreeMap<String, crate::v3_0::server::ServerVariable>,
+        >(vars_val)
+    {
+        for var in vars.values_mut() {
+            crate::common::extensions::retain_extensions_only(&mut var.extensions);
+        }
+        if let Ok(sanitized) = serde_json::to_value(vars) {
+            clean.insert("variables".into(), sanitized);
+        }
+    }
+    for (k, v) in map {
+        if is_extension_key(&k) {
+            clean.insert(k, v);
+        }
+    }
+    Value::Object(clean)
 }
 
 /// Walker for draft-04 `dependencies`. Each entry's value is either

@@ -99,7 +99,7 @@ unused-responses, unused-server-variables, unused-examples,
 unused-request-bodies, unused-headers, unused-security-schemes,
 unused-links, unused-callbacks, unused-media-types,
 empty-info-title, empty-info-version, empty-response-description,
-empty-external-documentation-url
+empty-external-documentation-url, unknown-fields
 ```
 
 Run `roas openapi validate --help` for descriptions of each check.

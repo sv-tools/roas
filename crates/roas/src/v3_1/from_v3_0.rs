@@ -56,6 +56,10 @@ impl TryFrom<V30Spec> for V31Spec {
 
     /// The v3.0 description as v3.1.
     ///
+    /// Unknown (non-`x-`) keys on non-schema objects are stripped silently
+    /// before converting; validate the source `Spec` first if you want them
+    /// reported.
+    ///
     /// # Errors
     ///
     /// [`ConversionError`] when the transformed document does not fit the v3.1 model.
@@ -247,8 +251,26 @@ fn walk_generic_object(obj: &mut Map<String, Value>) {
 fn drop_keywords_v3_1_cannot_hold(obj: &mut Map<String, Value>) {
     obj.retain(|k, v| match k.as_str() {
         "examples" => v.is_array(),
-        "externalDocs" => fits::<ExternalDocumentation>(v),
-        "discriminator" => fits::<Discriminator>(v),
+        "externalDocs" => match <ExternalDocumentation as serde::Deserialize>::deserialize(&*v) {
+            Ok(mut docs) => {
+                crate::common::extensions::retain_extensions_only(&mut docs.extensions);
+                if let Ok(clean) = serde_json::to_value(docs) {
+                    *v = clean;
+                }
+                true
+            }
+            Err(_) => false,
+        },
+        "discriminator" => match <Discriminator as serde::Deserialize>::deserialize(&*v) {
+            Ok(mut disc) => {
+                crate::common::extensions::retain_extensions_only(&mut disc.extensions);
+                if let Ok(clean) = serde_json::to_value(disc) {
+                    *v = clean;
+                }
+                true
+            }
+            Err(_) => false,
+        },
         "patternProperties" => v
             .as_object()
             .is_some_and(|map| map.values().all(|sub| sub.is_object() || sub.is_boolean())),
@@ -256,11 +278,6 @@ fn drop_keywords_v3_1_cannot_hold(obj: &mut Map<String, Value>) {
         "unevaluatedProperties" => v.is_object() || v.is_boolean(),
         _ => true,
     });
-}
-
-/// Whether `value` deserializes as a `T`.
-fn fits<T: serde::de::DeserializeOwned>(value: &Value) -> bool {
-    T::deserialize(value).is_ok()
 }
 
 /// Per OAS / JSON Schema, fields with the `x-` prefix are

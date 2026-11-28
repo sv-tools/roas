@@ -307,6 +307,21 @@ pub enum Options {
     /// Ignore empty ExternalDocumentation.URL field.
     /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreEmptyExternalDocumentationUrl,
+
+    /// Ignore keys an object does not define: neither one of its fields nor an `x-`
+    /// Specification Extension.
+    ///
+    /// Schemas of v3.0 and later are exempt (their keywords are preserved via
+    /// `common::schema_keywords` — OAS 3.1/3.2 allow arbitrary JSON Schema keywords, and
+    /// v3.0 schemas share the same keyword-preservation policy). Vendor-extension payload
+    /// objects (`x-servers`, `x-tagGroups`, `x-logo`, `x-codeSamples`, `x-badges`) are also
+    /// exempt because any JSON shape is allowed inside an `x-*` extension. Note that
+    /// [`Ref`](crate::common::reference::Ref) rejects unknown sibling keys during
+    /// deserialization rather than validation, so this option does not apply to it; OAS 2.0
+    /// and 3.0 `PathItem` treat unrecognized non-`x-` keys as custom HTTP methods rather than
+    /// unknown fields.
+    /// Applies for v2.0, v3.0, v3.1, v3.2
+    IgnoreUnknownFields,
 }
 
 /// `clap::ValueEnum` impl for [`Options`], available behind the `clap` Cargo
@@ -339,6 +354,7 @@ impl clap::ValueEnum for Options {
             Options::IgnoreEmptyInfoVersion,
             Options::IgnoreEmptyResponseDescription,
             Options::IgnoreEmptyExternalDocumentationUrl,
+            Options::IgnoreUnknownFields,
         ]
     }
 
@@ -427,6 +443,10 @@ impl clap::ValueEnum for Options {
             Options::IgnoreEmptyExternalDocumentationUrl => (
                 "empty-external-documentation-url",
                 "Allow empty `externalDocs.url` (v2.0, v3.0, v3.1, v3.2)",
+            ),
+            Options::IgnoreUnknownFields => (
+                "unknown-fields",
+                "Allow keys an object does not define, other than `x-` extensions (v2.0, v3.0, v3.1, v3.2)",
             ),
         };
         Some(clap::builder::PossibleValue::new(name).help(help))

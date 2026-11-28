@@ -45,6 +45,10 @@ impl TryFrom<V31Spec> for V32Spec {
 
     /// The v3.1 description as v3.2.
     ///
+    /// Unknown (non-`x-`) keys on non-schema objects are stripped silently
+    /// before converting; validate the source `Spec` first if you want them
+    /// reported.
+    ///
     /// # Errors
     ///
     /// [`ConversionError`] when the transformed document does not fit the v3.2 model.
@@ -136,16 +140,17 @@ fn apply_tag_groups(spec: &mut Map<String, Value>, groups: Vec<Value>) {
             .collect();
 
         // Synthesise (or update) the group tag itself with `kind: nav`.
-        // Any leftover keys on the group object (typically `x-*`
-        // Specification Extensions; v3.1's `TagGroup` flattens them
-        // via serde) migrate onto the group tag so vendor metadata
-        // round-trips through `v3_2::Tag.extensions`. Existing keys
-        // on the target tag win.
+        // Migrate `x-*` Specification Extensions and a string `description`
+        // (Redoc's `x-tagGroups[].description`) onto the group tag. Other
+        // vendor-specific keys are left behind because `v3_2::Tag` is a
+        // native OpenAPI object. Existing keys on the target tag win.
         let group_idx = ensure_tag(&mut tags, &mut by_name, &group_name);
         if let Value::Object(t) = &mut tags[group_idx] {
             t.entry("kind").or_insert(Value::String("nav".to_owned()));
             for (k, v) in g {
-                t.entry(k).or_insert(v);
+                if k.starts_with("x-") || (k == "description" && v.is_string()) {
+                    t.entry(k).or_insert(v);
+                }
             }
         }
 
@@ -286,13 +291,13 @@ mod tests {
 
     #[test]
     fn x_display_name_does_not_clobber_existing_summary() {
-        // The typed v3.1 `Tag` drops fields it doesn't declare
-        // (`summary`, `parent`, `kind` are all v3.2 additions), so
-        // this "preserve existing X" case can't reach the converter
-        // through the `TryFrom<V31Spec>` path. Exercise the migration
-        // directly on hand-built JSON to pin down the defensive
-        // behaviour: `x-displayName` does NOT overwrite an existing
-        // `summary`.
+        // Conversion strips fields v3.1 `Tag` does not declare
+        // (`summary`, `parent`, `kind` are all v3.2 additions) before
+        // running the transform, so this "preserve existing X" case
+        // can't reach the converter through `TryFrom<V31Spec>`. Exercise
+        // the migration directly on hand-built JSON to pin down the
+        // defensive behaviour: `x-displayName` does NOT overwrite an
+        // existing `summary`.
         let mut tag = serde_json::json!({
             "name": "pets",
             "summary": "kept",
@@ -470,11 +475,11 @@ mod tests {
 
     #[test]
     fn x_tag_groups_preserves_existing_kind_on_group_tag() {
-        // The typed v3.1 `Tag` drops `kind` (v3.2 addition), so a
-        // pre-declared `kind` on the source can't reach the converter
-        // through the public API. Exercise `apply_tag_groups`
-        // directly with hand-built JSON to pin the defensive
-        // behaviour down.
+        // Conversion strips `kind` (a v3.2 addition) from v3.1 `Tag`
+        // before running the transform, so a pre-declared `kind` on the
+        // source can't reach the converter through the public API.
+        // Exercise `apply_tag_groups` directly with hand-built JSON to
+        // pin the defensive behaviour down.
         let mut spec = serde_json::json!({
             "tags": [{"name": "Products", "kind": "audience"}]
         });

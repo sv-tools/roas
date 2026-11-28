@@ -1,5 +1,6 @@
 //! Request Body Object
 
+use crate::common::helpers::validate_unknown_fields;
 use crate::v3_1::media_type::MediaType;
 use crate::v3_1::spec::Spec;
 use crate::validation::{Context, ValidateWithContext};
@@ -57,6 +58,9 @@ pub struct RequestBody {
     pub required: Option<bool>,
 
     /// `^x-` Specification Extensions.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,6 +69,7 @@ pub struct RequestBody {
 
 impl ValidateWithContext<Spec> for RequestBody {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields(&self.extensions, ctx, &path);
         for (k, v) in &self.content {
             v.validate_with_context(ctx, format!("{path}.content[{k}]"));
         }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::validate_pattern;
+use crate::common::helpers::{validate_pattern, validate_unknown_fields_allowing};
 use crate::v2::items::Items;
 use crate::v2::spec::Spec;
 use crate::validation::{Context, PushError, ValidateWithContext};
@@ -66,6 +66,9 @@ pub struct StringHeader {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -119,6 +122,9 @@ pub struct IntegerHeader {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,6 +178,9 @@ pub struct NumberHeader {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -193,6 +202,9 @@ pub struct BooleanHeader {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,6 +247,9 @@ pub struct ArrayHeader {
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    ///
+    /// Any other key the object does not define is kept here too, so the document round-trips;
+    /// validation reports it unless [`crate::validation::Options::IgnoreUnknownFields`] is set.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -253,8 +268,31 @@ impl ValidateWithContext<Spec> for Header {
     }
 }
 
+/// Fixed fields defined on the OAS 2.0 Header Object.
+pub(crate) const HEADER_KEYWORDS: &[&str] = &[
+    "collectionFormat",
+    "default",
+    "description",
+    "enum",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "format",
+    "items",
+    "maxItems",
+    "maxLength",
+    "maximum",
+    "minItems",
+    "minLength",
+    "minimum",
+    "multipleOf",
+    "pattern",
+    "type",
+    "uniqueItems",
+];
+
 impl ValidateWithContext<Spec> for StringHeader {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields_allowing(&self.extensions, HEADER_KEYWORDS, ctx, &path);
         if let Some(pattern) = &self.pattern {
             validate_pattern(pattern, ctx, format!("{path}.pattern"));
         }
@@ -263,22 +301,27 @@ impl ValidateWithContext<Spec> for StringHeader {
 
 impl ValidateWithContext<Spec> for IntegerHeader {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields_allowing(&self.extensions, HEADER_KEYWORDS, ctx, &path);
         crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path);
     }
 }
 
 impl ValidateWithContext<Spec> for NumberHeader {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields_allowing(&self.extensions, HEADER_KEYWORDS, ctx, &path);
         crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path);
     }
 }
 
 impl ValidateWithContext<Spec> for BooleanHeader {
-    fn validate_with_context(&self, _ctx: &mut Context<Spec>, _path: String) {}
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields_allowing(&self.extensions, HEADER_KEYWORDS, ctx, &path);
+    }
 }
 
 impl ValidateWithContext<Spec> for ArrayHeader {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_unknown_fields_allowing(&self.extensions, HEADER_KEYWORDS, ctx, &path);
         // Headers always use the `collectionFormat` enum (csv/ssv/tsv/pipes).
         // The `multi` variant is reserved for `query` / `formData` parameters.
         if let Some(fmt) = &self.collection_format
