@@ -198,9 +198,9 @@ pub(crate) struct AsyncApiValidateArgs {
     format: Option<InputFormat>,
 
     /// Adjust a validation check (repeatable). `empty-info-title`,
-    /// `empty-info-version` and `unused-channel-parameter` relax a
-    /// check; `external-reference` adds one, requiring the document to
-    /// be self-contained. Maps to
+    /// `empty-info-version`, `unused-channel-parameter`, and
+    /// `unknown-fields` relax a check; `external-reference` adds one,
+    /// requiring the document to be self-contained. Maps to
     /// `roas_asyncapi::validation::ValidationOptions`.
     #[arg(long, value_enum)]
     check: Vec<ValidationOptions>,
@@ -482,6 +482,8 @@ mod tests {
             "external-reference",
             "--check",
             "empty-info-title",
+            "--check",
+            "unknown-fields",
             "events.yaml",
         ])
         .unwrap();
@@ -491,6 +493,7 @@ mod tests {
                 vec![
                     ValidationOptions::ErrorOnExternalReference,
                     ValidationOptions::IgnoreEmptyInfoTitle,
+                    ValidationOptions::IgnoreUnknownFields,
                 ]
             ),
             AsyncApiCommand::Convert(_) => panic!("expected validate"),
@@ -609,6 +612,29 @@ mod tests {
             print: false,
         };
         run_asyncapi(AsyncApiCommand::Validate(relaxed)).expect("empty title is allowed");
+
+        // Unknown fields are rejected until `--check unknown-fields` is set.
+        let with_unknown = json!({
+            "asyncapi": "3.0.0",
+            "info": { "title": "T", "version": "1.0.0", "bogus": 1 },
+            "channels": { "c": { "address": "a" } }
+        });
+        let f2 = TempFile::write("unknown-field.json", &with_unknown);
+        let strict_unknown = AsyncApiValidateArgs {
+            file: Some(f2.0.clone()),
+            format: None,
+            check: vec![],
+            print: false,
+        };
+        run_asyncapi(AsyncApiCommand::Validate(strict_unknown)).unwrap_err();
+        let relaxed_unknown = AsyncApiValidateArgs {
+            file: Some(f2.0.clone()),
+            format: None,
+            check: vec![ValidationOptions::IgnoreUnknownFields],
+            print: false,
+        };
+        run_asyncapi(AsyncApiCommand::Validate(relaxed_unknown))
+            .expect("unknown field is allowed when ignored");
     }
 
     #[test]

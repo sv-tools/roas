@@ -25,6 +25,7 @@ pub struct ExternalDocumentation {
 impl ValidateWithContext for ExternalDocumentation {
     fn validate_with_context(&self, ctx: &mut Context) {
         ctx.require_non_empty("url", &self.url);
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

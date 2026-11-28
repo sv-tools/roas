@@ -78,6 +78,7 @@ impl ValidateWithContext for Parameter {
                 format!("`{default}` is not one of the values listed in `enum`"),
             );
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

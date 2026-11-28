@@ -107,6 +107,20 @@ pub enum ValidationOptions {
     /// Allow a channel parameter that is declared but never appears as
     /// a `{placeholder}` in the channel's `address`.
     IgnoreUnusedChannelParameter,
+    /// Ignore keys an object does not define: neither one of its fields
+    /// nor an `x-` Specification Extension.
+    ///
+    /// AsyncAPI `Schema` objects (`v2_6::Schema`, `v3_0::Schema`,
+    /// `v3_1::Schema`) are exempt because JSON Schema allows arbitrary
+    /// annotation and extension keywords (preserved in `extensions`),
+    /// though their nested `externalDocs` and subschemas are still
+    /// validated. Protocol [`Bindings`](crate::common::bindings::Bindings)
+    /// are untyped protocol maps and are not checked for unknown fields.
+    /// Note that [`Reference`](crate::common::reference::Reference)
+    /// ignores sibling keys during deserialization (per the AsyncAPI
+    /// Reference Object specification), so unknown keys beside `$ref`
+    /// are dropped rather than reported.
+    IgnoreUnknownFields,
 }
 
 #[cfg(feature = "clap")]
@@ -117,6 +131,7 @@ impl clap::ValueEnum for ValidationOptions {
             ValidationOptions::IgnoreEmptyInfoVersion,
             ValidationOptions::ErrorOnExternalReference,
             ValidationOptions::IgnoreUnusedChannelParameter,
+            ValidationOptions::IgnoreUnknownFields,
         ]
     }
 
@@ -135,6 +150,10 @@ impl clap::ValueEnum for ValidationOptions {
             ValidationOptions::IgnoreUnusedChannelParameter => (
                 "unused-channel-parameter",
                 "Allow channel parameters missing from the address",
+            ),
+            ValidationOptions::IgnoreUnknownFields => (
+                "unknown-fields",
+                "Allow keys an object does not define, other than `x-` extensions",
             ),
         };
         Some(clap::builder::PossibleValue::new(name).help(help))
@@ -271,6 +290,24 @@ impl Context {
                 }
             }
         });
+    }
+
+    /// Record an error for every key in `extensions` that is not an `x-`
+    /// Specification Extension, unless
+    /// [`ValidationOptions::IgnoreUnknownFields`] is set.
+    pub fn validate_unknown_fields(
+        &mut self,
+        extensions: &Option<BTreeMap<String, serde_json::Value>>,
+    ) {
+        if self.is_option(ValidationOptions::IgnoreUnknownFields) {
+            return;
+        }
+        for key in crate::common::extensions::unknown_fields(extensions) {
+            self.error_field(
+                key,
+                "not a field of this object; only `x-` extensions may be added",
+            );
+        }
     }
 
     fn push_field(&mut self, field: &str) {
@@ -412,6 +449,28 @@ mod tests {
         assert!(!is_valid_key(""));
         assert!(!is_valid_key("has space"));
         assert!(!is_valid_key("slash/key"));
+    }
+
+    #[test]
+    fn validate_unknown_fields_reports_non_x_keys_unless_ignored() {
+        let ext = Some(BTreeMap::from([
+            ("bogus".to_owned(), serde_json::json!(1)),
+            ("x-ok".to_owned(), serde_json::json!(2)),
+        ]));
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.info");
+        ctx.validate_unknown_fields(&ext);
+        assert_eq!(ctx.errors.len(), 1);
+        assert!(
+            ctx.errors[0]
+                == "#.info.bogus: not a field of this object; only `x-` extensions may be added"
+        );
+
+        let mut ignored = Context::with_path(
+            EnumSet::only(ValidationOptions::IgnoreUnknownFields),
+            "#.info",
+        );
+        ignored.validate_unknown_fields(&ext);
+        assert!(ignored.errors.is_empty());
     }
 }
 

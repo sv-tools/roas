@@ -206,6 +206,11 @@ impl fmt::Display for NoteKind {
 /// The conversion always produces a document; the report says what it
 /// had to invent or leave behind. An empty report means nothing was
 /// lost — see [`ConversionReport::is_clean`].
+///
+/// Unknown (non-`x-`) keys on non-schema objects are stripped silently
+/// during conversion while `x-` Specification Extensions and JSON Schema
+/// keywords on `Schema` objects are preserved; validate the source
+/// `Document` first if you want unknown fields reported.
 #[must_use]
 pub fn convert(document: v2_6::Document) -> (v3_0::Document, ConversionReport) {
     let mut conversion = Conversion::new(&document);
@@ -668,7 +673,7 @@ impl Conversion {
             components: document
                 .components
                 .map(|components| self.components(components)),
-            extensions: document.extensions,
+            extensions: strip_unknown(document.extensions),
         }
     }
 
@@ -683,18 +688,20 @@ impl Conversion {
             version: info.version,
             description: info.description,
             terms_of_service: info.terms_of_service,
-            contact: info
-                .contact
-                .and_then(|contact| self.reinterpret("#.info.contact", &contact)),
-            license: info
-                .license
-                .and_then(|license| self.reinterpret("#.info.license", &license)),
+            contact: info.contact.and_then(|mut contact| {
+                crate::common::extensions::retain_extensions_only(&mut contact.extensions);
+                self.reinterpret("#.info.contact", &contact)
+            }),
+            license: info.license.and_then(|mut license| {
+                crate::common::extensions::retain_extensions_only(&mut license.extensions);
+                self.reinterpret("#.info.license", &license)
+            }),
             tags: tags
                 .into_iter()
                 .map(|tag| RefOr::Item(self.tag(tag)))
                 .collect(),
             external_docs: external_docs.map(|docs| RefOr::Item(external_documentation(docs))),
-            extensions: info.extensions,
+            extensions: strip_unknown(info.extensions),
         }
     }
 
@@ -734,15 +741,16 @@ impl Conversion {
                 .collect(),
             external_docs: None,
             bindings: self.bindings(at, server.bindings),
-            extensions: server.extensions,
+            extensions: strip_unknown(server.extensions),
         }
     }
 
     fn server_variable(
         &mut self,
         at: &str,
-        variable: v2_6::ServerVariable,
+        mut variable: v2_6::ServerVariable,
     ) -> v3_0::ServerVariable {
+        crate::common::extensions::retain_extensions_only(&mut variable.extensions);
         self.reinterpret(at, &variable).unwrap_or_default()
     }
 
@@ -784,7 +792,26 @@ impl Conversion {
     /// v3 renamed an OAuth flow's `scopes` to `availableScopes`, and
     /// made it required — a scheme that crossed over as-is would leave
     /// an invalid document behind.
-    fn security_scheme(&mut self, at: &str, scheme: v2_6::SecurityScheme) -> v3_0::SecurityScheme {
+    fn security_scheme(
+        &mut self,
+        at: &str,
+        mut scheme: v2_6::SecurityScheme,
+    ) -> v3_0::SecurityScheme {
+        crate::common::extensions::retain_extensions_only(&mut scheme.extensions);
+        if let Some(flows) = &mut scheme.flows {
+            crate::common::extensions::retain_extensions_only(&mut flows.extensions);
+            for flow in [
+                flows.implicit.as_mut(),
+                flows.password.as_mut(),
+                flows.client_credentials.as_mut(),
+                flows.authorization_code.as_mut(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                crate::common::extensions::retain_extensions_only(&mut flow.extensions);
+            }
+        }
         let Ok(mut value) = serde_json::to_value(&scheme) else {
             self.note(
                 at,
@@ -868,7 +895,7 @@ impl Conversion {
                 .external_docs
                 .map(|docs| RefOr::Item(external_documentation(docs))),
             bindings: self.bindings(at, operation_trait.bindings),
-            extensions: operation_trait.extensions,
+            extensions: strip_unknown(operation_trait.extensions),
         }
     }
 
@@ -891,7 +918,8 @@ impl Conversion {
                 .headers
                 .and_then(|headers| self.schema(at, "headers", &headers, None)),
             correlation_id: message_trait.correlation_id.map(|correlation_id| {
-                self.ref_or(at, correlation_id, |this, at, item| {
+                self.ref_or(at, correlation_id, |this, at, mut item| {
+                    crate::common::extensions::retain_extensions_only(&mut item.extensions);
                     this.reinterpret(at, &item).unwrap_or_default()
                 })
             }),
@@ -913,9 +941,12 @@ impl Conversion {
             examples: message_trait
                 .examples
                 .into_iter()
-                .filter_map(|example| self.reinterpret(at, &example))
+                .filter_map(|mut example| {
+                    crate::common::extensions::retain_extensions_only(&mut example.extensions);
+                    self.reinterpret(at, &example)
+                })
                 .collect(),
-            extensions: message_trait.extensions,
+            extensions: strip_unknown(message_trait.extensions),
         }
     }
 
@@ -926,7 +957,7 @@ impl Conversion {
             external_docs: tag
                 .external_docs
                 .map(|docs| RefOr::Item(external_documentation(docs))),
-            extensions: tag.extensions,
+            extensions: strip_unknown(tag.extensions),
         }
     }
 
@@ -959,7 +990,10 @@ impl Conversion {
                 || item.description.is_some()
                 || item.deprecated.is_some()
                 || item.bindings.is_some()
-                || item.extensions.is_some()
+                || item
+                    .extensions
+                    .as_ref()
+                    .is_some_and(|e| e.keys().any(|k| crate::common::extensions::is_extension(k)))
                 || !item.parameters.is_empty()
                 || !item.servers.is_empty()
             {
@@ -1023,7 +1057,7 @@ impl Conversion {
             tags: Vec::new(),
             external_docs: None,
             bindings: self.bindings(at, item.bindings),
-            extensions: item.extensions,
+            extensions: strip_unknown(item.extensions),
         };
         (RefOr::Item(channel), operations)
     }
@@ -1034,7 +1068,7 @@ impl Conversion {
         let mut converted = v3_0::Parameter {
             description: parameter.description,
             location: parameter.location,
-            extensions: parameter.extensions,
+            extensions: strip_unknown(parameter.extensions),
             ..v3_0::Parameter::default()
         };
         let Some(schema) = parameter.schema else {
@@ -1167,7 +1201,7 @@ impl Conversion {
                 .external_docs
                 .map(|docs| RefOr::Item(external_documentation(docs))),
             bindings: self.bindings(at, operation.bindings),
-            extensions: operation.extensions,
+            extensions: strip_unknown(operation.extensions),
         };
         (key, converted)
     }
@@ -1264,7 +1298,8 @@ impl Conversion {
                 self.schema(at, "payload", &payload, message.schema_format.as_deref())
             }),
             correlation_id: message.correlation_id.map(|correlation_id| {
-                self.ref_or(at, correlation_id, |this, at, item| {
+                self.ref_or(at, correlation_id, |this, at, mut item| {
+                    crate::common::extensions::retain_extensions_only(&mut item.extensions);
                     this.reinterpret(at, &item).unwrap_or_default()
                 })
             }),
@@ -1286,14 +1321,17 @@ impl Conversion {
             examples: message
                 .examples
                 .into_iter()
-                .filter_map(|example| self.reinterpret(at, &example))
+                .filter_map(|mut example| {
+                    crate::common::extensions::retain_extensions_only(&mut example.extensions);
+                    self.reinterpret(at, &example)
+                })
                 .collect(),
             traits: message
                 .traits
                 .into_iter()
                 .map(|message_trait| self.ref_or(at, message_trait, Self::message_trait))
                 .collect(),
-            extensions: message.extensions,
+            extensions: strip_unknown(message.extensions),
         }
     }
 
@@ -1312,8 +1350,19 @@ impl Conversion {
             // way the document does, and v3 moved some of them. Another
             // dialect's `$ref` means whatever that dialect says.
             self.rewrite_in_schema(at, &mut value);
-            return match serde_json::from_value(value) {
-                Ok(schema) => Some(schema),
+            // Deserialize as `v3_0::SubSchema` rather than
+            // `RefOr<v3_0::SchemaOrMultiFormat>`: v2.6 has no Multi
+            // Format Schema Object, so a valid v2.6 schema carrying a
+            // custom `"schema"` keyword must stay a `Schema` rather
+            // than being misclassified as a `MultiFormatSchema`.
+            return match serde_json::from_value::<v3_0::SubSchema>(value) {
+                Ok(v3_0::SubSchema::Bool(b)) => {
+                    Some(RefOr::Item(v3_0::SchemaOrMultiFormat::Bool(b)))
+                }
+                Ok(v3_0::SubSchema::Schema(boxed)) => Some(match *boxed {
+                    RefOr::Reference(r) => RefOr::Reference(r),
+                    RefOr::Item(s) => RefOr::Item(v3_0::SchemaOrMultiFormat::Schema(Box::new(s))),
+                }),
                 Err(_) => {
                     self.note(at, NoteKind::NotConverted { what });
                     None
@@ -1423,7 +1472,8 @@ impl Conversion {
                     let at = format!("{at}.correlationIds.{name}");
                     (
                         name,
-                        self.ref_or(&at, correlation_id, |this, at, item| {
+                        self.ref_or(&at, correlation_id, |this, at, mut item| {
+                            crate::common::extensions::retain_extensions_only(&mut item.extensions);
                             this.reinterpret(at, &item).unwrap_or_default()
                         }),
                     )
@@ -1484,7 +1534,7 @@ impl Conversion {
                     (name, self.ref_or(&at, bindings, |_, _, b| b))
                 })
                 .collect(),
-            extensions: components.extensions,
+            extensions: strip_unknown(components.extensions),
         }
     }
 
@@ -1693,6 +1743,18 @@ impl Conversion {
                 | "if"
                 | "then"
                 | "else" => self.rewrite_in_schema(at, value),
+                // Strip unknown non-`x-` keys from `externalDocs` before
+                // deserializing into v3.0: v3.0 models `externalDocs` as
+                // `RefOr<ExternalDocumentation>`, so a stray `$ref` key
+                // would otherwise hijack deserialization or fail it.
+                "externalDocs" => {
+                    if let serde_json::Value::Object(docs) = value {
+                        docs.retain(|k, _| {
+                            matches!(k.as_str(), "url" | "description")
+                                || crate::common::extensions::is_extension(k)
+                        });
+                    }
+                }
                 // Anything else is the application's own data.
                 _ => {}
             }
@@ -1701,18 +1763,23 @@ impl Conversion {
 
     /// Re-read a value as its v3.0 counterpart, the two versions
     /// modelling it the same way.
-    fn reinterpret<A: Serialize, B: DeserializeOwned + Serialize>(
+    fn reinterpret<A: Serialize, B: DeserializeOwned + Serialize + HasExtensions>(
         &mut self,
         at: &str,
         value: &A,
     ) -> Option<B> {
         let before = serde_json::to_value(value).ok();
-        let converted: Option<B> = before
+        let mut converted: Option<B> = before
             .clone()
             .and_then(|value| serde_json::from_value(value).ok());
-        // Serde drops what the destination does not model, so parsing
-        // is no proof the value crossed whole. Compare what each side
-        // spells, and say what did not make it.
+        // `common::extensions` preserves unclaimed keys, so any source
+        // field that `B` does not model lands in `B`'s `extensions`.
+        // Strip non-`x-` keys there so we neither leak them into the
+        // converted object nor hide that `B` had no home for them.
+        if let Some(converted) = converted.as_mut() {
+            crate::common::extensions::retain_extensions_only(converted.extensions_mut());
+        }
+        // Compare what each side spells, and say what did not make it.
         if let (Some(serde_json::Value::Object(before)), Some(converted)) =
             (before, converted.as_ref())
             && let Ok(serde_json::Value::Object(after)) = serde_json::to_value(converted)
@@ -1741,11 +1808,45 @@ impl Conversion {
     }
 }
 
+trait HasExtensions {
+    fn extensions_mut(&mut self) -> &mut Option<BTreeMap<String, serde_json::Value>>;
+}
+
+macro_rules! impl_has_extensions {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl HasExtensions for $ty {
+                fn extensions_mut(&mut self) -> &mut Option<BTreeMap<String, serde_json::Value>> {
+                    &mut self.extensions
+                }
+            }
+        )+
+    };
+}
+
+impl_has_extensions!(
+    v3_0::Contact,
+    v3_0::License,
+    v3_0::ServerVariable,
+    v3_0::CorrelationId,
+    v3_0::MessageExample,
+);
+
+#[cfg(test)]
+impl_has_extensions!(v3_0::Message);
+
+fn strip_unknown(
+    mut extensions: Option<BTreeMap<String, serde_json::Value>>,
+) -> Option<BTreeMap<String, serde_json::Value>> {
+    crate::common::extensions::retain_extensions_only(&mut extensions);
+    extensions
+}
+
 fn external_documentation(docs: v2_6::ExternalDocumentation) -> v3_0::ExternalDocumentation {
     v3_0::ExternalDocumentation {
         url: docs.url,
         description: docs.description,
-        extensions: docs.extensions,
+        extensions: strip_unknown(docs.extensions),
     }
 }
 
@@ -1865,7 +1966,8 @@ fn flatten(message: Option<v2_6::OperationMessage>) -> Messages {
             v2_6::OperationMessage::Single(message) => {
                 found.entries.push((within.to_owned(), *message));
             }
-            v2_6::OperationMessage::OneOf(one_of) => {
+            v2_6::OperationMessage::OneOf(mut one_of) => {
+                crate::common::extensions::retain_extensions_only(&mut one_of.extensions);
                 if let Some(extensions) = one_of.extensions {
                     found.containers.push((within.to_owned(), extensions));
                 }

@@ -125,6 +125,7 @@ impl ValidateWithContext for Server {
         if let Some(bindings) = &self.bindings {
             ctx.in_field("bindings", |ctx| bindings.validate_with_context(ctx));
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -190,6 +191,7 @@ impl ValidateWithContext for ServerVariable {
                 format!("`{default}` is not one of the values listed in `enum`"),
             );
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

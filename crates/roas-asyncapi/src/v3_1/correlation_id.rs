@@ -38,6 +38,7 @@ impl ValidateWithContext for CorrelationId {
                 ),
             );
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

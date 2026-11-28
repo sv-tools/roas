@@ -664,6 +664,7 @@ impl Document {
                 components.validate_with_context(ctx);
             });
         }
+        ctx.validate_unknown_fields(&self.extensions);
 
         ctx.into_result()
     }

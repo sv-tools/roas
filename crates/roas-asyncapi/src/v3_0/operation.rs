@@ -113,6 +113,7 @@ impl ValidateWithContext for Operation {
         if let Some(bindings) = &self.bindings {
             ctx.in_field("bindings", |ctx| bindings.validate_with_context(ctx));
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -164,6 +165,7 @@ impl ValidateWithContext for OperationTrait {
         if let Some(bindings) = &self.bindings {
             ctx.in_field("bindings", |ctx| bindings.validate_with_context(ctx));
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -206,6 +208,7 @@ impl ValidateWithContext for OperationReply {
         if !self.messages.is_empty() && self.channel.is_none() {
             ctx.error_field("channel", "is required when `messages` is set");
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -241,6 +244,7 @@ impl ValidateWithContext for OperationReplyAddress {
                 ),
             );
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

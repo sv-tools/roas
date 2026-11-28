@@ -229,6 +229,7 @@ impl ValidateWithContext for SecurityScheme {
             },
             _ => {}
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -297,6 +298,7 @@ impl ValidateWithContext for OAuthFlows {
                 flow.validate_grant(ctx, field, required, forbidden)
             });
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -363,6 +365,7 @@ impl OAuthFlow {
                 format!("is required for the `{grant}` flow"),
             );
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

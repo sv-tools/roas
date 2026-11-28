@@ -451,8 +451,9 @@ fn role_of(path: &[String]) -> Option<Role<'_>> {
 /// nowhere is [`Missing`].
 ///
 /// The `T` check is deliberately a shape check, not an equality one:
-/// these models drop unknown non-`x-` keys and normalize numbers, so
-/// demanding an exact round-trip would reject legitimate targets.
+/// these models normalize numbers and keep unknown keys alongside
+/// `x-` extensions, so demanding an exact round-trip would reject
+/// legitimate targets.
 ///
 /// [`WrongKind`]: Resolution::WrongKind
 /// [`Opaque`]: Resolution::Opaque

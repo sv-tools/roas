@@ -121,6 +121,7 @@ impl ValidateWithContext for MultiFormatSchema {
         if let Some(format) = &self.schema_format {
             ctx.require_non_empty("schemaFormat", format);
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -452,7 +453,10 @@ pub struct Schema {
     #[serde(rename = "writeOnly", skip_serializing_if = "Option::is_none")]
     pub write_only: Option<bool>,
 
-    /// `x-`-prefixed Specification Extensions.
+    /// `x-`-prefixed Specification Extensions and any additional JSON
+    /// Schema keywords not modeled as typed fields. Preserved on
+    /// round-trip and exempt from unknown-field validation (JSON Schema
+    /// allows arbitrary annotation and extension keywords).
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]

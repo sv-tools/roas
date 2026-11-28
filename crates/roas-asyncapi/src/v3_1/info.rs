@@ -69,6 +69,7 @@ impl ValidateWithContext for Info {
         if let Some(docs) = &self.external_docs {
             ctx.in_field("externalDocs", |ctx| docs.validate_with_context(ctx));
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -101,6 +102,7 @@ impl ValidateWithContext for Contact {
         {
             ctx.error_field("email", "must be an email address");
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -124,6 +126,7 @@ pub struct License {
 impl ValidateWithContext for License {
     fn validate_with_context(&self, ctx: &mut Context) {
         ctx.require_non_empty("name", &self.name);
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

@@ -128,6 +128,7 @@ impl ValidateWithContext for Message {
         for (i, message_trait) in self.traits.iter().enumerate() {
             ctx.in_index("traits", i, |ctx| message_trait.validate_with_context(ctx));
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -204,6 +205,7 @@ impl ValidateWithContext for MessageTrait {
         for (i, example) in self.examples.iter().enumerate() {
             ctx.in_index("examples", i, |ctx| example.validate_with_context(ctx));
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
@@ -247,6 +249,7 @@ impl ValidateWithContext for MessageExample {
         if self.headers.is_none() && self.payload.is_none() {
             ctx.error("must define `headers` and/or `payload`");
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 

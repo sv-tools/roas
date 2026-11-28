@@ -53,6 +53,7 @@ impl ValidateWithContext for Parameter {
         if let Some(schema) = &self.schema {
             ctx.in_field("schema", |ctx| schema.validate_with_context(ctx));
         }
+        ctx.validate_unknown_fields(&self.extensions);
     }
 }
 
